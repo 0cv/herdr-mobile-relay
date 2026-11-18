@@ -12,45 +12,33 @@ import (
 )
 
 func (s *Server) validateUploadTarget(target protocol.TargetRef) error {
-	if target.ServerSessionID != "primary" {
-		return &upload.Error{Code: "upload_scope_mismatch"}
-	}
 	agent, exists := s.state.Agent(target.PaneID)
-	if !exists || agent.TerminalID != target.TerminalID || agent.Generation != target.Generation ||
-		target.AgentSessionID != agent.SessionID {
+	if !exists || !targetMatchesAgent(target, agent) {
 		return &upload.Error{Code: "upload_scope_mismatch"}
 	}
 	return nil
 }
-func (s *Server) expandPromptAttachmentReferences(action string, message map[string]any, target *protocol.TargetRef) error {
-	switch action {
-	case "send_text", "submit_prompt":
-	default:
-		return nil
+func (s *Server) expandPromptAttachmentReferences(action string, inbound protocol.Inbound) (protocol.Inbound, error) {
+	if action != "submit_prompt" || !strings.Contains(inbound.Text, "Attachment: ") {
+		return inbound, nil
 	}
-	for _, field := range []string{"text", "prompt"} {
-		value, ok := message[field].(string)
-		if !ok || !strings.Contains(value, "Attachment: ") {
+	lines := strings.Split(inbound.Text, "\n")
+	for index, line := range lines {
+		ref, found := strings.CutPrefix(strings.TrimSpace(line), "Attachment: ")
+		if !found || !validAttachmentReference(ref) {
 			continue
 		}
-		lines := strings.Split(value, "\n")
-		for index, line := range lines {
-			ref, found := strings.CutPrefix(strings.TrimSpace(line), "Attachment: ")
-			if !found || !validAttachmentReference(ref) {
-				continue
-			}
-			if target == nil || s.uploadM == nil {
-				return &upload.Error{Code: "attachment_reference_invalid"}
-			}
-			attachment, err := s.uploadM.Resolve(*target, ref)
-			if err != nil {
-				return &upload.Error{Code: "attachment_reference_invalid"}
-			}
-			lines[index] = "Attachment: " + attachment.Path
+		if inbound.Target == nil || s.uploadM == nil {
+			return inbound, &upload.Error{Code: "attachment_reference_invalid"}
 		}
-		message[field] = strings.Join(lines, "\n")
+		attachment, err := s.uploadM.Resolve(*inbound.Target, ref)
+		if err != nil {
+			return inbound, &upload.Error{Code: "attachment_reference_invalid"}
+		}
+		lines[index] = "Attachment: " + attachment.Path
 	}
-	return nil
+	inbound.Text = strings.Join(lines, "\n")
+	return inbound, nil
 }
 
 func validAttachmentReference(value string) bool {
@@ -69,18 +57,18 @@ func validAttachmentReference(value string) bool {
 	return true
 }
 
-func (s *Server) handleUploadBegin(client *transport.ClientConn, requestID string, message map[string]any) {
+func (s *Server) handleUploadBegin(client *transport.ClientConn, inbound protocol.Inbound) {
 	var request upload.BeginRequest
-	if err := decodeUploadRequest(message, &request); err != nil {
-		s.sendUploadError(client, message, requestID, "upload_begin_result", err)
+	if err := json.Unmarshal(inbound.Raw, &request); err != nil {
+		s.sendUploadError(client, inbound, "upload_begin_result", err)
 		return
 	}
 	if err := s.validateUploadTarget(request.Target); err != nil {
-		s.sendUploadError(client, message, requestID, "upload_begin_result", err)
+		s.sendUploadError(client, inbound, "upload_begin_result", err)
 		return
 	}
 	if s.uploadM == nil {
-		s.sendUploadError(client, message, requestID, "upload_begin_result", errors.New("upload_unavailable"))
+		s.sendUploadError(client, inbound, "upload_begin_result", errors.New("upload_unavailable"))
 		return
 	}
 	if identity, authenticated := client.Identity(); authenticated {
@@ -90,57 +78,57 @@ func (s *Server) handleUploadBegin(client *transport.ClientConn, requestID strin
 	}
 	result, err := s.uploadM.Begin(request)
 	if err != nil {
-		s.sendUploadError(client, message, requestID, "upload_begin_result", err)
+		s.sendUploadError(client, inbound, "upload_begin_result", err)
 		return
 	}
-	s.sendUploadResult(client, message, requestID, "upload_begin_result", result)
+	s.sendUploadResult(client, inbound, "upload_begin_result", result)
 }
 
-func (s *Server) handleUploadChunk(client *transport.ClientConn, requestID string, message map[string]any) {
+func (s *Server) handleUploadChunk(client *transport.ClientConn, inbound protocol.Inbound) {
 	var request upload.ChunkRequest
-	if err := decodeUploadRequest(message, &request); err != nil {
-		s.sendUploadError(client, message, requestID, "upload_chunk_result", err)
+	if err := json.Unmarshal(inbound.Raw, &request); err != nil {
+		s.sendUploadError(client, inbound, "upload_chunk_result", err)
 		return
 	}
 	if err := s.validateUploadTarget(request.Target); err != nil {
 		if s.uploadM != nil {
 			_ = s.uploadM.Cancel(request.Target, request.UploadID)
 		}
-		s.sendUploadError(client, message, requestID, "upload_chunk_result", err)
+		s.sendUploadError(client, inbound, "upload_chunk_result", err)
 		return
 	}
 	if s.uploadM == nil {
-		s.sendUploadError(client, message, requestID, "upload_chunk_result", errors.New("upload_unavailable"))
+		s.sendUploadError(client, inbound, "upload_chunk_result", errors.New("upload_unavailable"))
 		return
 	}
 	result, err := s.uploadM.Chunk(request)
 	if err != nil {
-		s.sendUploadError(client, message, requestID, "upload_chunk_result", err)
+		s.sendUploadError(client, inbound, "upload_chunk_result", err)
 		return
 	}
-	s.sendUploadResult(client, message, requestID, "upload_chunk_result", result)
+	s.sendUploadResult(client, inbound, "upload_chunk_result", result)
 }
 
-func (s *Server) handleUploadFinish(client *transport.ClientConn, requestID string, message map[string]any) {
+func (s *Server) handleUploadFinish(client *transport.ClientConn, inbound protocol.Inbound) {
 	var request upload.FinishRequest
-	if err := decodeUploadRequest(message, &request); err != nil {
-		s.sendUploadError(client, message, requestID, "upload_finish_result", err)
+	if err := json.Unmarshal(inbound.Raw, &request); err != nil {
+		s.sendUploadError(client, inbound, "upload_finish_result", err)
 		return
 	}
 	if err := s.validateUploadTarget(request.Target); err != nil {
 		if s.uploadM != nil {
 			_ = s.uploadM.Cancel(request.Target, request.UploadID)
 		}
-		s.sendUploadError(client, message, requestID, "upload_finish_result", err)
+		s.sendUploadError(client, inbound, "upload_finish_result", err)
 		return
 	}
 	if s.uploadM == nil {
-		s.sendUploadError(client, message, requestID, "upload_finish_result", errors.New("upload_unavailable"))
+		s.sendUploadError(client, inbound, "upload_finish_result", errors.New("upload_unavailable"))
 		return
 	}
 	result, err := s.uploadM.Finish(request)
 	if err != nil {
-		s.sendUploadError(client, message, requestID, "upload_finish_result", err)
+		s.sendUploadError(client, inbound, "upload_finish_result", err)
 		return
 	}
 	if s.dispatcher != nil {
@@ -148,58 +136,48 @@ func (s *Server) handleUploadFinish(client *transport.ClientConn, requestID stri
 		if len(result.Attachments) == 1 {
 			summary = "Attached " + result.Attachments[0].Name
 		}
-		s.dispatcher.RecordActivity("upload", "completed", summary, request.Target.PaneID, requestID)
+		s.dispatcher.RecordActivity("upload", "completed", summary, request.Target.PaneID, inbound.RequestID)
 	}
-	s.sendUploadResult(client, message, requestID, "upload_finish_result", result)
+	s.sendUploadResult(client, inbound, "upload_finish_result", result)
 }
 
-func (s *Server) handleUploadCancel(client *transport.ClientConn, requestID string, message map[string]any) {
+func (s *Server) handleUploadCancel(client *transport.ClientConn, inbound protocol.Inbound) {
 	var request struct {
 		Target   protocol.TargetRef `json:"target"`
 		UploadID string             `json:"upload_id"`
 	}
-	if err := decodeUploadRequest(message, &request); err != nil {
-		s.sendUploadError(client, message, requestID, "upload_cancel_result", err)
+	if err := json.Unmarshal(inbound.Raw, &request); err != nil {
+		s.sendUploadError(client, inbound, "upload_cancel_result", err)
 		return
 	}
 	if s.uploadM == nil {
-		s.sendUploadError(client, message, requestID, "upload_cancel_result", errors.New("upload_unavailable"))
+		s.sendUploadError(client, inbound, "upload_cancel_result", errors.New("upload_unavailable"))
 		return
 	}
 	if err := s.uploadM.Cancel(request.Target, request.UploadID); err != nil {
-		s.sendUploadError(client, message, requestID, "upload_cancel_result", err)
+		s.sendUploadError(client, inbound, "upload_cancel_result", err)
 		return
 	}
-	s.sendUploadResult(client, message, requestID, "upload_cancel_result", struct{}{})
+	s.sendUploadResult(client, inbound, "upload_cancel_result", struct{}{})
 }
 
-func decodeUploadRequest(message map[string]any, destination any) error {
-	encoded, err := json.Marshal(message)
-	if err != nil {
-		return err
-	}
-	if err := json.Unmarshal(encoded, destination); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (s *Server) sendUploadResult(client *transport.ClientConn, message map[string]any, requestID, messageType string, result any) {
-	s.recordWriteAudit(client, message, &coordinator.CommandResult{
-		RequestID: requestID,
-		Action:    strings.TrimSuffix(messageType, "_result"),
+func (s *Server) sendUploadResult(client *transport.ClientConn, inbound protocol.Inbound, messageType string, result any) {
+	action := strings.TrimSuffix(messageType, "_result")
+	s.recordWriteAudit(client, inbound, &coordinator.CommandResult{
+		RequestID: inbound.RequestID,
+		Action:    action,
 		OK:        true,
 		Phase:     "completed",
 		Data:      result,
 	})
 	s.hub.Send(client, map[string]any{
 		"type":       messageType,
-		"request_id": requestID,
+		"request_id": inbound.RequestID,
 		"result":     result,
 	})
 }
 
-func (s *Server) sendUploadError(client *transport.ClientConn, message map[string]any, requestID, messageType string, cause error) {
+func (s *Server) sendUploadError(client *transport.ClientConn, inbound protocol.Inbound, messageType string, cause error) {
 	code := "attachment_upload_failed"
 	var args map[string]any
 	var uploadError *upload.Error
@@ -209,16 +187,17 @@ func (s *Server) sendUploadError(client *transport.ClientConn, message map[strin
 	} else if cause != nil && cause.Error() == "upload_unavailable" {
 		code = "attachment_upload_unavailable"
 	}
-	s.recordWriteAudit(client, message, &coordinator.CommandResult{
-		RequestID: requestID,
-		Action:    strings.TrimSuffix(messageType, "_result"),
+	action := strings.TrimSuffix(messageType, "_result")
+	s.recordWriteAudit(client, inbound, &coordinator.CommandResult{
+		RequestID: inbound.RequestID,
+		Action:    action,
 		OK:        false,
 		Phase:     "failed",
 		Error:     code,
 	})
 	s.hub.Send(client, map[string]any{
 		"type":       messageType,
-		"request_id": requestID,
+		"request_id": inbound.RequestID,
 		"error":      protocol.NewApiError(code, args),
 	})
 }

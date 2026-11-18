@@ -8,13 +8,13 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/0cv/herdr-mobile-relay/internal/atomicfile"
 )
 
 const (
@@ -30,18 +30,6 @@ func (t MilliTimestamp) MarshalJSON() ([]byte, error) {
 }
 
 func (t *MilliTimestamp) UnmarshalJSON(data []byte) error {
-	if len(data) > 0 && data[0] == '"' {
-		var s string
-		if err := json.Unmarshal(data, &s); err != nil {
-			return err
-		}
-		parsed, err := time.Parse(time.RFC3339, s)
-		if err != nil {
-			return err
-		}
-		*t = MilliTimestamp(parsed.UnixMilli())
-		return nil
-	}
 	var n int64
 	if err := json.Unmarshal(data, &n); err != nil {
 		return err
@@ -69,12 +57,10 @@ type Entry struct {
 var entryIDSequence atomic.Uint64
 
 type Journal struct {
-	mu            sync.RWMutex
-	entries       []Entry
-	path          string
-	tombstonePath string
-	dir           string
-	bytes         int64
+	mu      sync.RWMutex
+	entries []Entry
+	path    string
+	dir     string
 }
 
 func OpenJournal(cacheDir string) (*Journal, error) {
@@ -85,9 +71,8 @@ func OpenJournal(cacheDir string) (*Journal, error) {
 		return nil, fmt.Errorf("protect activity directory: %w", err)
 	}
 	journal := &Journal{
-		path:          filepath.Join(cacheDir, "activity.jsonl"),
-		tombstonePath: filepath.Join(cacheDir, "activity.tombstones"),
-		dir:           cacheDir,
+		path: filepath.Join(cacheDir, "activity.jsonl"),
+		dir:  cacheDir,
 	}
 	if err := journal.load(); err != nil {
 		return nil, err
@@ -96,17 +81,8 @@ func OpenJournal(cacheDir string) (*Journal, error) {
 }
 
 func (j *Journal) load() error {
-	tombstones, err := j.loadTombstones()
-	if err != nil {
-		return err
-	}
 	file, err := os.Open(j.path)
 	if errors.Is(err, os.ErrNotExist) {
-		if len(tombstones) > 0 {
-			if err := j.writeTombstonesLocked(nil); err != nil {
-				return fmt.Errorf("clean orphaned activity tombstones: %w", err)
-			}
-		}
 		return nil
 	}
 	if err != nil {
@@ -123,7 +99,7 @@ func (j *Journal) load() error {
 	scanner := bufio.NewScanner(io.LimitReader(file, maxBytes*4+1))
 	scanner.Buffer(make([]byte, 64*1024), maxBytes)
 	var entries []Entry
-	needsCompact := len(tombstones) > 0 || info.Size() > maxBytes
+	needsCompact := info.Size() > maxBytes
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {
@@ -133,13 +109,11 @@ func (j *Journal) load() error {
 		if err := json.Unmarshal(line, &entry); err != nil {
 			continue
 		}
-		if _, discarded := tombstones[entry.ID]; !discarded {
-			normalized := NormalizeEntry(entry)
-			if normalized.Extract != entry.Extract {
-				needsCompact = true
-			}
-			entries = append(entries, normalized)
+		normalized := NormalizeEntry(entry)
+		if normalized.Extract != entry.Extract {
+			needsCompact = true
 		}
+		entries = append(entries, normalized)
 	}
 	if err := scanner.Err(); err != nil {
 		return fmt.Errorf("scan activity journal: %w", err)
@@ -152,15 +126,9 @@ func (j *Journal) load() error {
 		needsCompact = true
 	}
 	j.entries = retained
-	j.bytes = retainedBytes
 	if needsCompact {
 		if err := j.compactLocked(); err != nil {
 			return fmt.Errorf("compact activity journal: %w", err)
-		}
-	}
-	if len(tombstones) > 0 {
-		if err := j.writeTombstonesLocked(nil); err != nil {
-			return fmt.Errorf("clean recovered activity tombstones: %w", err)
 		}
 	}
 	return nil
@@ -208,7 +176,6 @@ func (j *Journal) Append(entry Entry) error {
 		return closeErr
 	}
 	j.entries = append(j.entries, entry)
-	j.bytes += int64(len(data))
 	return nil
 }
 
@@ -256,36 +223,14 @@ func retainWithinLimits(entries []Entry) ([]Entry, int64, error) {
 func (j *Journal) Clear() error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-
-	previousTombstones, err := j.loadTombstones()
-	if err != nil {
-		return err
-	}
-	clearTombstones := cloneSet(previousTombstones)
-	for _, entry := range j.entries {
-		if entry.ID != "" {
-			clearTombstones[entry.ID] = struct{}{}
-		}
-	}
-	if err := j.writeTombstonesLocked(clearTombstones); err != nil {
-		return fmt.Errorf("prepare activity clear: %w", err)
-	}
 	if err := j.compactEntriesLocked(nil); err != nil {
-		restoreErr := j.writeTombstonesLocked(previousTombstones)
-		if restoreErr != nil {
-			return errors.Join(fmt.Errorf("clear activity journal: %w", err), fmt.Errorf("restore activity tombstones: %w", restoreErr))
-		}
 		return fmt.Errorf("clear activity journal: %w", err)
 	}
-	// The journal is durably empty. A leftover tombstone file is harmless and
-	// will be cleaned during the next OpenJournal recovery.
-	_ = j.writeTombstonesLocked(previousTombstones)
 	return nil
 }
 
 // Discard durably removes a committed entry that became stale before it could
-// be published. The write-ahead tombstone closes the crash window between
-// deciding to discard and rewriting the JSONL journal.
+// be published.
 func (j *Journal) Discard(id string) error {
 	if id == "" {
 		return nil
@@ -305,23 +250,9 @@ func (j *Journal) Discard(id string) error {
 	if !found {
 		return nil
 	}
-	previousTombstones, err := j.loadTombstones()
-	if err != nil {
-		return err
-	}
-	discardTombstones := cloneSet(previousTombstones)
-	discardTombstones[id] = struct{}{}
-	if err := j.writeTombstonesLocked(discardTombstones); err != nil {
-		return fmt.Errorf("prepare stale activity discard: %w", err)
-	}
 	if err := j.compactEntriesLocked(retained); err != nil {
-		restoreErr := j.writeTombstonesLocked(previousTombstones)
-		if restoreErr != nil {
-			return errors.Join(fmt.Errorf("discard stale activity: %w", err), fmt.Errorf("restore activity tombstones: %w", restoreErr))
-		}
 		return fmt.Errorf("discard stale activity: %w", err)
 	}
-	_ = j.writeTombstonesLocked(previousTombstones)
 	return nil
 }
 
@@ -330,155 +261,24 @@ func (j *Journal) compactLocked() error {
 }
 
 func (j *Journal) compactEntriesLocked(entries []Entry) error {
-	temp, err := os.CreateTemp(j.dir, ".activity.jsonl.*.tmp")
-	if err != nil {
-		return err
-	}
-	tempPath := temp.Name()
-	defer os.Remove(tempPath)
-	if err := temp.Chmod(0o600); err != nil {
-		_ = temp.Close()
-		return err
-	}
-	var bytesWritten int64
+	var data []byte
 	for _, entry := range entries {
-		data, err := encodeEntry(entry)
+		line, err := encodeEntry(entry)
 		if err != nil {
-			_ = temp.Close()
 			return err
 		}
-		written, err := temp.Write(data)
-		if err != nil {
-			_ = temp.Close()
-			return err
-		}
-		if written != len(data) {
-			_ = temp.Close()
-			return io.ErrShortWrite
-		}
-		bytesWritten += int64(written)
+		data = append(data, line...)
 	}
-	if err := temp.Sync(); err != nil {
-		_ = temp.Close()
-		return err
-	}
-	if err := temp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tempPath, j.path); err != nil {
-		return err
-	}
-	if err := syncDirectory(j.dir); err != nil {
+	outcome, err := atomicfile.Replace(j.dir, j.path, ".activity.jsonl.*.tmp", data, 0o600)
+	if err != nil && !(outcome == atomicfile.Renamed && unsupportedDirectorySync(err)) {
 		return err
 	}
 	j.entries = append([]Entry(nil), entries...)
-	j.bytes = bytesWritten
 	return nil
 }
 
-func (j *Journal) loadTombstones() (map[string]struct{}, error) {
-	tombstones := make(map[string]struct{})
-	file, err := os.Open(j.tombstonePath)
-	if errors.Is(err, os.ErrNotExist) {
-		return tombstones, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("read activity tombstones: %w", err)
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if info.Size() > maxBytes {
-		return nil, fmt.Errorf("activity tombstones are corrupt or oversized: %d bytes", info.Size())
-	}
-	if err := file.Chmod(0o600); err != nil {
-		return nil, fmt.Errorf("protect activity tombstones: %w", err)
-	}
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 1024), maxBytes)
-	for scanner.Scan() {
-		if id := strings.TrimSpace(scanner.Text()); id != "" {
-			tombstones[id] = struct{}{}
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("scan activity tombstones: %w", err)
-	}
-	return tombstones, nil
-}
-
-func (j *Journal) writeTombstonesLocked(tombstones map[string]struct{}) error {
-	if len(tombstones) == 0 {
-		err := os.Remove(j.tombstonePath)
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		return syncDirectory(j.dir)
-	}
-
-	ids := make([]string, 0, len(tombstones))
-	for id := range tombstones {
-		if strings.TrimSpace(id) != "" {
-			ids = append(ids, id)
-		}
-	}
-	sort.Strings(ids)
-	temp, err := os.CreateTemp(j.dir, ".activity.tombstones.*.tmp")
-	if err != nil {
-		return err
-	}
-	tempPath := temp.Name()
-	defer os.Remove(tempPath)
-	if err := temp.Chmod(0o600); err != nil {
-		_ = temp.Close()
-		return err
-	}
-	for _, id := range ids {
-		line := id + "\n"
-		written, err := io.WriteString(temp, line)
-		if err != nil {
-			_ = temp.Close()
-			return err
-		}
-		if written != len(line) {
-			_ = temp.Close()
-			return io.ErrShortWrite
-		}
-	}
-	if err := temp.Sync(); err != nil {
-		_ = temp.Close()
-		return err
-	}
-	if err := temp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tempPath, j.tombstonePath); err != nil {
-		return err
-	}
-	return syncDirectory(j.dir)
-}
-
-func cloneSet(values map[string]struct{}) map[string]struct{} {
-	result := make(map[string]struct{}, len(values))
-	for value := range values {
-		result[value] = struct{}{}
-	}
-	return result
-}
-
-func syncDirectory(path string) error {
-	directory, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer directory.Close()
-	err = directory.Sync()
-	if errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOTSUP) || errors.Is(err, syscall.ENOSYS) {
-		return nil
-	}
-	return err
+func unsupportedDirectorySync(err error) bool {
+	return errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOTSUP) || errors.Is(err, syscall.ENOSYS)
 }
 
 func (j *Journal) Recent(limit int) []Entry {

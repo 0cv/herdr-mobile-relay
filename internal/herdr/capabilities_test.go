@@ -406,3 +406,19 @@ func recordingCapabilitySocket(
 	}
 	return listener.Addr().String(), listener, done, recorded
 }
+
+func (c *Client) RefreshCapabilities(ctx context.Context) ServerStatus {
+	return c.capabilities.refresh(ctx)
+}
+
+func (c *Client) SupportsWorkspaceMoveBlock() bool {
+	return c.CapabilityStatus().Supports(FeatureWorkspaceMoveBlock)
+}
+
+func (c *Client) SupportsPaneRead() bool {
+	return c.CapabilityStatus().Supports(FeaturePaneRead)
+}
+
+func (c *Client) noteFeatureSupported(name, reason string) {
+	c.capabilities.updateFeature(name, FeatureSupported, reason)
+}

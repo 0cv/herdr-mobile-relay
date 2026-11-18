@@ -2,102 +2,85 @@ package piintegration
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"syscall"
 	"testing"
 )
 
-func TestShellRefusalContract(t *testing.T) {
+func TestRefusalCases(t *testing.T) {
 	for _, kind := range []string{"extensions", "target", "index.ts", "bridge.mjs", "activity.mjs", ".relay-owned", "unowned", "wrong marker", "directory file"} {
 		t.Run(kind, func(t *testing.T) {
-			shell, _ := filepath.Abs("../../relay/pi-commands.sh")
-			for _, implementation := range []string{"go", "shell"} {
-				dir, outside := t.TempDir(), t.TempDir()
-				put(t, filepath.Join(outside, "untouched"), "keep")
-				m := New(bundle(t), func() []string { return []string{dir} })
-				m.Set(true)
-				path := filepath.Join(target(dir), kind)
-				switch kind {
-				case "extensions":
-					path = filepath.Join(dir, "extensions")
-				case "target":
-					path = target(dir)
-				case "unowned", "wrong marker":
-					path = filepath.Join(target(dir), ".relay-owned")
-				case "directory file":
-					path = filepath.Join(target(dir), "index.ts")
-				}
-				if err := os.RemoveAll(path); err != nil {
+			dir, outside := t.TempDir(), t.TempDir()
+			put(t, filepath.Join(outside, "untouched"), "keep")
+			m := New(bundle(t), func() []string { return []string{dir} })
+			m.Set(true)
+			path := filepath.Join(target(dir), kind)
+			switch kind {
+			case "extensions":
+				path = filepath.Join(dir, "extensions")
+			case "target":
+				path = target(dir)
+			case "unowned", "wrong marker":
+				path = filepath.Join(target(dir), ".relay-owned")
+			case "directory file":
+				path = filepath.Join(target(dir), "index.ts")
+			}
+			if err := os.RemoveAll(path); err != nil {
+				t.Fatal(err)
+			}
+			switch kind {
+			case "unowned":
+			case "wrong marker":
+				put(t, path, "someone else")
+			case "directory file":
+				if err := os.Mkdir(path, 0700); err != nil {
 					t.Fatal(err)
 				}
-				switch kind {
-				case "unowned":
-				case "wrong marker":
-					put(t, path, "someone else")
-				case "directory file":
-					if err := os.Mkdir(path, 0700); err != nil {
-						t.Fatal(err)
-					}
-				default:
-					destination := filepath.Join(outside, "untouched")
-					if kind == "extensions" || kind == "target" {
-						destination = outside
-					}
-					if err := os.Symlink(destination, path); err != nil {
-						t.Fatal(err)
-					}
+			default:
+				destination := filepath.Join(outside, "untouched")
+				if kind == "extensions" || kind == "target" {
+					destination = outside
 				}
-				for _, action := range []string{"install", "remove"} {
-					if implementation == "go" {
-						if m.apply(action).Profiles[0].Status != "refused" {
-							t.Fatal("Go accepted", kind, action)
-						}
-					} else if out, err := exec.Command("/bin/bash", "--noprofile", "--norc", shell, action, dir).CombinedOutput(); err == nil {
-						t.Fatalf("shell accepted %s %s: %s", kind, action, out)
-					}
+				if err := os.Symlink(destination, path); err != nil {
+					t.Fatal(err)
 				}
-				bytes, _ := os.ReadFile(filepath.Join(outside, "untouched"))
-				if string(bytes) != "keep" {
-					t.Fatal("changed symlink destination")
+			}
+			for _, action := range []string{"install", "remove"} {
+				if m.apply(action).Profiles[0].Status != "refused" {
+					t.Fatal("accepted", kind, action)
 				}
+			}
+			bytes, _ := os.ReadFile(filepath.Join(outside, "untouched"))
+			if string(bytes) != "keep" {
+				t.Fatal("changed symlink destination")
 			}
 		})
 	}
 }
 
 func TestSpecialFilesAreRefusedWithoutBlocking(t *testing.T) {
-	for _, implementation := range []string{"go", "shell"} {
-		for _, name := range Files {
-			t.Run(implementation+"/"+name, func(t *testing.T) {
-				dir := t.TempDir()
-				m := New(bundle(t), func() []string { return []string{dir} })
-				m.Set(true)
-				file := filepath.Join(target(dir), name)
-				if err := os.Remove(file); err != nil {
-					t.Fatal(err)
+	for _, name := range Files {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			m := New(bundle(t), func() []string { return []string{dir} })
+			m.Set(true)
+			file := filepath.Join(target(dir), name)
+			if err := os.Remove(file); err != nil {
+				t.Fatal(err)
+			}
+			if err := syscall.Mkfifo(file, 0600); err != nil {
+				t.Fatal(err)
+			}
+			for _, action := range []string{"install", "remove"} {
+				if m.apply(action).Profiles[0].Status != "refused" {
+					t.Fatal("accepted special file", action)
 				}
-				if err := syscall.Mkfifo(file, 0600); err != nil {
-					t.Fatal(err)
-				}
-				for _, action := range []string{"install", "remove"} {
-					if implementation == "go" {
-						if m.apply(action).Profiles[0].Status != "refused" {
-							t.Fatal("accepted special file", action)
-						}
-						continue
-					}
-					shell, _ := filepath.Abs("../../relay/pi-commands.sh")
-					if out, err := exec.Command("/bin/bash", "--noprofile", "--norc", shell, action, dir).CombinedOutput(); err == nil {
-						t.Fatalf("shell accepted special file: %s", out)
-					}
-				}
-				info, err := os.Lstat(file)
-				if err != nil || info.Mode()&os.ModeNamedPipe == 0 {
-					t.Fatal("special file changed", err)
-				}
-			})
-		}
+			}
+			info, err := os.Lstat(file)
+			if err != nil || info.Mode()&os.ModeNamedPipe == 0 {
+				t.Fatal("special file changed", err)
+			}
+		})
 	}
 }
 

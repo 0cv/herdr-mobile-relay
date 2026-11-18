@@ -104,6 +104,7 @@ func runJournalFixture(t *testing.T, testBinary, unit, marker, format, level str
 		"--property=RemainAfterExit=yes",
 		"--property=StandardOutput=journal",
 		"--property=StandardError=journal",
+		"--property=SyslogIdentifier=" + unit,
 		"--setenv=HERDR_JOURNAL_FIXTURE=1",
 		"--setenv=HERDR_JOURNAL_FIXTURE_MARKER=" + marker,
 		"--setenv=HERDR_RELAY_LOG_FORMAT=" + format,
@@ -135,8 +136,8 @@ func runJournalFixture(t *testing.T, testBinary, unit, marker, format, level str
 		marked := markedEntries(entries, marker)
 		if len(marked) >= wantMarked || time.Now().After(deadline) {
 			if len(marked) < wantMarked {
-				t.Logf("journal fixture incomplete: unit=%s format=%s level=%s serveError=%t wantMarked=%d marked=%d systemd-run-output=%q journal-entries=%s",
-					unit, format, level, serveError, wantMarked, len(marked), boundedJournalOutput(output), journalEntriesDiagnostic(entries))
+				t.Logf("journal fixture incomplete: unit=%s format=%s level=%s serveError=%t wantMarked=%d marked=%d systemd-run-output=%q journal-entries=%s marker-search=%s",
+					unit, format, level, serveError, wantMarked, len(marked), boundedJournalOutput(output), journalEntriesDiagnostic(entries), journalMarkerSearch(marker))
 			}
 			return entries
 		}
@@ -144,9 +145,11 @@ func runJournalFixture(t *testing.T, testBinary, unit, marker, format, level str
 	}
 }
 
+// journalEntries matches on the syslog identifier the fixture unit sets, not on the unit:
+// journald can lose the unit of lines whose process exited before they were read.
 func journalEntries(t *testing.T, unit string, extra ...string) []journalEntry {
 	t.Helper()
-	arguments := []string{"--user", "-u", unit, "--no-pager", "-o", "json"}
+	arguments := []string{"--user", "-t", unit, "--no-pager", "-o", "json"}
 	arguments = append(arguments, extra...)
 	output, err := runJournalCommand(5*time.Second, "journalctl", arguments...)
 	if err != nil {
@@ -261,6 +264,15 @@ func boundedJournalOutput(output []byte) string {
 		return string(output[:maxBytes]) + "...[truncated]"
 	}
 	return string(output)
+}
+
+func journalMarkerSearch(marker string) string {
+	output, err := runJournalCommand(5*time.Second, "journalctl", "--user", "--no-pager", "-g", marker, "-o", "json",
+		"--output-fields=MESSAGE,PRIORITY,SYSLOG_IDENTIFIER,_SYSTEMD_USER_UNIT,_UID,_PID")
+	if err != nil {
+		return fmt.Sprintf("unavailable: %v (%s)", err, boundedJournalOutput(output))
+	}
+	return boundedJournalOutput(output)
 }
 
 func journalEntriesDiagnostic(entries []journalEntry) string {

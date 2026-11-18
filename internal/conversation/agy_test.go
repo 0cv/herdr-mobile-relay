@@ -3,9 +3,9 @@ package conversation
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -71,7 +71,7 @@ type agyStep struct {
 	metadata []byte
 }
 
-func createAgyDatabase(t *testing.T, sqlite, database string, steps []agyStep) {
+func createAgyDatabase(t *testing.T, database string, steps []agyStep) {
 	t.Helper()
 	var sql strings.Builder
 	sql.WriteString("BEGIN;CREATE TABLE `steps` (`idx` integer,`step_type` integer NOT NULL DEFAULT 0,`status` integer NOT NULL DEFAULT 0,`metadata` blob,`step_payload` blob,PRIMARY KEY (`idx`));")
@@ -83,19 +83,11 @@ func createAgyDatabase(t *testing.T, sqlite, database string, steps []agyStep) {
 		fmt.Fprintf(&sql, "INSERT INTO steps(idx,step_type,status,metadata,step_payload) VALUES(%d,%d,3,X'%x',X'%x');", index, step.typ, metadata, step.payload)
 	}
 	sql.WriteString("COMMIT;")
-	command := exec.Command(sqlite, database)
-	command.Stdin = strings.NewReader(sql.String())
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("create agy database: %v: %s", err, output)
-	}
+	execTestSQL(t, database, sql.String())
 }
 
 func agyFixture(t *testing.T) (*Reader, string, string) {
 	t.Helper()
-	sqlite, err := exec.LookPath("sqlite3")
-	if err != nil {
-		t.Skip("sqlite3 is unavailable")
-	}
 	root := t.TempDir()
 	t.Setenv(agentroots.AgyListEnv, root)
 	// agentroots appends the conversations leaf to every configured base.
@@ -105,7 +97,7 @@ func agyFixture(t *testing.T) (*Reader, string, string) {
 	}
 	database := filepath.Join(conversations, agySessionID+".db")
 	call := [3]string{"call_1", "run_command", `{"CommandLine":"ls -la"}`}
-	createAgyDatabase(t, sqlite, database, []agyStep{
+	createAgyDatabase(t, database, []agyStep{
 		{typ: agyStepUser, payload: agyUserStep(1000, "check the gateway")},
 		{typ: agyStepAssistant, payload: agyAssistantStep(1001, "", call)},
 		{typ: agyStepToolDone, payload: agyToolDoneStep(1002, "call_1"), metadata: agyMeta(1002, "call_1")},
@@ -114,7 +106,6 @@ func agyFixture(t *testing.T) (*Reader, string, string) {
 		{typ: agyStepAssistant, payload: agyAssistantStep(1004, "Done.")},
 	})
 	reader := NewReader(t.TempDir())
-	reader.agy.binary = sqlite
 	return reader, database, agySessionID
 }
 
@@ -125,15 +116,15 @@ func TestAgyReaderProjectsConversation(t *testing.T) {
 			t.Fatalf("Supported(%q) = false", name)
 		}
 	}
-	page, err := reader.ReadFor("agy", t.TempDir(), session, "", 80)
-	if err != nil || !page.Available || page.SourceCorrupt {
+	page, err := reader.ReadLatest("agy", ProjectContext{CWD: t.TempDir()}, session, 80)
+	if err != nil {
 		t.Fatalf("page = %#v, err = %v", page, err)
 	}
-	if len(page.Entries) != 4 {
-		t.Fatalf("entries = %d, want 4 (tool-result and type 23 steps skipped): %#v", len(page.Entries), page.Entries)
+	if len(page) != 4 {
+		t.Fatalf("entries = %d, want 4 (tool-result and type 23 steps skipped): %#v", len(page), page)
 	}
-	user, firstCall, secondCall, final := page.Entries[0], page.Entries[1], page.Entries[2], page.Entries[3]
-	if user.Role != "user" || user.Text != "check the gateway" || user.ID != "0" || user.Timestamp == "" {
+	user, firstCall, secondCall, final := page[0], page[1], page[2], page[3]
+	if user.Role != "user" || user.Text != "check the gateway" || user.ID != "0" || user.Timestamp != "1970-01-01T00:16:40.0000005Z" {
 		t.Fatalf("user entry = %#v", user)
 	}
 	if len(firstCall.Tools) != 1 || firstCall.Tools[0].Name != "run_command" || firstCall.Tools[0].State != "completed" ||
@@ -143,47 +134,47 @@ func TestAgyReaderProjectsConversation(t *testing.T) {
 	if secondCall.Text != "It was the memory watchdog." || len(secondCall.Tools) != 1 || secondCall.Tools[0].State != "running" {
 		t.Fatalf("running tool entry = %#v", secondCall)
 	}
-	if final.Role != "assistant" || final.Text != "Done." || strings.Contains(final.Text, "private thinking") {
+	if final.Role != "assistant" || final.Text != "Done." || final.Timestamp != "1970-01-01T00:16:44.0000005Z" || strings.Contains(final.Text, "private thinking") {
 		t.Fatalf("final entry = %#v", final)
-	}
-}
-
-func TestAgyReaderPagesBackwardByStep(t *testing.T) {
-	reader, _, session := agyFixture(t)
-	latest, err := reader.ReadFor("agy", "", session, "", 2)
-	if err != nil || len(latest.Entries) != 2 || !latest.HasMore || latest.Entries[1].Text != "Done." {
-		t.Fatalf("latest = %#v, err = %v", latest, err)
-	}
-	older, err := reader.ReadFor("agy", "", session, latest.Entries[0].ID, 10)
-	if err != nil || older.HasMore || len(older.Entries) != 2 || older.Entries[0].Text != "check the gateway" {
-		t.Fatalf("older = %#v, err = %v", older, err)
-	}
-	bad, err := reader.ReadFor("agy", "", session, "nope", 10)
-	if err != nil || bad.Available || bad.ReasonCode != "invalid_cursor" {
-		t.Fatalf("bad cursor = %#v, err = %v", bad, err)
 	}
 }
 
 func TestAgyReaderRejectsUnsafeSessions(t *testing.T) {
 	reader, _, _ := agyFixture(t)
 	for _, session := range []string{"", "../etc/passwd", "not-a-uuid", "11111111-1111-1111-1111-111111111111"} {
-		page, err := reader.ReadFor("agy", "", session, "", 10)
-		if err != nil || page.Available || page.ReasonCode != "invalid_session" {
+		page, err := reader.ReadLatest("agy", ProjectContext{CWD: ""}, session, 10)
+		if !errors.Is(err, ErrUnavailable) {
 			t.Fatalf("session %q page = %#v, err = %v", session, page, err)
 		}
 	}
 }
 
-func TestAgyBrowserNativeCursorAndChangeToken(t *testing.T) {
-	reader, database, session := agyFixture(t)
-	browser, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
+func TestAgyBrowserRejectsUnsafeSessionsAndInvalidCursor(t *testing.T) {
+	reader, _, session := agyFixture(t)
+	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
+	for _, unsafe := range []string{"", "../etc/passwd", "not-a-uuid", "11111111-1111-1111-1111-111111111111"} {
+		page, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: BrowseScope{Provider: "agy", SessionID: unsafe}, Limit: 10})
+		if err != nil || page.Available || page.ReasonCode != "invalid_session" {
+			t.Fatalf("session %q page = %#v, err = %v", unsafe, page, err)
+		}
 	}
-	defer browser.Close()
 	scope := BrowseScope{Provider: "agy", SessionID: session}
 	latest, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 2})
-	if err != nil || latest.Mode != BrowseNative || len(latest.Entries) != 2 || !latest.HasMore || latest.NextCursor == "" {
+	if err != nil || latest.SourceRevision == "" {
+		t.Fatalf("latest = %#v, err = %v", latest, err)
+	}
+	bad, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Cursor: signedNativeCursor(t, browser, scope, latest.SourceRevision, "nope"), Limit: 10})
+	if err != nil || bad.State != BrowseFailed || bad.ReasonCode != "invalid_cursor" {
+		t.Fatalf("bad cursor = %#v, err = %v", bad, err)
+	}
+}
+
+func TestAgyBrowserNativeCursorAndChangeToken(t *testing.T) {
+	reader, database, session := agyFixture(t)
+	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
+	scope := BrowseScope{Provider: "agy", SessionID: session}
+	latest, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 2})
+	if err != nil || latest.Mode != BrowseNative || len(latest.Entries) != 2 || !latest.HasMore || latest.NextCursor == "" || latest.Diagnostics.CorruptRecords != 0 {
 		t.Fatalf("latest = %#v, err = %v", latest, err)
 	}
 	older, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 10, Cursor: latest.NextCursor})
@@ -198,12 +189,7 @@ func TestAgyBrowserNativeCursorAndChangeToken(t *testing.T) {
 	if again, _ := reader.ChangeToken(context.Background(), scope); again != before {
 		t.Fatal("idle change token moved")
 	}
-	sqlite, _ := exec.LookPath("sqlite3")
-	command := exec.Command(sqlite, database)
-	command.Stdin = strings.NewReader(fmt.Sprintf("INSERT INTO steps(idx,step_type,status,metadata,step_payload) VALUES(99,%d,3,X'',X'%x');", agyStepUser, agyUserStep(2000, "again")))
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("append step: %v: %s", err, output)
-	}
+	execTestSQL(t, database, fmt.Sprintf("INSERT INTO steps(idx,step_type,status,metadata,step_payload) VALUES(99,%d,3,X'',X'%x');", agyStepUser, agyUserStep(2000, "again")))
 	if after, _ := reader.ChangeToken(context.Background(), scope); after == before {
 		t.Fatal("appended step did not change the token")
 	}

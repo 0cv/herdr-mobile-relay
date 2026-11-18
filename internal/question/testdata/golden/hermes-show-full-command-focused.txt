@@ -1,0 +1,16 @@
+=== hermes-show-full-command-focused agent=hermes
+LayoutHint: false
+Parse: nil
+Classify: {Kind:approval Prompt:⚠️ Dangerous Command shell command via -c/-lc flag rm -rf /tmp/build-cache 1. Allow once 2. Allow for this session 3. Add to permanent allowlist 4. Deny Command:rm -rf /tmp/build-cache Options:[Allow once Allow for this session Add to permanent allowlist Deny] ApprovalFocus:4 Interaction:<nil> ApprovalIdentity: approvalSource:
+╭────────────────────────────────────────────────────────────╮
+⚠️  Dangerous Command
+
+shell command via -c/-lc flag
+rm -rf /tmp/build-cache
+
+1. Allow once
+2. Allow for this session
+3. Add to permanent allowlist
+4. Deny}
+Classify.Interaction: nil
+ApprovalFingerprint: "0cd2830a4f3adbfdab82e4080f71f8bb7d11c4927211a234044e4d9b96ffcc94"

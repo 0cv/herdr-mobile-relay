@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/0cv/herdr-mobile-relay/internal/textutil"
 	"golang.org/x/text/collate"
 	"golang.org/x/text/language"
 )
@@ -14,6 +15,8 @@ import (
 type cursorProvider struct{}
 
 func (p *cursorProvider) ID() string { return "cursor" }
+
+func (p *cursorProvider) Builtins() []Command { return cursorBuiltins }
 
 var cursorBuiltins = []Command{
 	{"/about", "About", "builtin", ""},
@@ -357,9 +360,9 @@ func (reader *catalogReader) scanCursorCommandDirBudget(dir, source string, budg
 		}
 		commands = append(commands, Command{
 			Command:      "/" + cmdName,
-			Description:  compact(description, 120),
+			Description:  textutil.Compact(description, 120),
 			Source:       source,
-			ArgumentHint: compact(fm["argument-hint"], 120),
+			ArgumentHint: textutil.Compact(fm["argument-hint"], 120),
 		})
 	}
 	return commands, truncated
@@ -367,22 +370,10 @@ func (reader *catalogReader) scanCursorCommandDirBudget(dir, source string, budg
 
 func (p *cursorProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	reader := newCatalogReader()
-	if ctx.SuppressNative {
-		builtins := make([]Command, len(cursorBuiltins))
-		copy(builtins, cursorBuiltins)
-		return builtins, reader.truncated
-	}
 
 	budget := maxCustomFiles
 	truncated := false
-	order := make([]string, 0, len(cursorBuiltins))
-	active := make(map[string]Command, len(cursorBuiltins))
-	add := func(command Command) {
-		if _, exists := active[command.Command]; !exists {
-			order = append(order, command.Command)
-		}
-		active[command.Command] = command
-	}
+	list := newCommandList(cursorBuiltins, false)
 
 	// Cursor resolves its builtins from a separate registry, not the markdown
 	// command map or the skills map. A file or skill reusing a builtin name is
@@ -396,7 +387,6 @@ func (p *cursorProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 		for _, alias := range cursorBuiltinAliases[builtin.Command] {
 			reserved[strings.ToLower(alias)] = true
 		}
-		add(builtin)
 	}
 
 	// Cursor's command map assigns ids unconditionally
@@ -410,7 +400,7 @@ func (p *cursorProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 			if reserved[strings.ToLower(command.Command)] {
 				continue
 			}
-			add(command)
+			list.set([]Command{command})
 		}
 	}
 	if ctx.Cwd != "" {
@@ -421,8 +411,8 @@ func (p *cursorProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	for _, root := range cursorCommandRoots(ctx.Home) {
 		scanCommands(root, "personal")
 	}
-	for name := range active {
-		reserved[strings.ToLower(name)] = true
+	for _, command := range list.commands() {
+		reserved[strings.ToLower(command.Command)] = true
 	}
 
 	// Skills follow getSkillIdForPath instead: the id is the skill folder's
@@ -467,16 +457,7 @@ func (p *cursorProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 			if reserved[strings.ToLower(command)] {
 				continue
 			}
-			description := metadata["description"]
-			if description == "" {
-				description = strings.ToUpper(name[:1]) + name[1:] + " skill"
-			}
-			add(Command{
-				Command:      command,
-				Description:  compact(description, 240),
-				Source:       source,
-				ArgumentHint: compact(metadata["argument-hint"], 120),
-			})
+			list.set([]Command{skillCommand(command, skillDescription(metadata, name), source, metadata)})
 		}
 	}
 	if ctx.Cwd != "" {
@@ -502,20 +483,20 @@ func (p *cursorProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 			if reserved[strings.ToLower(command.Command)] {
 				continue
 			}
-			add(command)
+			list.set([]Command{command})
 		}
 		truncated = truncated || trunc
 	}
 
-	commands := make([]Command, 0, len(order))
-	seen := make(map[string]bool, len(order))
-	for _, name := range order {
-		key := strings.ToLower(name)
+	commands := []Command{}
+	seen := make(map[string]bool)
+	for _, command := range list.commands() {
+		key := strings.ToLower(command.Command)
 		if seen[key] {
 			continue
 		}
 		seen[key] = true
-		commands = append(commands, active[name])
+		commands = append(commands, command)
 	}
 	if budget <= 0 {
 		truncated = true

@@ -1,0 +1,85 @@
+# Herdr gateway deployment settings for @HOST@.
+# Redeploys preserve registration controls and operator tunables. Generated
+# version/revision and gateway/Caddy image tags are refreshed with the bundle.
+# docker compose reads this file automatically from its working directory.
+
+# The public hostname Caddy serves. Informational here: the certificate and the
+# site are keyed on the site address in the Caddyfile, so change both together.
+HERDR_GATEWAY_HOSTNAME=@HOST@
+
+# Images. The gateway tag is built on the first "up" from the gateway-source/
+# directory this bundle carries; point the build context at another checkout to
+# build from source you already have on the server.
+HERDR_GATEWAY_IMAGE=herdr-gateway:local
+HERDR_GATEWAY_BUILD_CONTEXT="./gateway-source"
+HERDR_CADDY_IMAGE=caddy:2-alpine
+
+# Build identity published by /healthz and the gateway hello. A current relay
+# compares this release with its own and tells the operator when to redeploy.
+HERDR_GATEWAY_VERSION=@GATEWAY_VERSION@
+HERDR_GATEWAY_REVISION=@GATEWAY_REVISION@
+
+# --- Gateway tunables ---
+
+# Optional registration controls. Empty keeps registration open. For a private
+# gateway, set a strong shared token here and in every relay's service environment.
+# Never use the relay key as this token. The allow-list takes full 22-character
+# relay ids separated by commas or whitespace; quote values containing spaces.
+# With both controls set, registrations must satisfy both.
+HERDR_GATEWAY_REGISTRATION_TOKEN=
+HERDR_GATEWAY_ALLOWED_RELAY_IDS=
+
+# Bytes copied in both directions, per relay, per UTC calendar month. 0 is
+# unlimited, which is the right answer on a box you pay for yourself; the
+# gateway's own default is 5368709120 (5 GiB). Hosting for a group: take your
+# plan's monthly egress, divide by the number of relays, then halve it, because
+# a relay spends every byte twice - once inbound, once outbound.
+HERDR_GATEWAY_MONTHLY_BYTES=0
+
+# Percent of that quota at which a relay gets exactly one advisory warning
+# (gateway default 80, negative disables it). Idle while the quota is 0.
+HERDR_GATEWAY_QUOTA_WARN_PERCENT=80
+
+# Concurrent phone connections per relay (gateway default 8, negative removes
+# the cap). Refusals are reported as too_many_clients.
+HERDR_GATEWAY_MAX_CLIENTS_PER_RELAY=8
+
+# Whole-gateway ceilings, which matter once an instance is shared rather than
+# yours alone: every other limit here is per-relay or per-IP, so without these a
+# stranger with many addresses and many relay ids can grow memory unbounded.
+# Negative removes either limit. Refusals are reported as at_capacity.
+#
+# The client ceiling is a memory bound, not a bandwidth one: each connection may
+# queue up to 4 MiB before it is dropped as too slow, so 512 caps the worst case
+# near 2 GiB while a real population sits close to empty. There is deliberately
+# no per-IP concurrency cap: carrier NAT puts thousands of unrelated phones
+# behind one address, and such a cap would refuse legitimate users.
+HERDR_GATEWAY_MAX_RELAYS=1024
+HERDR_GATEWAY_MAX_CLIENTS=512
+
+# Phone connection attempts per client IP per minute (gateway default 30,
+# negative removes the limit). Relay registrations are counted separately
+# against the same number. Refusals are reported as rate_limited.
+HERDR_GATEWAY_CONNECT_RATE_PER_MINUTE=30
+
+# Seconds a phone connection may carry no traffic before it is closed (gateway
+# default 300, negative disables reaping). Relay links use ping/pong instead.
+HERDR_GATEWAY_IDLE_TIMEOUT=300
+
+# text or json structured logs on stderr (gateway default text). Transport
+# events only: no frame contents, and relay ids truncated to six characters.
+HERDR_GATEWAY_LOG_FORMAT=json
+
+# UDP address discovery, published on 3478 by docker-compose.yml. Phones and
+# relays ask the gateway what address it sees them coming from, which is what
+# lets the two of them meet directly instead of paying for a relayed path. An
+# empty value here disables the listener: peers behind NAT then fall back to the
+# relayed path through this gateway. With it empty, the "3478:3478/udp" mapping
+# in docker-compose.yml can be deleted too, which closes the port on the host.
+HERDR_GATEWAY_STUN_ADDR=:3478
+
+# Set in docker-compose.yml rather than here, because the deployment shape
+# depends on them:
+#   HERDR_GATEWAY_ADDR=:8443                   published to 127.0.0.1 only
+#   HERDR_GATEWAY_TRUSTED_PROXY=true           Caddy sets X-Forwarded-For
+#   HERDR_GATEWAY_STATE=/state/counters.json   on the gateway-state volume

@@ -364,7 +364,7 @@ export const iosProducerTests: Test[] = [
         if (mode === 'unsupported') f.remote.selectApp = async () => { throw new Error('stock selector'); };
         f.reply(async id => [id, page(N, mode === 'ready' && discoveries === 1 ? 'about:blank' : `${origin}/`)]);
         const budget = new PhaseBudget('producer-protocol', { timeoutMs: 120_000, recoveryLimit: 0 });
-        const platform = new IOSPlatform({ origin, appiumUrl: 'http://synthetic.invalid', outputDir: directory, certificate: '', setupUrl: '', deviceId: 'fake', budget });
+        const platform = new IOSPlatform({ origin, appiumUrl: 'http://synthetic.invalid', outputDir: directory, certificate: '', deviceId: 'fake', budget });
         const transportCommands: string[] = [];
         const element = { 'element-6066-11e4-a52e-4f735466cecf': 'root' };
         const client = new AppiumClient('http://synthetic.invalid', 20_000, async (input, init) => {

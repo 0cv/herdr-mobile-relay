@@ -1,18 +1,24 @@
 package protocol
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
 	"strings"
+	"time"
 	"unicode/utf8"
+
+	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 )
 
 const (
 	Version                       = 3
 	EncryptedWebSocketSubprotocol = "herdr-e2ee-v2"
 	HybridTransportCapability     = "herdr-hybrid-v2"
+	PrimaryServerSessionID        = "primary"
 )
 
 type TargetRef struct {
@@ -25,11 +31,7 @@ type TargetRef struct {
 type ActionReceiptPhase string
 
 const (
-	ReceiptPrepared             ActionReceiptPhase = "prepared"
 	ReceiptFailedBeforeDispatch ActionReceiptPhase = "failed_before_dispatch"
-	ReceiptAwaitingEvidence     ActionReceiptPhase = "awaiting_evidence"
-	ReceiptConfirmed            ActionReceiptPhase = "confirmed"
-	ReceiptDispatchedUnknown    ActionReceiptPhase = "dispatched_unknown"
 )
 
 type ApiError struct {
@@ -55,23 +57,7 @@ type DeviceRole string
 const (
 	RoleReader     DeviceRole = "reader"
 	RoleController DeviceRole = "controller"
-	RoleBootstrap  DeviceRole = "bootstrap"
 )
-
-type DeviceContext struct {
-	DeviceID          string     `json:"device_id"`
-	CredentialID      string     `json:"credential_id"`
-	Role              DeviceRole `json:"role"`
-	Locale            string     `json:"locale"`
-	CredentialVersion int64      `json:"credential_version"`
-}
-
-type OpaquePage[T any] struct {
-	Items       []T    `json:"items"`
-	NextCursor  string `json:"next_cursor,omitempty"`
-	Truncated   bool   `json:"truncated"`
-	GeneratedAt int64  `json:"generated_at"`
-}
 
 type ActionClass string
 
@@ -88,100 +74,97 @@ type ActionMetadata struct {
 	Audited          bool
 }
 
-func readAction(operation string) ActionMetadata {
-	return ActionMetadata{Operation: operation, Class: ActionReadOnly}
+func readAction() ActionMetadata {
+	return ActionMetadata{Class: ActionReadOnly}
 }
 
-func mutateAction(operation string, coordinated, audited bool) ActionMetadata {
+func mutateAction(coordinated, audited bool) ActionMetadata {
 	return ActionMetadata{
-		Operation:        operation,
 		Class:            ActionMutating,
-		RequiresProtocol: operation != "install_update",
+		RequiresProtocol: true,
 		Coordinated:      coordinated,
 		Audited:          audited,
 	}
 }
 
 var actionCatalog = map[string]ActionMetadata{
-	"acknowledge_pane":           mutateAction("acknowledge_pane", true, false),
-	"agent_clear":                mutateAction("agent_clear", true, true),
-	"agent_rename":               mutateAction("agent_rename", true, true),
-	"agent_restart":              mutateAction("agent_restart", true, true),
-	"agent_start":                mutateAction("agent_start", true, true),
-	"agent_stop":                 mutateAction("agent_stop", true, true),
-	"answer_question":            mutateAction("answer_question", true, true),
-	"cancel_speech":              readAction("cancel_speech"),
-	"check_update":               readAction("check_update"),
-	"clarify_question":           mutateAction("clarify_question", true, true),
-	"clear_activities":           mutateAction("clear_activities", false, false),
-	"copy_agent_response":        mutateAction("copy_agent_response", false, false),
-	"deploy_app_update":          mutateAction("deploy_app_update", false, false),
-	"create_device_invitation":   mutateAction("create_device_invitation", false, true),
-	"device_list":                readAction("device_list"),
-	"get_pi_integration":         readAction("get_pi_integration"),
-	"set_pi_integration":         mutateAction("set_pi_integration", false, true),
-	"get_activity":               readAction("get_activity"),
-	"get_conversation_history":   readAction("get_conversation_history"),
-	"get_conversation_updates":   readAction("get_conversation_updates"),
-	"unwatch_conversation":       readAction("unwatch_conversation"),
-	"install_update":             mutateAction("install_update", false, false),
-	"lease_pane_size":            mutateAction("lease_pane_size", true, false),
-	"list_directories":           readAction("list_directories"),
-	"list_slash_commands":        readAction("list_slash_commands"),
-	"navigate_question":          mutateAction("navigate_question", true, true),
-	"pane_applied":               readAction("pane_applied"),
-	"push_open_ref":              readAction("push_open_ref"),
-	"push_policy_get":            readAction("push_policy_get"),
-	"push_policy_set":            mutateAction("push_policy_set", false, false),
-	"push_snooze":                mutateAction("push_snooze", false, false),
-	"push_subscribe":             mutateAction("push_subscribe", false, false),
-	"push_test_device":           mutateAction("push_test_device", false, true),
-	"push_unsubscribe":           mutateAction("push_unsubscribe", false, false),
-	"push_viewed_pane":           mutateAction("push_viewed_pane", false, false),
-	"qr_code":                    readAction("qr_code"),
-	"read_pane":                  readAction("read_pane"),
-	"refresh_agents":             readAction("refresh_agents"),
-	"register_app_origin":        mutateAction("register_app_origin", false, false),
-	"release_pane_size":          mutateAction("release_pane_size", true, false),
-	"rename_device":              mutateAction("rename_device", false, true),
-	"respond":                    mutateAction("respond", true, true),
-	"send_keys":                  mutateAction("send_keys", true, true),
-	"send_input":                 mutateAction("send_input", true, true),
-	"send_terminal_text":         mutateAction("send_terminal_text", true, true),
-	"send_filter_text":           mutateAction("send_filter_text", true, true),
-	"send_secret":                mutateAction("send_secret", true, true),
-	"reset_devices":              mutateAction("reset_devices", false, true),
-	"revoke_device":              mutateAction("revoke_device", false, true),
-	"send_text":                  mutateAction("send_text", true, true),
-	"speak_text":                 readAction("speak_text"),
-	"speech_voice_install":       mutateAction("speech_voice_install", false, true),
-	"speech_voice_remove":        mutateAction("speech_voice_remove", false, true),
-	"speech_voices_list":         readAction("speech_voices_list"),
-	"submit_prompt":              mutateAction("submit_prompt", true, true),
-	"get_pi_prompt_capability":   readAction("get_pi_prompt_capability"),
-	"send_pi_prompt_unconfirmed": mutateAction("send_pi_prompt_unconfirmed", true, true),
-	"tab_reorder":                mutateAction("tab_reorder", true, true),
-	"unwatch_pane":               readAction("unwatch_pane"),
-	"upload_begin":               mutateAction("upload_begin", false, true),
-	"upload_cancel":              mutateAction("upload_cancel", false, true),
-	"upload_chunk":               mutateAction("upload_chunk", false, true),
-	"upload_finish":              mutateAction("upload_finish", false, true),
-	"watch_pane":                 readAction("watch_pane"),
-	"webrtc_close":               readAction("webrtc_close"),
-	"webrtc_ice":                 readAction("webrtc_ice"),
-	"webrtc_offer":               readAction("webrtc_offer"),
-	"workspace_close":            mutateAction("workspace_close", true, true),
-	"workspace_create":           mutateAction("workspace_create", true, true),
-	"workspace_file":             readAction("workspace_file"),
-	"workspace_git_diff":         readAction("workspace_git_diff"),
-	"workspace_git_status":       readAction("workspace_git_status"),
-	"workspace_rename":           mutateAction("workspace_rename", true, true),
-	"workspace_reorder":          mutateAction("workspace_reorder", true, true),
-	"workspace_tree":             readAction("workspace_tree"),
-	"worktree_create":            mutateAction("worktree_create", true, true),
-	"worktree_list":              readAction("worktree_list"),
-	"worktree_open":              mutateAction("worktree_open", true, true),
-	"worktree_remove":            mutateAction("worktree_remove", true, true),
+	"acknowledge_pane":           mutateAction(true, false),
+	"agent_clear":                mutateAction(true, true),
+	"agent_rename":               mutateAction(true, true),
+	"agent_start":                mutateAction(true, true),
+	"agent_stop":                 mutateAction(true, true),
+	"answer_question":            mutateAction(true, true),
+	"cancel_speech":              readAction(),
+	"check_update":               readAction(),
+	"clarify_question":           mutateAction(true, true),
+	"clear_activities":           mutateAction(false, false),
+	"copy_agent_response":        mutateAction(false, false),
+	"deploy_app_update":          mutateAction(false, false),
+	"create_device_invitation":   mutateAction(false, true),
+	"device_list":                readAction(),
+	"get_pi_integration":         readAction(),
+	"set_pi_integration":         mutateAction(false, true),
+	"get_activity":               readAction(),
+	"get_conversation_history":   readAction(),
+	"get_conversation_updates":   readAction(),
+	"unwatch_conversation":       readAction(),
+	"install_update":             {Class: ActionMutating},
+	"lease_pane_size":            mutateAction(true, false),
+	"list_directories":           readAction(),
+	"list_slash_commands":        readAction(),
+	"navigate_question":          mutateAction(true, true),
+	"pane_applied":               readAction(),
+	"push_open_ref":              readAction(),
+	"push_policy_get":            readAction(),
+	"push_policy_set":            mutateAction(false, false),
+	"push_snooze":                mutateAction(false, false),
+	"push_subscribe":             mutateAction(false, false),
+	"push_test_device":           mutateAction(false, true),
+	"push_unsubscribe":           mutateAction(false, false),
+	"push_viewed_pane":           mutateAction(false, false),
+	"qr_code":                    readAction(),
+	"read_pane":                  readAction(),
+	"refresh_agents":             readAction(),
+	"register_app_origin":        mutateAction(false, false),
+	"release_pane_size":          mutateAction(true, false),
+	"rename_device":              mutateAction(false, true),
+	"respond":                    mutateAction(true, true),
+	"send_keys":                  mutateAction(true, true),
+	"send_input":                 mutateAction(true, true),
+	"send_terminal_text":         mutateAction(true, true),
+	"send_filter_text":           mutateAction(true, true),
+	"send_secret":                mutateAction(true, true),
+	"reset_devices":              mutateAction(false, true),
+	"revoke_device":              mutateAction(false, true),
+	"speak_text":                 readAction(),
+	"speech_voice_install":       mutateAction(false, true),
+	"speech_voice_remove":        mutateAction(false, true),
+	"speech_voices_list":         readAction(),
+	"submit_prompt":              mutateAction(true, true),
+	"get_pi_prompt_capability":   readAction(),
+	"send_pi_prompt_unconfirmed": mutateAction(true, true),
+	"tab_reorder":                mutateAction(true, true),
+	"unwatch_pane":               readAction(),
+	"upload_begin":               mutateAction(false, true),
+	"upload_cancel":              mutateAction(false, true),
+	"upload_chunk":               mutateAction(false, true),
+	"upload_finish":              mutateAction(false, true),
+	"watch_pane":                 readAction(),
+	"webrtc_close":               readAction(),
+	"webrtc_ice":                 readAction(),
+	"webrtc_offer":               readAction(),
+	"workspace_close":            mutateAction(true, true),
+	"workspace_create":           mutateAction(true, true),
+	"workspace_file":             readAction(),
+	"workspace_git_diff":         readAction(),
+	"workspace_git_status":       readAction(),
+	"workspace_rename":           mutateAction(true, true),
+	"workspace_reorder":          mutateAction(true, true),
+	"workspace_tree":             readAction(),
+	"worktree_create":            mutateAction(true, true),
+	"worktree_list":              readAction(),
+	"worktree_open":              mutateAction(true, true),
+	"worktree_remove":            mutateAction(true, true),
 }
 
 type Inbound struct {
@@ -223,8 +206,7 @@ type Inbound struct {
 	OtherSelected        bool            `json:"other_selected,omitempty"`
 	OtherText            string          `json:"other_text,omitempty"`
 	Direction            string          `json:"direction,omitempty"`
-	Lines                int             `json:"lines,omitempty"`
-	Before               string          `json:"before,omitempty"`
+	Lines                *int            `json:"lines,omitempty"`
 	Cursor               string          `json:"cursor,omitempty"`
 	SubscriptionID       string          `json:"subscription_id,omitempty"`
 	Observe              bool            `json:"observe,omitempty"`
@@ -238,12 +220,9 @@ type Inbound struct {
 	Immediate            bool            `json:"immediate,omitempty"`
 	Format               string          `json:"format,omitempty"`
 	Path                 string          `json:"path,omitempty"`
-	Filename             string          `json:"filename,omitempty"`
-	MIME                 string          `json:"mime,omitempty"`
 	Data                 string          `json:"data,omitempty"`
 	ClientID             string          `json:"client_id,omitempty"`
 	ReplaceEndpoints     []string        `json:"replace_endpoints,omitempty"`
-	NotifyFinished       bool            `json:"notify_finished,omitempty"`
 	Endpoints            []string        `json:"endpoints,omitempty"`
 	Origin               string          `json:"origin,omitempty"`
 	ExpectedOrigin       string          `json:"expected_origin,omitempty"`
@@ -256,40 +235,44 @@ type Inbound struct {
 	Snoozed              bool            `json:"snoozed,omitempty"`
 	Visible              bool            `json:"visible,omitempty"`
 	Unlocked             bool            `json:"unlocked,omitempty"`
+	ActivityLabel        string          `json:"activity_label,omitempty"`
+	HermesProfile        string          `json:"hermes_profile,omitempty"`
+	Language             string          `json:"language,omitempty"`
+	SpeechRequestID      string          `json:"speech_request_id,omitempty"`
+	ContentFingerprint   string          `json:"content_fingerprint,omitempty"`
+	IntervalMS           int             `json:"interval_ms,omitempty"`
+	Enabled              *bool           `json:"enabled,omitempty"`
+	Instance             string          `json:"instance,omitempty"`
+	SDP                  string          `json:"sdp,omitempty"`
+	Candidate            string          `json:"candidate,omitempty"`
+	SDPMid               string          `json:"sdp_mid,omitempty"`
+	SDPMLineIndex        int             `json:"sdp_mline_index,omitempty"`
+	ReceiptSequence      uint64          `json:"-"`
+	ReceivedAt           time.Time       `json:"-"`
+	Raw                  json.RawMessage `json:"-"`
+	Invalid              bool            `json:"-"`
 }
 
-func DecodeMap(raw map[string]any) (Inbound, error) {
-	data, err := json.Marshal(raw)
-	if err != nil {
-		return Inbound{}, err
+func DecodeFrame(frame []byte) (Inbound, error) {
+	if !utf8.Valid(frame) {
+		return Inbound{}, errors.New("message is not valid UTF-8")
+	}
+	if trimmed := bytes.TrimLeft(frame, " \t\r\n"); len(trimmed) == 0 || trimmed[0] != '{' {
+		return Inbound{}, errors.New("message must be a JSON object")
 	}
 	var message Inbound
-	if err := json.Unmarshal(data, &message); err != nil {
-		return Inbound{}, err
-	}
-	action, _ := raw["action"].(string)
-	message.Type, err = ResolveOperation(message.Type, action)
-	if err != nil {
-		return Inbound{}, err
-	}
-	return message, nil
-}
-
-// ResolveOperation preserves legacy command/action-only envelopes, but rejects
-// contradictory concrete identities. Non-string field validation remains with
-// the decoder; callers using maps retain their existing string extraction policy.
-func ResolveOperation(messageType, action string) (string, error) {
-	if messageType == "" || messageType == "command" {
-		if action != "" {
-			return action, nil
+	if err := json.Unmarshal(frame, &message); err != nil {
+		var syntaxErr *json.SyntaxError
+		if errors.As(err, &syntaxErr) {
+			return Inbound{}, err
 		}
-	} else if action != "" && action != messageType {
-		return "", fmt.Errorf("conflicting message type and action")
+		message.Invalid = true
 	}
-	if messageType == "" {
-		return "", fmt.Errorf("message type is required")
+	if message.Type == "" {
+		message.Invalid = true
 	}
-	return messageType, nil
+	message.Raw = frame
+	return message, nil
 }
 
 type RequestScope struct {
@@ -316,6 +299,9 @@ func ScopeFor(message Inbound) (RequestScope, bool) {
 
 func ClassifyAction(operation string) (ActionMetadata, bool) {
 	metadata, known := actionCatalog[operation]
+	if known {
+		metadata.Operation = operation
+	}
 	return metadata, known
 }
 
@@ -460,27 +446,8 @@ func IncompatibleResponse(message Inbound) map[string]any {
 	})
 }
 
-func DecodeFailureResponse(raw map[string]any) map[string]any {
-	requestID, _ := raw["request_id"].(string)
+func DecodeFailureResponse(requestID string) map[string]any {
 	return ErrorResponse(requestID, NewApiError(ErrorInvalidRequest, nil))
-}
-
-type HerdrFeatureStatus struct {
-	State      string `json:"state"`
-	Reason     string `json:"reason"`
-	Generation uint64 `json:"generation"`
-}
-
-type HerdrStatus struct {
-	InstalledClientVersion     string                        `json:"installed_client_version,omitempty"`
-	ServerVersion              string                        `json:"server_version,omitempty"`
-	ServerProtocol             int                           `json:"server_protocol,omitempty"`
-	ServerProtocolKnown        bool                          `json:"server_protocol_known"`
-	EndpointProtocolGeneration *int                          `json:"endpoint_protocol_generation,omitempty"`
-	SurfaceInterest            *bool                         `json:"surface_interest,omitempty"`
-	HealthCheck                *bool                         `json:"health_check,omitempty"`
-	Generation                 uint64                        `json:"generation"`
-	Features                   map[string]HerdrFeatureStatus `json:"features"`
 }
 
 type PushConfig struct {
@@ -489,15 +456,15 @@ type PushConfig struct {
 	Host           string `json:"host"`
 	// Home lets the phone print a checkout as "~/code/app" instead of the
 	// computer's absolute path, which rarely fits a phone row.
-	Home           string      `json:"home"`
-	Protocol       int         `json:"protocol"`
-	Version        string      `json:"version"`
-	ReleaseVersion string      `json:"release_version"`
-	Revision       string      `json:"revision"`
-	Update         any         `json:"update"`
-	AppDeploy      any         `json:"app_deploy"`
-	Capabilities   []string    `json:"capabilities"`
-	HerdrStatus    HerdrStatus `json:"herdr_status"`
+	Home           string             `json:"home"`
+	Protocol       int                `json:"protocol"`
+	Version        string             `json:"version"`
+	ReleaseVersion string             `json:"release_version"`
+	Revision       string             `json:"revision"`
+	Update         any                `json:"update"`
+	AppDeploy      any                `json:"app_deploy"`
+	Capabilities   []string           `json:"capabilities"`
+	HerdrStatus    herdr.ServerStatus `json:"herdr_status"`
 	// SpeechLanguages lists the languages this host has a voice for, so the
 	// phone offers only what the relay can actually read aloud.
 	SpeechLanguages []string `json:"speech_languages,omitempty"`

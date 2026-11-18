@@ -1,10 +1,10 @@
 package push
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"strings"
 	"sync"
@@ -97,15 +97,14 @@ func sameTarget(a, b protocol.TargetRef) bool {
 }
 
 type DevicePolicy struct {
-	DeviceID       string            `json:"device_id"`
-	Locale         string            `json:"locale"`
-	Categories     map[Category]bool `json:"categories"`
-	Settle         time.Duration     `json:"settle"`
-	Cooldown       time.Duration     `json:"cooldown"`
-	SnoozeUntil    time.Time         `json:"snooze_until,omitempty"`
-	Snoozed        bool              `json:"snoozed,omitempty"`
-	UpdateOnce     bool              `json:"update_once"`
-	UpdateVersions map[string]bool   `json:"update_versions,omitempty"`
+	DeviceID    string            `json:"device_id"`
+	Locale      string            `json:"locale"`
+	Categories  map[Category]bool `json:"categories"`
+	Settle      time.Duration     `json:"settle"`
+	Cooldown    time.Duration     `json:"cooldown"`
+	SnoozeUntil time.Time         `json:"snooze_until,omitempty"`
+	Snoozed     bool              `json:"snoozed,omitempty"`
+	UpdateOnce  bool              `json:"update_once"`
 }
 
 func DefaultDevicePolicy(deviceID, locale string) DevicePolicy {
@@ -120,10 +119,9 @@ func DefaultDevicePolicy(deviceID, locale string) DevicePolicy {
 			CategoryUpdate:    true,
 			CategoryTest:      true,
 		},
-		Settle:         2 * time.Second,
-		Cooldown:       30 * time.Second,
-		UpdateOnce:     true,
-		UpdateVersions: make(map[string]bool),
+		Settle:     2 * time.Second,
+		Cooldown:   30 * time.Second,
+		UpdateOnce: true,
 	}
 }
 
@@ -134,9 +132,15 @@ type PolicyDecision struct {
 }
 
 type policyFile struct {
-	GlobalSnoozeUntil time.Time               `json:"global_snooze_until,omitempty"`
-	Policies          map[string]DevicePolicy `json:"policies"`
-	LastAccepted      map[string]time.Time    `json:"last_accepted,omitempty"`
+	Policies     map[string]DevicePolicy `json:"policies"`
+	LastAccepted map[string]time.Time    `json:"last_accepted,omitempty"`
+}
+
+func (f policyFile) clone() policyFile {
+	return policyFile{
+		Policies:     maps.Clone(f.Policies),
+		LastAccepted: maps.Clone(f.LastAccepted),
+	}
 }
 
 type PolicyEngine struct {
@@ -159,17 +163,6 @@ func newPolicyEngine(path string) (*PolicyEngine, error) {
 	if err == nil {
 		if err := json.Unmarshal(data, &p.state); err != nil {
 			return nil, fmt.Errorf("decode push policies: %w", err)
-		}
-		var rawState struct {
-			Policies map[string]json.RawMessage `json:"policies"`
-		}
-		if json.Unmarshal(data, &rawState) == nil {
-			for deviceID, policy := range p.state.Policies {
-				if !bytes.Contains(rawState.Policies[deviceID], []byte(`"update_once"`)) {
-					policy.UpdateOnce = true
-					p.state.Policies[deviceID] = policy
-				}
-			}
 		}
 	} else if !os.IsNotExist(err) {
 		return nil, fmt.Errorf("read push policies: %w", err)
@@ -203,9 +196,6 @@ func normalizePolicy(policy DevicePolicy) (DevicePolicy, error) {
 			return DevicePolicy{}, errors.New("push_invalid_category")
 		}
 	}
-	if policy.UpdateVersions == nil {
-		policy.UpdateVersions = make(map[string]bool)
-	}
 	return policy, nil
 }
 
@@ -216,45 +206,26 @@ func (p *PolicyEngine) Set(policy DevicePolicy) error {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	previous, hadPrevious := p.state.Policies[policy.DeviceID]
-	p.state.Policies[policy.DeviceID] = policy
-	if err := p.persistLocked(); err != nil {
-		if hadPrevious {
-			p.state.Policies[policy.DeviceID] = previous
-		} else {
-			delete(p.state.Policies, policy.DeviceID)
-		}
-		return err
-	}
-	return nil
+	next := p.state.clone()
+	next.Policies[policy.DeviceID] = policy
+	return p.commitLocked(next)
 }
+
 func (p *PolicyEngine) RemoveDevice(deviceID string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	previousPolicy, hadPolicy := p.state.Policies[deviceID]
-	delete(p.state.Policies, deviceID)
-	removedAccepted := make(map[string]time.Time)
+	next := p.state.clone()
+	delete(next.Policies, deviceID)
 	prefix := deviceID + "\x00"
-	for slot, accepted := range p.state.LastAccepted {
+	for slot := range next.LastAccepted {
 		if strings.HasPrefix(slot, prefix) {
-			removedAccepted[slot] = accepted
-			delete(p.state.LastAccepted, slot)
+			delete(next.LastAccepted, slot)
 		}
 	}
-	previousViewed, hadViewed := p.viewedPanes[deviceID]
-	delete(p.viewedPanes, deviceID)
-	if err := p.persistLocked(); err != nil {
-		if hadPolicy {
-			p.state.Policies[deviceID] = previousPolicy
-		}
-		for slot, accepted := range removedAccepted {
-			p.state.LastAccepted[slot] = accepted
-		}
-		if hadViewed {
-			p.viewedPanes[deviceID] = previousViewed
-		}
+	if err := p.commitLocked(next); err != nil {
 		return err
 	}
+	delete(p.viewedPanes, deviceID)
 	return nil
 }
 
@@ -269,14 +240,7 @@ func (p *PolicyEngine) Get(deviceID, locale string) DevicePolicy {
 
 func clonePolicy(policy DevicePolicy) DevicePolicy {
 	copyPolicy := policy
-	copyPolicy.Categories = make(map[Category]bool, len(policy.Categories))
-	for category, enabled := range policy.Categories {
-		copyPolicy.Categories[category] = enabled
-	}
-	copyPolicy.UpdateVersions = make(map[string]bool, len(policy.UpdateVersions))
-	for version, sent := range policy.UpdateVersions {
-		copyPolicy.UpdateVersions[version] = sent
-	}
+	copyPolicy.Categories = maps.Clone(policy.Categories)
 	return copyPolicy
 }
 
@@ -290,18 +254,6 @@ func (p *PolicyEngine) SetViewedPane(deviceID string, target *protocol.TargetRef
 	p.viewedPanes[deviceID] = *target
 }
 
-func (p *PolicyEngine) SetGlobalSnooze(until time.Time) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	previous := p.state.GlobalSnoozeUntil
-	p.state.GlobalSnoozeUntil = until
-	if err := p.persistLocked(); err != nil {
-		p.state.GlobalSnoozeUntil = previous
-		return err
-	}
-	return nil
-}
-
 func (p *PolicyEngine) Decide(key PushEventKey, locale string, now time.Time) PolicyDecision {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -313,7 +265,7 @@ func (p *PolicyEngine) Decide(key PushEventKey, locale string, now time.Time) Po
 		return PolicyDecision{Code: "push_category_disabled"}
 	}
 	timedSnoozeActive := !policy.SnoozeUntil.IsZero() && now.Before(policy.SnoozeUntil)
-	if policy.Snoozed && policy.SnoozeUntil.IsZero() || timedSnoozeActive || now.Before(p.state.GlobalSnoozeUntil) {
+	if policy.Snoozed && policy.SnoozeUntil.IsZero() || timedSnoozeActive {
 		return PolicyDecision{Code: "push_snoozed"}
 	}
 	if viewed, ok := p.viewedPanes[key.DeviceID]; ok && sameTarget(viewed, key.Target()) {
@@ -329,74 +281,29 @@ func (p *PolicyEngine) Decide(key PushEventKey, locale string, now time.Time) Po
 	return PolicyDecision{Deliver: true, DueAt: due}
 }
 func (p *PolicyEngine) Allows(key PushEventKey, locale string, now time.Time) bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	policy, ok := p.state.Policies[key.DeviceID]
-	if !ok {
-		policy = DefaultDevicePolicy(key.DeviceID, locale)
-	}
-	if !policy.Categories[key.Category] {
-		return false
-	}
-	timedSnoozeActive := !policy.SnoozeUntil.IsZero() && now.Before(policy.SnoozeUntil)
-	if policy.Snoozed && policy.SnoozeUntil.IsZero() || timedSnoozeActive || now.Before(p.state.GlobalSnoozeUntil) {
-		return false
-	}
-	viewed, viewedExists := p.viewedPanes[key.DeviceID]
-	return !viewedExists || !sameTarget(viewed, key.Target())
+	return p.Decide(key, locale, now).Deliver
 }
 
 func (p *PolicyEngine) MarkAccepted(key PushEventKey, acceptedAt time.Time) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	slot := policySlot(key)
-	previous, existed := p.state.LastAccepted[slot]
-	p.state.LastAccepted[slot] = acceptedAt
-	if err := p.persistLocked(); err != nil {
-		if existed {
-			p.state.LastAccepted[slot] = previous
-		} else {
-			delete(p.state.LastAccepted, slot)
-		}
-		return err
-	}
-	return nil
-}
-
-func (p *PolicyEngine) ClaimUpdateVersion(deviceID, version string) (bool, error) {
-	if strings.TrimSpace(deviceID) == "" || strings.TrimSpace(version) == "" {
-		return false, errors.New("push_update_version_required")
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	policy, ok := p.state.Policies[deviceID]
-	if !ok {
-		policy = DefaultDevicePolicy(deviceID, "en")
-	}
-	if !policy.UpdateOnce {
-		return true, nil
-	}
-	if policy.UpdateVersions[version] {
-		return false, nil
-	}
-	policy.UpdateVersions[version] = true
-	p.state.Policies[deviceID] = policy
-	if err := p.persistLocked(); err != nil {
-		delete(policy.UpdateVersions, version)
-		p.state.Policies[deviceID] = policy
-		return false, err
-	}
-	return true, nil
+	next := p.state.clone()
+	next.LastAccepted[policySlot(key)] = acceptedAt
+	return p.commitLocked(next)
 }
 
 func policySlot(key PushEventKey) string {
 	return key.DeviceID + "\x00" + key.ServerSessionID + "\x00" + key.PaneID + "\x00" + key.TerminalID + "\x00" + fmt.Sprint(key.Generation) + "\x00" + key.AgentSessionID + "\x00" + string(key.Category)
 }
 
-func (p *PolicyEngine) persistLocked() error {
-	data, err := json.MarshalIndent(p.state, "", "  ")
+func (p *PolicyEngine) commitLocked(next policyFile) error {
+	data, err := json.MarshalIndent(next, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode push policies: %w", err)
 	}
-	return atomicWrite(p.path, append(data, '\n'), 0o600)
+	if err := atomicWrite(p.path, append(data, '\n'), 0o600); err != nil {
+		return err
+	}
+	p.state = next
+	return nil
 }

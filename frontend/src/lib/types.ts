@@ -37,35 +37,6 @@ export interface ActionReceipt {
 }
 
 
-export interface DeviceContext {
-  device_id: string;
-  credential_id: string;
-  role: 'reader' | 'controller' | 'bootstrap';
-  locale: string;
-  credential_version: number;
-}
-
-export interface OpaquePage<T> {
-  items: T[];
-  next_cursor?: string;
-  truncated: boolean;
-  generated_at: string;
-}
-
-export interface ActionReceiptMessage {
-  type: 'action_receipt';
-  request_id?: string;
-  receipt: ActionReceipt;
-  detail?: string;
-}
-
-export interface ApiErrorMessage {
-  type: 'error';
-  request_id?: string;
-  error: ApiError;
-  detail?: string;
-}
-
 export type AgentInventoryState = 'starting' | 'ready' | 'error';
 
 export interface AgentInventoryStatus {
@@ -296,7 +267,6 @@ export interface Agent {
   approval_fingerprint?: string;
   options?: string[];
   interaction?: QuestionInteraction | null;
-  question_layout?: boolean;
   event_id?: string;
   attention_kind?: AttentionKind;
   attention_capable?: boolean;
@@ -549,7 +519,6 @@ export type RelayUpdateState =
   | 'restarting'
   | 'succeeded'
   | 'failed'
-  | 'rolled_back'
   | 'unsupported';
 
 export interface RelayUpdateStatus {
@@ -563,7 +532,6 @@ export interface RelayUpdateStatus {
   upstream_revision: string;
   checked_at: number;
   can_install: boolean;
-  mode: string;
   reason: string;
   error: string;
 }
@@ -591,11 +559,7 @@ export interface AppUpdateStatus {
   deployedVersion: string;
   deployedAssets: number;
   deployedBuild?: string;
-  deployedEntry?: string;
-  deployedScript?: string;
-  deployedStyle?: string;
   upstreamVersion: string;
-  upstreamAssets: number;
   checkedAt: number;
   error: string;
 }
@@ -613,9 +577,6 @@ export interface CommandResult {
 export interface NotificationTarget {
   pane_id: string;
   host: string;
-  action: 'approve' | 'deny' | '';
-  index: number | null;
-  total: number | null;
   notification_id: string;
 }
 

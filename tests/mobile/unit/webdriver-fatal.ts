@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { pathToFileURL } from 'node:url';
-import { AppiumClient, type RequestEnforcementClock, type WebDriverRequestPolicy } from '../support/webdriver';
+import { AppiumClient, type WebDriverRequestPolicy } from '../support/webdriver';
+import { FakeClock } from './fake-clock';
 import { PhaseBudget, PhaseBudgetError } from '../support/budget';
 import { IOSPlatform } from '../platforms/ios';
 import { AndroidPlatform } from '../platforms/android';
@@ -16,17 +17,6 @@ function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>(yes => { resolve = yes; });
   return { promise, resolve };
-}
-
-function manualClock() {
-  const timers = new Map<ReturnType<typeof setTimeout>, () => void>();
-  let ordinal = 0;
-  const clock: RequestEnforcementClock = {
-    now: () => 0,
-    timer: callback => { const id = ++ordinal as unknown as ReturnType<typeof setTimeout>; timers.set(id, callback); return id; },
-    clear: id => { timers.delete(id); },
-  };
-  return { clock, expire: () => { for (const callback of [...timers.values()]) callback(); } };
 }
 
 function ownership(client: AppiumClient) {
@@ -54,8 +44,8 @@ async function assertQuarantined(client: AppiumClient, sent: () => number, polic
       () => client.findAnyOnce([]),
       () => client.command('/alert/text', 'GET', undefined, 100, policy),
       // Exercise the shared boundary independently of session/budget flags.
-      () => (client as any).request('/status', 'GET', undefined, 100, false, false),
-      () => (client as any).request('/session', 'POST', {}, 100, false, false),
+      () => (client as any).request({ path: '/status', method: 'GET', timeoutMs: 100, enforceBudget: false }),
+      () => (client as any).request({ path: '/session', method: 'POST', body: {}, timeoutMs: 100, enforceBudget: false }),
     ]) {
       await assert.rejects(followup, /APPIUM_SESSION_UNUSABLE/u, 'every post-fatal operation must reject, including close');
       assert.equal(sent(), count, 'quarantine must prevent every further transport dispatch');
@@ -178,12 +168,12 @@ for (const stage of ['headers', 'body'] as const) {
     const headers = deferred<Response>();
     const body = deferred<string>();
     const reading = deferred<void>();
-    const clock = manualClock();
+    const clock = new FakeClock();
     let sent = 0;
     const client = new Client('http://protocol.invalid', 1_000, async () => {
       sent++;
       return sent === 1 ? Response.json({ value: {}, sessionId: 'original' }) : headers.promise;
-    }, undefined, clock.clock);
+    }, undefined, clock);
     await client.create({ capabilities: {} });
     const policy = client.nativeRequestPolicy(new PhaseBudget('late', { timeoutMs: 30_000 }));
     const request = client.contextMetadataRaw();
@@ -191,7 +181,7 @@ for (const stage of ['headers', 'body'] as const) {
     const response = new Response(null);
     response.text = () => { reading.resolve(); return body.promise; };
     if (stage === 'body') { headers.resolve(response); await reading.promise; }
-    clock.expire();
+    clock.advance(1_000);
     await rejected;
     const snapshot = structuredClone(client.snapshot());
     const receipt = client.snapshot().lastCommand!.timing;
@@ -207,7 +197,7 @@ for (const stage of ['headers', 'body'] as const) {
 webdriverFatalTests.push(['Appium strict quarantine unscoped timeout blocks reentrant abort cleanup', async () => {
   const { AppiumClient: Client } = await clientSource();
   const headers = deferred<Response>();
-  const clock = manualClock();
+  const clock = new FakeClock();
   const followups: Promise<void>[] = [];
   let sent = 0;
   let fatalAtAbort: ReturnType<AppiumClient['snapshot']>['firstFatal'];
@@ -220,10 +210,10 @@ webdriverFatalTests.push(['Appium strict quarantine unscoped timeout blocks reen
       followups.push(assert.rejects(() => client.command('/status', 'GET'), /APPIUM_SESSION_UNUSABLE/u));
     }, { once: true });
     return headers.promise;
-  }, undefined, clock.clock);
+  }, undefined, clock);
   await client.create({ capabilities: {} });
   const request = assert.rejects(() => client.contextMetadataRaw(), /APPIUM_TIMEOUT/u);
-  clock.expire();
+  clock.advance(1_000);
   await request;
   headers.resolve(Response.json({ value: null }));
   await Promise.all(followups);
@@ -307,8 +297,8 @@ webdriverFatalTests.push(['Appium strict quarantine platform teardown rejects an
     const policy = driver.nativeRequestPolicy(new PhaseBudget('platform', { timeoutMs: 30_000 }));
     await assert.rejects(() => driver.contexts(), /APPIUM_TIMEOUT/u);
     const platform = platformName === 'ios'
-      ? new IOSPlatform({ deviceId: 'synthetic', origin: 'https://fixture.invalid', setupUrl: 'https://fixture.invalid/setup', outputDir: '/unused', appiumUrl: 'http://protocol.invalid', certificate: '/unused' })
-      : new AndroidPlatform({ deviceId: 'synthetic', origin: 'https://fixture.invalid', setupUrl: 'https://fixture.invalid/setup', outputDir: '/unused', appiumUrl: 'http://protocol.invalid', certificate: '/unused' });
+      ? new IOSPlatform({ deviceId: 'synthetic', origin: 'https://fixture.invalid', outputDir: '/unused', appiumUrl: 'http://protocol.invalid', certificate: '/unused' })
+      : new AndroidPlatform({ deviceId: 'synthetic', origin: 'https://fixture.invalid', outputDir: '/unused', appiumUrl: 'http://protocol.invalid', certificate: '/unused' });
     (platform as any).driver = driver;
     (platform as any).startupLog = { finish: async () => { finished++; } };
     const stopping = platform.stopOwnedResources();

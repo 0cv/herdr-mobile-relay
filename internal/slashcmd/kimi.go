@@ -4,11 +4,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
 )
 
 // kimiBuiltins mirrors the primary interactive TUI commands in standalone
-// Kimi Code 0.36.1. AgentVersion remains available in DiscoverContext for a
-// clean cutover when the command registry changes.
+// Kimi Code 0.36.1.
 var kimiBuiltins = []Command{
 	{"/yolo", "Toggle YOLO mode: auto-approve tool actions, but the agent may still ask questions", "builtin", ""},
 	{"/auto", "Toggle Auto mode: fully autonomous, agent decides everything without asking", "builtin", ""},
@@ -55,6 +56,8 @@ type kimiProvider struct{}
 
 func (p *kimiProvider) ID() string { return "kimi" }
 
+func (p *kimiProvider) Builtins() []Command { return kimiBuiltins }
+
 // Discover reproduces standalone Kimi Code's native skill roots, verified
 // against MoonshotAI/kimi-code's packages/agent-core/src/skill/scanner.ts:
 // project .kimi-code and .agents roots, the KIMI_CODE_HOME user root, the
@@ -67,20 +70,12 @@ func (p *kimiProvider) ID() string { return "kimi" }
 // skills, never the winners.
 func (p *kimiProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	reader := newCatalogReader()
-	if ctx.SuppressNative {
-		builtins := make([]Command, len(kimiBuiltins))
-		copy(builtins, kimiBuiltins)
-		return builtins, reader.truncated
-	}
 	if ctx.CommandFormat != "" {
-		// The relay's INI configured this profile explicitly, which outranks
-		// discovery.
-		custom, truncated := reader.discoverGenericSkills(ctx.SkillDirs, ctx.CommandFormat)
-		return builtinsWithCustom(kimiBuiltins, custom), truncated || reader.truncated
+		return reader.configuredCatalog(kimiBuiltins, ctx)
 	}
 
 	configDir := filepath.Join(ctx.Home, ".kimi-code")
-	if configured := expandTilde(strings.TrimSpace(os.Getenv("KIMI_CODE_HOME")), ctx.Home); configured != "" &&
+	if configured := agentroots.ExpandTilde(strings.TrimSpace(os.Getenv("KIMI_CODE_HOME")), ctx.Home); configured != "" &&
 		filepath.IsAbs(configured) {
 		configDir = configured
 	}
@@ -93,19 +88,7 @@ func (p *kimiProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 
 	truncated := false
 	budget := maxCustomFiles
-	active := make(map[string]Command, len(kimiBuiltins))
-	order := make([]string, 0, len(kimiBuiltins))
-	apply := func(commands []Command) {
-		for _, command := range commands {
-			key := strings.ToLower(command.Command)
-			if _, exists := active[key]; exists {
-				continue
-			}
-			order = append(order, key)
-			active[key] = command
-		}
-	}
-	apply(kimiBuiltins)
+	list := newCommandList(kimiBuiltins, true)
 	seenFiles := make(map[string]bool)
 	seenDirs := make(map[string]bool)
 
@@ -117,7 +100,7 @@ func (p *kimiProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 				continue
 			}
 			cmds, trunc := reader.scanPiSkillTree(dir, scope, nil, true, true, &budget, seenFiles, seenDirs)
-			apply(cmds)
+			list.addIfAbsent(cmds)
 			truncated = truncated || trunc
 		}
 	}
@@ -145,7 +128,7 @@ func (p *kimiProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	// Extra roots are lower precedence than project and user roots. Relative
 	// entries resolve from the project root; "~" resolves from the real home.
 	for _, dir := range settings.extraSkillDirs {
-		dir = expandTilde(dir, ctx.Home)
+		dir = agentroots.ExpandTilde(dir, ctx.Home)
 		if strings.HasPrefix(dir, "~") {
 			continue
 		}
@@ -158,16 +141,10 @@ func (p *kimiProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 		scan("personal", dir)
 	}
 
-	commands := make([]Command, 0, len(order))
-	for _, name := range order {
-		if command, exists := active[name]; exists {
-			commands = append(commands, command)
-		}
-	}
 	if budget <= 0 {
 		truncated = true
 	}
-	return commands, truncated || reader.truncated
+	return list.commands(), truncated || reader.truncated
 }
 
 func init() { registerProvider(&kimiProvider{}) }

@@ -36,6 +36,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/0cv/herdr-mobile-relay/internal/agentkind"
 )
 
 // Relay-side overrides. Each holds a colon-separated list (the platform
@@ -205,38 +207,6 @@ func OMP(home string) []string {
 		profileAgentDirs(configRoot)...)
 }
 
-// OMPSkillDirs reports the directories holding Oh My Pi's own (native) skills,
-// one per agent directory resolved for OMP.
-func OMPSkillDirs(home string) []string {
-	configRoot := filepath.Join(home, ".omp")
-	return resolve(home, OMPListEnv, "PI_CODING_AGENT_DIR", filepath.Join(configRoot, "agent"), "skills",
-		profileAgentDirs(configRoot)...)
-}
-
-// OMPManagedSkillDirs reports the directories holding Oh My Pi's managed skills,
-// the ones the agent mints for itself.
-func OMPManagedSkillDirs(home string) []string {
-	configRoot := filepath.Join(home, ".omp")
-	return resolve(home, OMPListEnv, "PI_CODING_AGENT_DIR", filepath.Join(configRoot, "agent"), "managed-skills",
-		profileAgentDirs(configRoot)...)
-}
-
-// OMPConfigDirs reports the Oh My Pi agent directories themselves, where
-// config.yml lives. A named profile keeps its own config file, so this is the
-// only way to reach the settings that actually apply to a profile's pane.
-func OMPConfigDirs(home string) []string {
-	configRoot := filepath.Join(home, ".omp")
-	return resolve(home, OMPListEnv, "PI_CODING_AGENT_DIR", filepath.Join(configRoot, "agent"), "",
-		profileAgentDirs(configRoot)...)
-}
-
-// PiSkillDirs reports the directories holding Pi's own skills.
-func PiSkillDirs(home string) []string {
-	configRoot := filepath.Join(home, ".pi")
-	return resolve(home, PiListEnv, "PI_CODING_AGENT_DIR", filepath.Join(configRoot, "agent"), "skills",
-		profileAgentDirs(configRoot)...)
-}
-
 // PiConfigDirs reports the Pi agent directories themselves, where settings.json
 // lives.
 func PiConfigDirs(home string) []string {
@@ -250,11 +220,10 @@ func PiConfigDirs(home string) []string {
 // profile instead of merging every profile into one catalog.
 func AgentDirForSession(home, agent, sessionPath string) string {
 	var roots []string
-	normalized := strings.NewReplacer("-", "", "_", "", " ", "").Replace(strings.ToLower(strings.TrimSpace(agent)))
-	switch normalized {
-	case "pi", "picodingagent":
+	switch agentkind.Of(agent) {
+	case agentkind.Pi:
 		roots = Pi(home)
-	case "omp", "ohmypi":
+	case agentkind.OMP:
 		roots = OMP(home)
 	default:
 		return ""
@@ -406,7 +375,7 @@ func resolve(home, listEnv, singleEnv, homeBase, leaf string, discovered ...stri
 		// quotes, so the documented syntax would otherwise silently degrade
 		// to a relative path. Expand it ourselves, before the absolute-path
 		// check below, so a home-relative entry is not rejected as relative.
-		base = expandTilde(base, home)
+		base = ExpandTilde(base, home)
 		// Anything still relative here would join against the relay's
 		// working directory instead of the caller's intended root, which
 		// produces the exact missing-history symptom this package exists to
@@ -439,7 +408,7 @@ func resolve(home, listEnv, singleEnv, homeBase, leaf string, discovered ...stri
 
 	// The home default is a fallback, even when it was also named explicitly.
 	// Remove its earlier occurrence and append it once at the end.
-	homeRoot := filepath.Clean(filepath.Join(expandTilde(strings.TrimSpace(homeBase), home), leaf))
+	homeRoot := filepath.Clean(filepath.Join(ExpandTilde(strings.TrimSpace(homeBase), home), leaf))
 	if filepath.IsAbs(homeRoot) {
 		filtered := roots[:0]
 		for _, root := range roots {
@@ -452,7 +421,7 @@ func resolve(home, listEnv, singleEnv, homeBase, leaf string, discovered ...stri
 	return roots
 }
 
-// expandTilde expands a leading "~" or "~/" against home, the same shorthand a
+// ExpandTilde expands a leading "~" or "~/" against home, the same shorthand a
 // shell would expand before a program ever saw the value. It exists only
 // because this package reads its input straight from the environment of a
 // launchd/systemd service, which is never a shell, so nothing upstream has
@@ -463,7 +432,7 @@ func resolve(home, listEnv, singleEnv, homeBase, leaf string, discovered ...stri
 // are deliberately left untouched rather than guessed at - they fall through
 // unchanged and are then rejected as relative by the same guard, like any
 // other relative entry.
-func expandTilde(path, home string) string {
+func ExpandTilde(path, home string) string {
 	if path == "~" {
 		return home
 	}

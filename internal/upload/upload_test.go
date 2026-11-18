@@ -613,6 +613,40 @@ func TestFinishRollbackDoesNotPublishPartialRecords(t *testing.T) {
 	}
 }
 
+func TestFinishRemovesObjectsWhenIndexCannotBePublished(t *testing.T) {
+	now := time.Now()
+	manager := newTestManager(t, &now)
+	target := uploadTarget(1)
+	data := []byte("attachment")
+	begin := beginOne(t, manager, target, "note.txt", "text/plain", int64(len(data)))
+	sendChunk(t, manager, target, begin.UploadID, 0, 0, data)
+	indexPath := filepath.Join(manager.rootPath, attachmentIndexFilename)
+	if err := os.Remove(indexPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(indexPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := manager.Finish(FinishRequest{
+		Target: target, UploadID: begin.UploadID,
+		Files: []FileDigest{{FileIndex: 0, SHA256: digestFor(data)}},
+	})
+	if errorCode(t, err) != "upload_metadata_unavailable" {
+		t.Fatalf("finish error = %v", err)
+	}
+	if len(manager.attachments) != 0 {
+		t.Fatalf("published attachments after failure = %d", len(manager.attachments))
+	}
+	objects, err := os.ReadDir(filepath.Join(manager.rootPath, "objects"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(objects) != 0 {
+		t.Fatalf("objects after failure = %v", objects)
+	}
+}
+
 func TestExactFilenameAndIndexedExpirySurviveCleanup(t *testing.T) {
 	now := time.Now()
 	manager := newTestManager(t, &now)
@@ -641,21 +675,13 @@ func TestExactFilenameAndIndexedExpirySurviveCleanup(t *testing.T) {
 	}
 }
 
-func TestStartupRemovesNonResumableSessionsAndPrunesLegacyUploads(t *testing.T) {
+func TestStartupRemovesNonResumableSessions(t *testing.T) {
 	now := time.Now()
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "sessions", "stale-session"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(root, "sessions", "stale-session", "0000.part"), []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	legacy := filepath.Join(root, "20260902-123456-deadbeef-photo.jpg")
-	if err := os.WriteFile(legacy, []byte("legacy"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	old := now.Add(-2 * time.Hour)
-	if err := os.Chtimes(legacy, old, old); err != nil {
 		t.Fatal(err)
 	}
 	manager, err := NewManager(Config{
@@ -669,8 +695,5 @@ func TestStartupRemovesNonResumableSessionsAndPrunesLegacyUploads(t *testing.T) 
 	defer manager.Close()
 	if _, err := os.Stat(filepath.Join(root, "sessions", "stale-session")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("stale session still exists: %v", err)
-	}
-	if _, err := os.Stat(legacy); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("legacy upload still exists: %v", err)
 	}
 }

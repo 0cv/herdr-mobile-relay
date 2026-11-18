@@ -1,9 +1,6 @@
 package localize
 
-import (
-	"reflect"
-	"testing"
-)
+import "testing"
 
 func TestNormalizeLocale(t *testing.T) {
 	tests := []struct {
@@ -27,17 +24,5 @@ func TestNormalizeLocale(t *testing.T) {
 				t.Fatalf("NormalizeLocale(%q) = %q, want %q", test.input, got, test.want)
 			}
 		})
-	}
-}
-
-func TestSupportedLocalesReturnsCompleteCopy(t *testing.T) {
-	want := []Locale{English, SimplifiedChinese}
-	first := SupportedLocales()
-	if !reflect.DeepEqual(first, want) {
-		t.Fatalf("SupportedLocales() = %v, want %v", first, want)
-	}
-	first[0] = Locale("changed")
-	if got := SupportedLocales(); !reflect.DeepEqual(got, want) {
-		t.Fatalf("SupportedLocales() shared mutable storage: %v", got)
 	}
 }

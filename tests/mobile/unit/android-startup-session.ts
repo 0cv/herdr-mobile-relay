@@ -7,6 +7,7 @@ import { AndroidStartupLog } from '../support/android-startup-log';
 import { PhaseBudget } from '../support/budget';
 import { AppiumClient, WebDriverError } from '../support/webdriver';
 import { androidSetupReverseLossTests } from './android-setup-reverse-loss';
+import { FakeClock } from './fake-clock';
 
 type Mode = 'reconnect' | 'repeated' | 'timeout' | 'other' | 'active-session' | 'sticky-driver' | 'expired-budget' | 'restore-failure';
 
@@ -16,8 +17,8 @@ async function replay(mode: Mode): Promise<void> {
   const saved = { adb: process.env.ADB, ownership: process.env.MOBILE_DEVICE_OWNERSHIP_FILE };
   const start = AndroidStartupLog.prototype.start;
   AndroidStartupLog.prototype.start = function () {};
-  let now = 0;
-  const budget = new PhaseBudget('startup-replay', { timeoutMs: 300_000, now: () => now });
+  const clock = new FakeClock();
+  const budget = new PhaseBudget('startup-replay', { timeoutMs: 300_000, now: clock.now, sleep: clock.sleep });
   const trace: string[] = [];
   const log = join(root, 'adb.log');
   let chromeAttempts = 0;
@@ -41,7 +42,7 @@ async function replay(mode: Mode): Promise<void> {
     trace.push('chrome');
     chromeAttempts++;
     if (mode === 'timeout') throw new DOMException('recorded request timed out', 'TimeoutError');
-    if (mode === 'expired-budget') now = 300_001;
+    if (mode === 'expired-budget') clock.elapsed = 300_001;
     if (mode === 'active-session') return Response.json({ value: { sessionId: 'ambiguous', capabilities: {} } });
     if (mode !== 'reconnect' || chromeAttempts === 1) {
       return Response.json(mode === 'other' ? { value: { error: 'unknown error', message: 'instrumentation crashed' } } : { value: recorded.value }, { status: recorded.status });
@@ -51,7 +52,7 @@ async function replay(mode: Mode): Promise<void> {
   });
   client.setBudget(budget);
   const platform = new AndroidPlatform({
-    deviceId: 'emulator-5554', origin: 'https://fixture.test', setupUrl: 'https://fixture.test/setup',
+    deviceId: 'emulator-5554', origin: 'https://fixture.test',
     outputDir: root, appiumUrl: 'http://startup.invalid', certificate: '/unused', budget,
   });
   Object.assign(platform, { driver: client });

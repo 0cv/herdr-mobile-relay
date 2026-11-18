@@ -8,6 +8,7 @@ import { conversationIdentity } from '$lib/conversation-history';
 import { securityState, type SecurityState } from '$lib/security';
 import { relayStore } from '$lib/store';
 import type { Agent, ConversationBatch, ConversationPage } from '$lib/types';
+import { deferred } from '../support/relay';
 
 const agent: Agent = {
   relay_id: 'snapshot-test', relay_label: 'Fixture', raw_pane_id: 'pane', pane_id: 'snapshot-test::pane',
@@ -16,16 +17,10 @@ const agent: Agent = {
 };
 const entry = (id: string, text: string) => ({ id, role: 'assistant' as const, timestamp: '', text });
 
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => { resolve = done; });
-  return { promise, resolve };
-}
-
 function savePreview() {
   expect(putConversationPreview({
     identity: conversationIdentity(agent)!, relayId: agent.relay_id, savedAt: Date.now(),
-    sourceRevision: 'source:1', historical: true, mode: 'native',
+    sourceRevision: 'source:1', historical: true,
     entries: [entry('cached', 'Cached answer')],
   })).toBe(true);
 }
@@ -65,6 +60,41 @@ it('shows the initial loading state and aborts the real controller request on un
   await pending.promise;
   await tick();
   expect(onInitialPage).not.toHaveBeenCalled();
+});
+
+it.each(['source_truncated', 'oversized_records', 'corrupt_records', 'continuation_incomplete'] as const)(
+  'shows the empty-history explanation once with %s',
+  async diagnostic => {
+    vi.spyOn(relayStore, 'getConversationHistory').mockResolvedValue({
+      available: true, reason: '', entries: [], hasMore: false, total: 0,
+      state: 'ready', diagnostics: {
+        source_truncated: diagnostic === 'source_truncated',
+        oversized_records: Number(diagnostic === 'oversized_records'),
+        corrupt_records: Number(diagnostic === 'corrupt_records'),
+        continuation_incomplete: diagnostic === 'continuation_incomplete',
+      },
+    });
+    render(ConversationHistory, { agent });
+
+    const message = 'No readable conversation messages are available in the loaded history.';
+    expect(await screen.findByText(message)).toBeVisible();
+    expect(screen.getAllByText(message)).toHaveLength(1);
+  },
+);
+
+it('shows the conversation-only empty explanation once for tool activity', async () => {
+  localStorage.setItem('herdr-conversation-view', 'conversation');
+  vi.spyOn(relayStore, 'getConversationHistory').mockResolvedValue({
+    available: true, reason: '', entries: [{ ...entry('tool-only', ''), tools: [{ name: 'read', input: '/fixture/file' }] }],
+    hasMore: false, total: 1, state: 'ready',
+  });
+  render(ConversationHistory, { agent });
+
+  const message = 'No user prompts or agent answers are recorded in the available history.';
+  expect(await screen.findByText(message)).toBeVisible();
+  expect(screen.getAllByText(message)).toHaveLength(1);
+  await fireEvent.click(screen.getByRole('button', { name: 'Full history' }));
+  expect(screen.queryByText(message)).not.toBeInTheDocument();
 });
 
 it('keeps a warm preview until the synchronous initial callback and fresh live observation', async () => {

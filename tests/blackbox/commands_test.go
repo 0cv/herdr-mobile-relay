@@ -16,19 +16,11 @@ import (
 func TestSendPromptAndReceiveResult(t *testing.T) {
 	env := setupEnv(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	conn, _, err := websocket.Dial(ctx, env.wsURL, nil)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer conn.Close(websocket.StatusNormalClosure, "")
+	ctx, conn := dial(t, env, 10*time.Second)
 
 	// Send a prompt command
 	prompt := map[string]any{
-		"type":       "command",
-		"action":     "submit_prompt",
+		"type":       "submit_prompt",
 		"request_id": "test-req-1",
 		"protocol":   3,
 		"pane_id":    "pane-1",
@@ -67,19 +59,12 @@ func TestSendPromptAndReceiveResult(t *testing.T) {
 
 func TestQoderPromptSendsTextAndEnter(t *testing.T) {
 	scenario := `{"panes":[{"pane_id":"pane-1","agent":"qodercli","name":"test","agent_status":"working","tab_id":"tab-1","workspace_id":"ws-1","cwd":"/tmp","revision":1,"foreground_cwd":"/tmp"}],"tabs":[{"tab_id":"tab-1","workspace_id":"ws-1","label":"main","number":1,"cwd":"/tmp"}]}`
-	env := setupEnvWithScenario(t, scenario)
+	env := startRelay(t, relayOptions{scenario: scenario})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	conn, _, err := websocket.Dial(ctx, env.wsURL, nil)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer conn.Close(websocket.StatusNormalClosure, "")
+	ctx, conn := dial(t, env, 10*time.Second)
 
 	prompt, _ := json.Marshal(map[string]any{
-		"type":       "command",
-		"action":     "submit_prompt",
+		"type":       "submit_prompt",
 		"request_id": "qoder-prompt",
 		"protocol":   3,
 		"pane_id":    "pane-1",
@@ -106,18 +91,10 @@ func TestQoderPromptSendsTextAndEnter(t *testing.T) {
 func TestSendKeysCommand(t *testing.T) {
 	env := setupEnv(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	conn, _, err := websocket.Dial(ctx, env.wsURL, nil)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer conn.Close(websocket.StatusNormalClosure, "")
+	ctx, conn := dial(t, env, 10*time.Second)
 
 	cmd := map[string]any{
-		"type":       "command",
-		"action":     "send_keys",
+		"type":       "send_keys",
 		"request_id": "test-req-2",
 		"protocol":   3,
 		"pane_id":    "pane-1",
@@ -141,18 +118,10 @@ func TestSendKeysCommand(t *testing.T) {
 func TestAcknowledgePane(t *testing.T) {
 	env := setupEnv(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	conn, _, err := websocket.Dial(ctx, env.wsURL, nil)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer conn.Close(websocket.StatusNormalClosure, "")
+	ctx, conn := dial(t, env, 10*time.Second)
 
 	cmd := map[string]any{
-		"type":       "command",
-		"action":     "acknowledge_pane",
+		"type":       "acknowledge_pane",
 		"request_id": "test-req-3",
 		"protocol":   3,
 		"pane_id":    "pane-1",
@@ -175,18 +144,10 @@ func TestAcknowledgePane(t *testing.T) {
 func TestUnknownActionReturnsError(t *testing.T) {
 	env := setupEnv(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	conn, _, err := websocket.Dial(ctx, env.wsURL, nil)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer conn.Close(websocket.StatusNormalClosure, "")
+	ctx, conn := dial(t, env, 10*time.Second)
 
 	cmd := map[string]any{
-		"type":       "command",
-		"action":     "nonexistent_action",
+		"type":       "nonexistent_action",
 		"request_id": "test-req-4",
 		"protocol":   3,
 	}
@@ -206,17 +167,44 @@ func TestUnknownActionReturnsError(t *testing.T) {
 	}
 }
 
+func TestOnlyDirectActionEnvelopeIsDispatched(t *testing.T) {
+	env := setupEnv(t)
+	ctx, conn := dial(t, env, 10*time.Second)
+
+	for _, tc := range []struct {
+		name   string
+		fields map[string]any
+		code   string
+	}{
+		{"command", map[string]any{"type": "command", "action": "submit_prompt"}, "unknown_action"},
+		{"action only", map[string]any{"action": "submit_prompt"}, "invalid_request"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request := tc.fields
+			request["request_id"] = tc.name
+			request["protocol"] = 3
+			request["pane_id"] = "pane-1"
+			request["text"] = "must not dispatch"
+			data, err := json.Marshal(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
+				t.Fatal(err)
+			}
+			result := readJSON(t, conn, ctx, 5*time.Second)
+			apiError, _ := result["error"].(map[string]any)
+			if result["type"] != "error" || result["request_id"] != tc.name || apiError["code"] != tc.code {
+				t.Fatalf("unsupported envelope result = %v", result)
+			}
+		})
+	}
+}
+
 func TestReadPane(t *testing.T) {
 	env := setupEnv(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	conn, _, err := websocket.Dial(ctx, env.wsURL, nil)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer conn.Close(websocket.StatusNormalClosure, "")
+	ctx, conn := dial(t, env, 10*time.Second)
 
 	cmd := map[string]any{
 		"type":    "read_pane",
@@ -257,15 +245,9 @@ func TestReadQoderHistoryRespectsRequestedLines(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	env := setupEnvWithScenario(t, string(scenario))
+	env := startRelay(t, relayOptions{scenario: string(scenario)})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	conn, _, err := websocket.Dial(ctx, env.wsURL, nil)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer conn.Close(websocket.StatusNormalClosure, "")
+	ctx, conn := dial(t, env, 10*time.Second)
 
 	readPane := func() map[string]any {
 		t.Helper()
@@ -315,15 +297,9 @@ func TestHiddenPromptRouteKeepsTheSecretOutOfTextAndScrollback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	env := setupEnvWithScenario(t, string(scenario))
+	env := startRelay(t, relayOptions{scenario: string(scenario)})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	conn, _, err := websocket.Dial(ctx, env.wsURL, nil)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer conn.Close(websocket.StatusNormalClosure, "")
+	ctx, conn := dial(t, env, 10*time.Second)
 
 	send := func(command map[string]any) map[string]any {
 		t.Helper()
@@ -404,15 +380,9 @@ func TestReadAndAnswerStructuredQuestion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	env := setupEnvWithScenario(t, string(scenario))
+	env := startRelay(t, relayOptions{scenario: string(scenario)})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	conn, _, err := websocket.Dial(ctx, env.wsURL, nil)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer conn.Close(websocket.StatusNormalClosure, "")
+	ctx, conn := dial(t, env, 10*time.Second)
 
 	read, _ := json.Marshal(map[string]any{
 		"type": "read_pane", "pane_id": "pane-1", "lines": 80, "format": "ansi",
@@ -457,14 +427,8 @@ func TestNavigateStructuredQuestionTwice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	env := setupEnvWithScenario(t, string(scenario))
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	conn, _, err := websocket.Dial(ctx, env.wsURL, nil)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer conn.Close(websocket.StatusNormalClosure, "")
+	env := startRelay(t, relayOptions{scenario: string(scenario)})
+	ctx, conn := dial(t, env, 15*time.Second)
 
 	read, _ := json.Marshal(map[string]any{
 		"type": "read_pane", "pane_id": "pane-1", "lines": 80, "format": "ansi",

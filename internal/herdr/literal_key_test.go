@@ -174,3 +174,39 @@ func TestSendLiteralKeyLostAcknowledgementDoesNotRetry(t *testing.T) {
 		t.Fatal("writer retried an uncertain request")
 	}
 }
+
+func TestSendLiteralKeyRefusalKeepsStructuredCode(t *testing.T) {
+	path := filepath.Join(testSocketDir(t), "herdr.sock")
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		var request struct {
+			ID string `json:"id"`
+		}
+		if json.NewDecoder(conn).Decode(&request) != nil {
+			return
+		}
+		_ = json.NewEncoder(conn).Encode(map[string]any{
+			"id":    request.ID,
+			"error": map[string]any{"code": "pane_not_found", "message": "no such pane"},
+		})
+	}()
+	client := NewClient("unused", path)
+	defer client.Close()
+	err = client.SendLiteralKey(context.Background(), "pane-1", "g")
+	var cliErr *CLIError
+	if !errors.As(err, &cliErr) || cliErr.Code != "pane_not_found" {
+		t.Fatalf("SendLiteralKey() = %v, want *CLIError with pane_not_found", err)
+	}
+	if errors.Is(err, ErrDispatchedUnknown) {
+		t.Fatalf("SendLiteralKey() = %v classifies a definitive refusal as dispatched-unknown", err)
+	}
+}

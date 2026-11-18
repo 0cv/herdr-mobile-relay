@@ -1,6 +1,6 @@
-import { cloneEntries, clonePlan } from './conversation-values';
+import { estimateEntriesBytes } from './conversation-values';
 import { registerConversationCacheClearer } from './conversation-cache-control';
-import type { ConversationBrowseDiagnostics, ConversationBrowseMode, ConversationEntry, OmoTodoState } from './types';
+import type { ConversationBrowseDiagnostics, ConversationEntry, OmoTodoState } from './types';
 
 /** Maximum number of conversation identities retained in the in-memory preview. */
 export const CONVERSATION_CACHE_MAX_IDENTITIES = 6;
@@ -10,8 +10,7 @@ export const CONVERSATION_CACHE_TTL_MS = 10 * 60_000;
 export const CONVERSATION_CACHE_ITEM_BYTES = 4 * 1024 * 1024;
 /** Aggregate UTF-16 accounting budget. */
 export const CONVERSATION_CACHE_TOTAL_BYTES = 24 * 1024 * 1024;
-/** Do not retain unbounded raw history in a warm phone preview. */
-export const CONVERSATION_CACHE_MAX_ENTRIES = 1_000;
+export const CONVERSATION_PREVIEW_PAGE_SIZE = 24;
 
 export interface ConversationPreview {
   identity: string;
@@ -20,7 +19,6 @@ export interface ConversationPreview {
   savedAt: number;
   sourceRevision: string;
   historical: boolean;
-  mode?: ConversationBrowseMode;
   diagnostics?: ConversationBrowseDiagnostics;
   plan?: OmoTodoState | null;
   entries: ConversationEntry[];
@@ -31,7 +29,6 @@ export interface ConversationCacheLimits {
   ttlMs: number;
   itemBytes: number;
   totalBytes: number;
-  maxEntries: number;
 }
 
 interface CacheRecord {
@@ -53,7 +50,6 @@ export function defaultConversationCacheLimits(): ConversationCacheLimits {
     ttlMs: CONVERSATION_CACHE_TTL_MS,
     itemBytes: CONVERSATION_CACHE_ITEM_BYTES,
     totalBytes: CONVERSATION_CACHE_TOTAL_BYTES,
-    maxEntries: CONVERSATION_CACHE_MAX_ENTRIES,
   };
 }
 
@@ -69,7 +65,6 @@ export function configureConversationCache(next: Partial<ConversationCacheLimits
     ttlMs: Math.max(1, Math.trunc(next.ttlMs ?? limits.ttlMs)),
     itemBytes: Math.max(1, Math.trunc(next.itemBytes ?? limits.itemBytes)),
     totalBytes: Math.max(1, Math.trunc(next.totalBytes ?? limits.totalBytes)),
-    maxEntries: Math.max(1, Math.trunc(next.maxEntries ?? limits.maxEntries)),
   };
   clearConversationPreviews();
 }
@@ -79,7 +74,7 @@ export function resetConversationCacheLimits(): void {
   clearConversationPreviews();
 }
 
-export function getConversationPreview(identity: string, now = Date.now(), entryLimit = limits.maxEntries): ConversationPreview | null {
+export function getConversationPreview(identity: string, now = Date.now()): ConversationPreview | null {
   const record = cache.get(identity);
   if (!record) return null;
   if (now - record.preview.savedAt >= limits.ttlMs) {
@@ -87,7 +82,7 @@ export function getConversationPreview(identity: string, now = Date.now(), entry
     return null;
   }
   record.lastUsed = now;
-  return clonePreview(record.preview, entryLimit);
+  return record.preview;
 }
 
 export function putConversationPreview(preview: ConversationPreview, now = Date.now()): boolean {
@@ -96,14 +91,9 @@ export function putConversationPreview(preview: ConversationPreview, now = Date.
   if (!candidate) return false;
   const bytes = estimatePreviewBytes(candidate);
   if (bytes > limits.itemBytes || bytes > limits.totalBytes) return false;
-  const previous = cache.get(candidate.identity);
   cache.set(candidate.identity, { preview: candidate, bytes, lastUsed: now });
-  evictToLimits(now, previous?.bytes || 0);
+  evictToLimits(now);
   return cache.has(candidate.identity);
-}
-
-export function deleteConversationPreview(identity: string): void {
-  cache.delete(identity);
 }
 
 export function clearConversationPreviews(): void {
@@ -124,13 +114,14 @@ export function conversationPreviewCacheSize(): { identities: number; bytes: num
   return { identities: cache.size, bytes };
 }
 
+export function conversationPreviewEntries(entries: ConversationEntry[]): ConversationEntry[] {
+  return entries.slice(-CONVERSATION_PREVIEW_PAGE_SIZE);
+}
+
 function boundedPreview(input: ConversationPreview): ConversationPreview | null {
-  const entries = cloneEntries(input.entries);
+  const entries = conversationPreviewEntries(input.entries);
   if (!entries.length) return null;
 
-  // Group the raw records into whole exchanges. A leading assistant-only
-  // fragment is part of the first group and is discarded together with that
-  // group when the newest suffix is selected.
   const groups: ConversationEntry[][] = [];
   let current: ConversationEntry[] = [];
   for (const entry of entries) {
@@ -144,18 +135,16 @@ function boundedPreview(input: ConversationPreview): ConversationPreview | null 
   if (!groups.length) return null;
 
   const retained: ConversationEntry[][] = [];
-  let retainedCount = 0;
   let retainedBytes = 0;
   for (let index = groups.length - 1; index >= 0; index--) {
     const group = groups[index];
     const groupBytes = estimateEntriesBytes(group);
-    if (group.length > limits.maxEntries || groupBytes > limits.itemBytes) {
+    if (groupBytes > limits.itemBytes) {
       if (!retained.length) return null;
       break;
     }
-    if (retainedCount + group.length > limits.maxEntries || retainedBytes + groupBytes > limits.itemBytes) break;
+    if (retainedBytes + groupBytes > limits.itemBytes) break;
     retained.unshift(group);
-    retainedCount += group.length;
     retainedBytes += groupBytes;
   }
   if (!retained.length) return null;
@@ -166,17 +155,13 @@ function boundedPreview(input: ConversationPreview): ConversationPreview | null 
     savedAt: Number.isFinite(input.savedAt) ? input.savedAt : Date.now(),
     sourceRevision: input.sourceRevision || '',
     historical: input.historical === true,
-    ...(input.mode ? { mode: input.mode } : {}),
-    ...(input.diagnostics ? { diagnostics: cloneDiagnostics(input.diagnostics) } : {}),
-    ...(input.plan ? { plan: clonePlan(input.plan) } : {}),
+    ...(input.diagnostics ? { diagnostics: input.diagnostics } : {}),
+    ...(input.plan ? { plan: input.plan } : {}),
     entries: keptEntries,
   };
 }
 
-function evictToLimits(now: number, replacedBytes: number): void {
-  // `replacedBytes` is intentionally unused in the map scan below; retaining it
-  // in the signature documents that a replacement is not double-counted.
-  void replacedBytes;
+function evictToLimits(now: number): void {
   for (const [identity, record] of cache) {
     if (now - record.preview.savedAt >= limits.ttlMs) cache.delete(identity);
   }
@@ -193,19 +178,6 @@ function totalCacheBytes(): number {
   return total;
 }
 
-function clonePreview(preview: ConversationPreview, entryLimit: number): ConversationPreview {
-  return {
-    ...preview,
-    ...(preview.diagnostics ? { diagnostics: cloneDiagnostics(preview.diagnostics) } : {}),
-    ...(preview.plan ? { plan: clonePlan(preview.plan) } : {}),
-    entries: cloneEntries(preview.entries.slice(-Math.max(1, Math.trunc(entryLimit)))),
-  };
-}
-
-function cloneDiagnostics(diagnostics: ConversationBrowseDiagnostics): ConversationBrowseDiagnostics {
-  return { ...diagnostics };
-}
-
 /** Conservative UTF-16 heap accounting, not a serialized wire-size estimate. */
 function estimatePreviewBytes(preview: ConversationPreview): number {
   return estimateEntriesBytes(preview.entries)
@@ -214,14 +186,6 @@ function estimatePreviewBytes(preview: ConversationPreview): number {
     + estimateString(preview.sourceRevision)
     + estimateObjectBytes(preview.diagnostics)
     + estimateObjectBytes(preview.plan);
-}
-
-function estimateEntriesBytes(entries: ConversationEntry[]): number {
-  return entries.reduce((total, entry) => total + 96 + estimateString(entry.id)
-    + estimateString(entry.timestamp) + estimateString(entry.text)
-    + (entry.tools || []).reduce((toolTotal, tool) => toolTotal + 64
-      + estimateString(tool.id) + estimateString(tool.name) + estimateString(tool.input)
-      + estimateString(tool.output), 0), 0);
 }
 
 function estimateString(value: unknown): number {

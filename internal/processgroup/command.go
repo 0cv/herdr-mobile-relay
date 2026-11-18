@@ -12,7 +12,8 @@ import (
 
 const (
 	termGrace = 2 * time.Second
-	waitDelay = 4 * time.Second
+	// WaitDelay bounds how long Wait lingers on output pipes after the process exits.
+	WaitDelay = 4 * time.Second
 )
 
 // Options controls the caller-specific cancellation policy.
@@ -27,7 +28,7 @@ func Run(ctx context.Context, command *exec.Cmd, options Options) ([]byte, error
 		return nil, err
 	}
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	command.WaitDelay = waitDelay
+	command.WaitDelay = WaitDelay
 	stdout := &bytes.Buffer{}
 	stderr := &bytes.Buffer{}
 	command.Stdout = stdout
@@ -46,7 +47,7 @@ func Run(ctx context.Context, command *exec.Cmd, options Options) ([]byte, error
 	case <-ctx.Done():
 		// Wait joins os/exec's stream-copy goroutines. If it has not completed,
 		// those goroutines may still write, so neither buffer may be read.
-		if terminateProcessGroup(command.Process.Pid, waitCh, options.PostKillWait) && options.ReturnOutputOnCancel {
+		if Terminate(command.Process.Pid, waitCh, options.PostKillWait) && options.ReturnOutputOnCancel {
 			return combinedCommandOutput(stdout, stderr), ctx.Err()
 		}
 		return nil, ctx.Err()
@@ -59,7 +60,9 @@ func combinedCommandOutput(stdout, stderr *bytes.Buffer) []byte {
 	return append(output, stderr.Bytes()...)
 }
 
-func terminateProcessGroup(pgid int, waitCh <-chan error, postKillWait time.Duration) bool {
+// Terminate sends SIGTERM to the process group, escalates to SIGKILL after a grace
+// period, and reports whether the leader's Wait completed (received on waitCh).
+func Terminate(pgid int, waitCh <-chan error, postKillWait time.Duration) bool {
 	_ = syscall.Kill(-pgid, syscall.SIGTERM)
 	timer := time.NewTimer(termGrace)
 	defer timer.Stop()

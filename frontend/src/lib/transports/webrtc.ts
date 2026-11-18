@@ -181,8 +181,6 @@ export function createWebRTCChannel(
   }
 
   return {
-    kind: 'webrtc',
-    codec: 'binary',
     open(): void {
       if (closed || connection) return;
       if (typeof RTCPeerConnection === 'undefined') {

@@ -3,9 +3,7 @@ package coordinator
 import (
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -15,32 +13,32 @@ import (
 func TestAgentNotReadyOutcomeDependsOnOperation(t *testing.T) {
 	for _, action := range []string{"submit_prompt", "agent_start"} {
 		t.Run(action, func(t *testing.T) {
-			dir := t.TempDir()
-			record := filepath.Join(dir, "calls")
-			t.Setenv("HERDR_TEST_ARGS", record)
-			bin := writeScript(t, dir, "herdr", "#!/bin/sh\n"+
-				"printf '%s\\n' \"$*\" >> \"$HERDR_TEST_ARGS\"\n"+
-				"if [ \"$1 $2\" = \"agent start\" ]; then\n"+
-				"  printf '%s' '{\"error\":{\"code\":\"agent_not_ready\",\"message\":\"agent reviewer is blocked during startup and is not ready for prompts\"}}' >&2\n"+
-				"  exit 1\n"+
-				"fi\n"+
-				"if [ \"$1 $2\" = \"agent prompt\" ]; then\n"+
-				"  printf '%s' '{\"error\":{\"code\":\"agent_not_ready\",\"message\":\"agent pane-1 is not an active named agent\"}}' >&2\n"+
-				"  exit 1\n"+
-				"fi\n")
-			client := herdr.NewClient(bin, filepath.Join(dir, "herdr.sock"))
-			t.Cleanup(func() { _ = client.Close() })
 			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 			defer cancel()
 			var err error
 			wantPhase := "not_started"
 			wantMessage := "Agent is not ready to receive prompts; review the pane before retrying"
+			var fake *fakeBackend
 			if action == "agent_start" {
-				lifecycle := &Lifecycle{herdr: client}
+				fake = newFakeBackend()
+				fake.setHook("StartAgent", func(context.Context, fakeCall) error {
+					return &herdr.OutcomeError{Started: true, Err: &herdr.CLIError{
+						Code:    "agent_not_ready",
+						Message: "agent reviewer is blocked during startup and is not ready for prompts",
+					}}
+				})
+				lifecycle := &Lifecycle{herdr: fake}
 				err = lifecycle.startKindAgent(ctx, "claude", "reviewer", "pane-1", nil)
 				wantPhase = "dispatched_unknown"
 				wantMessage = "Command may have executed; review the agent before retrying"
 			} else {
+				// The client marks a prompt refusal through an unexported field, so only a real client can produce it.
+				dir := t.TempDir()
+				bin := writeScript(t, dir, "herdr", "#!/bin/sh\n"+
+					"printf '%s' '{\"error\":{\"code\":\"agent_not_ready\",\"message\":\"agent pane-1 is not an active named agent\"}}' >&2\n"+
+					"exit 1\n")
+				client := herdr.NewClient(bin, filepath.Join(dir, "herdr.sock"))
+				t.Cleanup(func() { _ = client.Close() })
 				err = client.Prompt(ctx, "pane-1", "hello")
 			}
 			if err == nil {
@@ -64,15 +62,13 @@ func TestAgentNotReadyOutcomeDependsOnOperation(t *testing.T) {
 				if partial.Phase != "dispatched_unknown" || partialData["dispatched_unknown"] != true {
 					t.Fatalf("result = %+v, want partial input to outrank prompt refusal", partial)
 				}
-			} else if data["dispatched_unknown"] != true || data["code"] != nil {
+				return
+			}
+			if data["dispatched_unknown"] != true || data["code"] != nil {
 				t.Fatalf("data = %+v, want startup retry guard rather than prompt refusal", data)
 			}
-			calls, readErr := os.ReadFile(record)
-			if readErr != nil {
-				t.Fatalf("read Herdr invocations: %v", readErr)
-			}
-			if count := strings.Count(string(calls), "\n"); count != 1 {
-				t.Fatalf("Herdr invocations = %q, want one dispatch without fallback or retry", calls)
+			if count := fake.count("StartAgent"); count != 1 {
+				t.Fatalf("StartAgent calls = %d, want one dispatch without retry", count)
 			}
 		})
 	}

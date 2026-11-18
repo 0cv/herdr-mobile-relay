@@ -1,7 +1,9 @@
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import type { ChildProcess } from 'node:child_process';
-import { assertDistinctUpgrade, type BundleSet } from './support/artifacts';
+import { assertDistinctUpgrade, readBundleSet, type BundleSet } from './support/artifacts';
+import { option, required } from './support/cli';
+import { fixtureControl, fixtureState, waitForFault, waitForFixtureInfo, type FixtureInfo, type FixtureRequest, type FixtureState } from './support/fixture-client';
 import { DiagnosticRecorder, redactText, writeSanitizedJson } from './support/diagnostics';
 import { PhaseBudget } from './support/budget';
 import { command, startCommand, stopProcess } from './support/process';
@@ -38,46 +40,6 @@ import { IOSPlatform } from './platforms/ios';
 import type { MobilePlatform, PlatformOptions, UpdateCompletionEvidence } from './platforms/types';
 import { repositoryPath, repositoryRoot } from './support/paths';
 
-interface FixtureInfo {
-  app_url: string;
-  relay_urls: string[];
-  setup_urls: string[];
-  control_url: string;
-  control_secret: string;
-  ca_certificate: string;
-  old_release: string;
-  candidate_release: string;
-}
-
-interface FixtureRelayState {
-  name: string;
-  invitation_auth_count: number;
-  credential_auth_count: number;
-  credential_pseudonyms: string[];
-  connections: number;
-  install_update_count: number;
-  deploy_app_update_count: number;
-}
-
-interface FixtureRequest {
-  method: string;
-  path: string;
-  fault?: string;
-  fault_id?: string;
-  fault_generation?: string;
-  release: string;
-}
-
-interface FixtureState {
-  active_release: string;
-  app_url: string;
-  requests: FixtureRequest[];
-  faults?: Array<{ id: string; generation: string; method: string; path: string; kind: string; remaining: number }>;
-  invalidated?: boolean;
-  invalidation_reason?: string;
-  relays: FixtureRelayState[];
-}
-
 interface RunResult {
   schema: 2;
   product: { status: 'PASS' | 'FAIL' | 'INDETERMINATE'; categories: string[] };
@@ -87,7 +49,6 @@ interface RunResult {
   primary_failure?: ResultFailure;
   additional_failures?: ResultFailure[];
   platform: string;
-  suite: string;
   baseline: string;
   candidate: string;
   origin?: string;
@@ -114,33 +75,6 @@ interface RunResult {
   budget?: ReturnType<PhaseBudget['snapshot']>;
 }
 
-function option(name: string): string | undefined {
-  const index = process.argv.indexOf(name);
-  return index >= 0 ? process.argv[index + 1] : undefined;
-}
-
-function required(name: string): string {
-  const value = option(name);
-  if (!value) throw new Error(`missing ${name}`);
-  return value;
-}
-
-async function readJsonFile<T>(filename: string): Promise<T> {
-  return JSON.parse(await readFile(filename, 'utf8')) as T;
-}
-
-async function waitForInfo(filename: string, timeoutMs: number, budget?: PhaseBudget): Promise<FixtureInfo> {
-  const deadline = Date.now() + Math.min(timeoutMs, budget?.remainingMs ?? timeoutMs);
-  while (Date.now() < deadline) {
-    try {
-      return await readJsonFile<FixtureInfo>(filename);
-    } catch {
-      await delay(250, budget);
-    }
-  }
-  throw new Error('FIXTURE_STARTUP: fixture did not publish its private info before the deadline');
-}
-
 function fixtureEnvironment(root: string): NodeJS.ProcessEnv {
   return {
     PATH: process.env.PATH || '',
@@ -164,25 +98,6 @@ function startFixture(bundleSet: BundleSet, privateDir: string, infoFile: string
     if (output.join('').length < 1_000_000) output.push(chunk);
   }, { cwd: repositoryRoot, env: fixtureEnvironment(fixtureRoot) });
   return { process: child, output };
-}
-
-async function control(info: FixtureInfo, path: string, method = 'GET', body?: unknown): Promise<any> {
-  const response = await fetch(`${info.control_url}${path}`, {
-    method,
-    headers: {
-      'X-Herdr-Fixture-Secret': info.control_secret,
-      ...(body === undefined ? {} : { 'content-type': 'application/json' }),
-    },
-    body: body === undefined ? undefined : JSON.stringify(body),
-    signal: AbortSignal.timeout(30_000),
-  });
-  const text = await response.text();
-  if (!response.ok) throw new Error(`FIXTURE_CONTROL: HTTP ${response.status}: ${text.slice(0, 300)}`);
-  return text ? JSON.parse(text) : null;
-}
-
-async function fixtureState(info: FixtureInfo): Promise<FixtureState> {
-  return control(info, '/state') as Promise<FixtureState>;
 }
 
 async function waitForCredential(info: FixtureInfo, relayName: string, budget?: PhaseBudget): Promise<FixtureState> {
@@ -218,27 +133,6 @@ function authEvidence(state: FixtureState): RelayAuthEvidence {
   };
 }
 
-async function waitForFault(
-  info: FixtureInfo,
-  path: string,
-  kind: string,
-  faultId: string,
-  faultGeneration: string,
-  budget?: PhaseBudget,
-): Promise<void> {
-  const deadline = Date.now() + Math.min(30_000, budget?.remainingMs ?? 30_000);
-  while (Date.now() < deadline) {
-    const state = await fixtureState(info);
-    if (state.invalidated) throw new Error(`FIXTURE_FAULT_EXPIRED: ${state.invalidation_reason || 'fault lifetime expired'}`);
-    if (state.requests.some((request) => request.path === path
-      && request.fault === kind
-      && request.fault_id === faultId
-      && request.fault_generation === faultGeneration)) return;
-    await delay(250, budget);
-  }
-  throw new Error(`FIXTURE_FAULT: ${kind} for ${path} was not consumed`);
-}
-
 function assertFaultActive(state: FixtureState, path: string, kind: string, faultId: string, faultGeneration: string): void {
   if (state.invalidated) throw new Error(`FIXTURE_FAULT_EXPIRED: ${state.invalidation_reason || 'fault lifetime expired'}`);
   const request = state.requests.find((candidate) => candidate.path === path
@@ -246,7 +140,7 @@ function assertFaultActive(state: FixtureState, path: string, kind: string, faul
     && candidate.fault_id === faultId
     && candidate.fault_generation === faultGeneration);
   if (!request) throw new Error(`FIXTURE_FAULT_GENERATION: consumed ${kind} fault ${faultId} was not recorded with its generation`);
-  const fault = state.faults?.find((candidate) => candidate.id === faultId
+  const fault = state.faults.find((candidate) => candidate.id === faultId
     && candidate.generation === faultGeneration
     && candidate.path === path
     && candidate.kind === kind);
@@ -256,7 +150,7 @@ function assertFaultActive(state: FixtureState, path: string, kind: string, faul
 async function reconnectAllRelays(info: FixtureInfo, before: RelayAuthEvidence, budget?: PhaseBudget): Promise<RelayAuthEvidence> {
   const relayNames = Object.keys(before.relays).sort();
   for (const relayName of relayNames) {
-    await control(info, `/relay/drop?name=${encodeURIComponent(relayName)}`, 'POST');
+    await fixtureControl(info, `/relay/drop?name=${encodeURIComponent(relayName)}`, 'POST');
   }
   let state = await fixtureState(info);
   for (const relayName of relayNames) {
@@ -419,7 +313,6 @@ async function runUpgradeScenario(
   platform: MobilePlatform,
   info: FixtureInfo,
   bundleSet: BundleSet,
-  suite: string,
   setStage: (stage: ScenarioStage) => void,
   budget: PhaseBudget,
   qualification: QualificationFailureLatch,
@@ -429,7 +322,6 @@ async function runUpgradeScenario(
   assertDistinctUpgrade(baseline, bundleSet.candidate);
   const navigationIds = new Set<string>();
   const faultsExercised: string[] = [];
-  let faultIdentity: RunResult['fault_identity'];
   const initialIdentity: RuntimeIdentity = await (async () => {
     setStage('device');
     await platform.startFreshDevice();
@@ -466,53 +358,47 @@ async function runUpgradeScenario(
   await platform.captureSanitizedEvidence('paired');
   setStage('upgrade');
   await platform.clickWebText('Settings');
-  const faultPath = bundleSet.candidate.name === 'current-code-target'
-    ? bundleSet.candidate.identity.style
-    : bundleSet.candidate.identity.script;
-  const faultKind = bundleSet.candidate.name === 'current-code-target' ? 'missing' : 'corrupt';
+  const faultPath = bundleSet.candidate.identity.script;
+  const faultKind = 'corrupt';
   const faultId = `candidate-${bundleSet.candidate.name}-${faultKind}`;
   const faultGeneration = `${faultId}-${Date.now()}`;
-  if (suite === 'release' || suite === 'smoke') {
-    const beforeActivation = await fixtureState(info);
-    if (beforeActivation.requests.some((request) => request.release === 'candidate' && request.path === faultPath && !request.fault)) {
-      throw new Error(`FIXTURE_FAULT: candidate asset was fetched before fault ${faultPath}`);
-    }
-    await control(info, '/fault', 'POST', {
-      id: faultId, generation: faultGeneration, method: 'GET', path: faultPath, kind: faultKind, remaining: -1,
-    });
-    faultIdentity = { id: faultId, generation: faultGeneration, kind: faultKind, path: faultPath };
-    faultsExercised.push(`${faultKind}:${faultPath}`);
+  const beforeActivation = await fixtureState(info);
+  if (beforeActivation.requests.some((request) => request.release === 'candidate' && request.path === faultPath && !request.fault)) {
+    throw new Error(`FIXTURE_FAULT: candidate asset was fetched before fault ${faultPath}`);
   }
-  await control(info, '/activate', 'POST', { release: 'candidate' });
+  await fixtureControl(info, '/fault', 'POST', {
+    id: faultId, generation: faultGeneration, method: 'GET', path: faultPath, kind: faultKind, remaining: -1,
+  });
+  const faultIdentity = { id: faultId, generation: faultGeneration, kind: faultKind, path: faultPath };
+  faultsExercised.push(`${faultKind}:${faultPath}`);
+  await fixtureControl(info, '/activate', 'POST', { release: 'candidate' });
   await platform.clickWebText('Settings');
   await platform.clickWebText('Check for Updates');
   await platform.clickWebText('Load Update');
   await platform.clickDialogText('update-herdr-dialog', 'Load Update');
-  if (suite === 'release' || suite === 'smoke') {
-    await waitForFault(info, faultPath, faultKind, faultId, faultGeneration, budget);
-    const faultState = await fixtureState(info);
-    assertFaultActive(faultState, faultPath, faultKind, faultId, faultGeneration);
-    await assertCandidateFailureObserved(
-      platform,
-      bundleSet.candidate.identity,
-      info.app_url,
-      baseline,
-      info,
-      faultPath,
-      faultKind,
-      faultId,
-      faultGeneration,
-      qualification,
-      budget,
-    );
-    await control(info, '/fault/clear', 'POST', { id: faultId, generation: faultGeneration });
-    const clearedState = await fixtureState(info);
-    qualification.observe({ fault: clearedState });
-    if (clearedState.invalidated || clearedState.faults?.some((fault) => fault.id === faultId)) {
-      throw new Error(`FIXTURE_FAULT_CLEAR: fault ${faultId} was not explicitly cleared`);
-    }
-    await platform.clickWebText('Try again');
+  await waitForFault(info, faultPath, faultKind, faultId, faultGeneration, budget);
+  const faultState = await fixtureState(info);
+  assertFaultActive(faultState, faultPath, faultKind, faultId, faultGeneration);
+  await assertCandidateFailureObserved(
+    platform,
+    bundleSet.candidate.identity,
+    info.app_url,
+    baseline,
+    info,
+    faultPath,
+    faultKind,
+    faultId,
+    faultGeneration,
+    qualification,
+    budget,
+  );
+  await fixtureControl(info, '/fault/clear', 'POST', { id: faultId, generation: faultGeneration });
+  const clearedState = await fixtureState(info);
+  qualification.observe({ fault: clearedState });
+  if (clearedState.invalidated || clearedState.faults?.some((fault) => fault.id === faultId)) {
+    throw new Error(`FIXTURE_FAULT_CLEAR: fault ${faultId} was not explicitly cleared`);
   }
+  await platform.clickWebText('Try again');
   await waitForCandidate(platform, bundleSet.candidate.identity, info.app_url, navigationIds, qualification, budget);
   const phoneCompletion = await waitForPhoneCompletion(platform, baseline, qualification, budget);
   await platform.clickDialogText('update-progress-dialog', 'Close');
@@ -526,7 +412,7 @@ async function runUpgradeScenario(
   qualification.observe({ ownership: finalBeforeAuth });
   assertRelayOwnership(finalBeforeAuth);
   await platform.relaunchInstalledApp();
-  let finalIdentity = await waitForCandidate(platform, bundleSet.candidate.identity, info.app_url, navigationIds, qualification, budget);
+  await waitForCandidate(platform, bundleSet.candidate.identity, info.app_url, navigationIds, qualification, budget);
   let finalAuth = await reconnectAllRelays(info, finalBeforeAuth, budget);
   qualification.observe({ ownership: finalAuth });
   assertRelayOwnership(finalAuth);
@@ -540,58 +426,56 @@ async function runUpgradeScenario(
     assertNoRelayInstall(relay.install_update_count);
     assertNoRelayDeploy(relay.deploy_app_update_count);
   }
-  if (suite === 'release') {
-    setStage('lifecycle');
-    const beforeResumeAuth = authEvidence(await fixtureState(info));
-    qualification.observe({ ownership: beforeResumeAuth });
-    assertRelayOwnership(beforeResumeAuth);
-    await platform.backgroundApp();
-    await platform.relaunchInstalledApp();
-    await waitForCandidate(platform, bundleSet.candidate.identity, info.app_url, navigationIds, qualification, budget);
-    const resumeAuth = await reconnectAllRelays(info, beforeResumeAuth, budget);
-    qualification.observe({ ownership: resumeAuth });
-    assertRelayOwnership(resumeAuth, ['alpha', 'beta']);
-    assertCredentialPreserved(beforeResumeAuth, resumeAuth);
-    assertCredentialIdentityPreserved(beforeAuth, resumeAuth);
-    const agentBeforeAuth = authEvidence(await fixtureState(info));
-    qualification.observe({ ownership: agentBeforeAuth });
-    assertRelayOwnership(agentBeforeAuth, ['alpha']);
-    const agentCompletion = await platform.readUpdateCompletion();
-    qualification.observe({ completion: agentCompletion });
-    assertUpdateProgressClosed(agentCompletion);
-    await platform.openFixtureAgent('alpha');
-    const agentAfterAuth = authEvidence(await fixtureState(info));
-    qualification.observe({ ownership: agentAfterAuth });
-    assertRelayOwnership(agentAfterAuth, ['alpha']);
-    assertCredentialIdentityPreserved(agentBeforeAuth, agentAfterAuth, ['alpha']);
-    await platform.showKeyboardOnComposer();
-    await platform.hideKeyboard();
-    const beforeColdAuth = authEvidence(await fixtureState(info));
-    qualification.observe({ ownership: beforeColdAuth });
-    assertRelayOwnership(beforeColdAuth);
-    await platform.terminateInstalledApp();
-    await platform.relaunchInstalledApp();
-    finalIdentity = await waitForCandidate(platform, bundleSet.candidate.identity, info.app_url, navigationIds, qualification, budget);
-    const coldAuth = await reconnectAllRelays(info, beforeColdAuth, budget);
-    qualification.observe({ ownership: coldAuth });
-    assertRelayOwnership(coldAuth);
-    assertCredentialPreserved(beforeColdAuth, coldAuth);
-    assertCredentialIdentityPreserved(beforeAuth, coldAuth);
-    finalAuth = coldAuth;
-    finalState = await fixtureState(info);
-    assertPreferencePreserved(beforePreference, { key: beforePreference.key, value: await platform.preferenceValue() });
-    for (const relay of finalState.relays) {
-      assertNoRelayInstall(relay.install_update_count);
-      assertNoRelayDeploy(relay.deploy_app_update_count);
-    }
+  setStage('lifecycle');
+  const beforeResumeAuth = authEvidence(await fixtureState(info));
+  qualification.observe({ ownership: beforeResumeAuth });
+  assertRelayOwnership(beforeResumeAuth);
+  await platform.backgroundApp();
+  await platform.relaunchInstalledApp();
+  await waitForCandidate(platform, bundleSet.candidate.identity, info.app_url, navigationIds, qualification, budget);
+  const resumeAuth = await reconnectAllRelays(info, beforeResumeAuth, budget);
+  qualification.observe({ ownership: resumeAuth });
+  assertRelayOwnership(resumeAuth, ['alpha', 'beta']);
+  assertCredentialPreserved(beforeResumeAuth, resumeAuth);
+  assertCredentialIdentityPreserved(beforeAuth, resumeAuth);
+  const agentBeforeAuth = authEvidence(await fixtureState(info));
+  qualification.observe({ ownership: agentBeforeAuth });
+  assertRelayOwnership(agentBeforeAuth, ['alpha']);
+  const agentCompletion = await platform.readUpdateCompletion();
+  qualification.observe({ completion: agentCompletion });
+  assertUpdateProgressClosed(agentCompletion);
+  await platform.openFixtureAgent('alpha');
+  const agentAfterAuth = authEvidence(await fixtureState(info));
+  qualification.observe({ ownership: agentAfterAuth });
+  assertRelayOwnership(agentAfterAuth, ['alpha']);
+  assertCredentialIdentityPreserved(agentBeforeAuth, agentAfterAuth, ['alpha']);
+  await platform.showKeyboardOnComposer();
+  await platform.hideKeyboard();
+  const beforeColdAuth = authEvidence(await fixtureState(info));
+  qualification.observe({ ownership: beforeColdAuth });
+  assertRelayOwnership(beforeColdAuth);
+  await platform.terminateInstalledApp();
+  await platform.relaunchInstalledApp();
+  const finalIdentity = await waitForCandidate(platform, bundleSet.candidate.identity, info.app_url, navigationIds, qualification, budget);
+  const coldAuth = await reconnectAllRelays(info, beforeColdAuth, budget);
+  qualification.observe({ ownership: coldAuth });
+  assertRelayOwnership(coldAuth);
+  assertCredentialPreserved(beforeColdAuth, coldAuth);
+  assertCredentialIdentityPreserved(beforeAuth, coldAuth);
+  finalAuth = coldAuth;
+  finalState = await fixtureState(info);
+  assertPreferencePreserved(beforePreference, { key: beforePreference.key, value: await platform.preferenceValue() });
+  for (const relay of finalState.relays) {
+    assertNoRelayInstall(relay.install_update_count);
+    assertNoRelayDeploy(relay.deploy_app_update_count);
   }
-  if (platform instanceof AndroidPlatform && suite === 'release') platform.productCheckpoint('lifecycle-complete');
+  if (platform instanceof AndroidPlatform) platform.productCheckpoint('lifecycle-complete');
   const reloadCount = Math.max(0, upgradeNavigationCount - 1);
   const lifecycleLaunchCount = Math.max(0, navigationIds.size - upgradeNavigationCount);
   assertBoundedReloads(reloadCount);
   if (lifecycleLaunchCount > 2) throw new Error(`RELOAD_BOUND_EXCEEDED: ${lifecycleLaunchCount} lifecycle launches exceed 2`);
   return {
-    schema: 2, product: { status: 'PASS', categories: [] }, platform: platform.name, suite,
+    schema: 2, product: { status: 'PASS', categories: [] }, platform: platform.name,
     baseline: baseline.name, candidate: bundleSet.candidate.name, origin: info.app_url,
     source_commit: bundleSet.candidate.provenance.sourceCommit,
     source_run_head_sha: process.env.MOBILE_SOURCE_RUN_HEAD_SHA || undefined,
@@ -610,7 +494,6 @@ async function runUpgrade(
   platform: MobilePlatform,
   info: FixtureInfo,
   bundleSet: BundleSet,
-  suite: string,
   setStage: (stage: ScenarioStage) => void,
   budget: PhaseBudget,
   afterDevicePreparation: () => Promise<void>,
@@ -618,7 +501,7 @@ async function runUpgrade(
   const qualification = new QualificationFailureLatch();
   let stage: ScenarioStage = 'device';
   try {
-    return await runUpgradeScenario(platform, info, bundleSet, suite, (nextStage) => {
+    return await runUpgradeScenario(platform, info, bundleSet, (nextStage) => {
       stage = nextStage;
       setStage(nextStage);
     }, budget, qualification, afterDevicePreparation);
@@ -647,14 +530,7 @@ function freezeEvidence(platform: MobilePlatform): Record<string, unknown> {
 }
 
 async function main(): Promise<void> {
-  const bundleSetFile = repositoryPath(required('--bundle-set'));
-  const bundleSetDirectory = resolve(bundleSetFile, '..');
-  const bundleSetValue = await readJsonFile<BundleSet>(bundleSetFile);
-  const resolvedBundleSet: BundleSet = {
-    ...bundleSetValue,
-    candidate: { ...bundleSetValue.candidate, root: resolve(bundleSetDirectory, bundleSetValue.candidate.root) },
-    baselines: bundleSetValue.baselines.map((bundle) => ({ ...bundle, root: resolve(bundleSetDirectory, bundle.root) })),
-  };
+  const resolvedBundleSet = await readBundleSet(repositoryPath(required('--bundle-set')));
   const selectedBaseline = option('--baseline');
   const baseline = selectedBaseline
     ? resolvedBundleSet.baselines.find((bundle) => bundle.name === selectedBaseline)
@@ -664,9 +540,9 @@ async function main(): Promise<void> {
   const outputOption = option('--output') || 'run-artifacts';
   const outputDir = repositoryPath(outputOption);
   const privateDir = repositoryPath(option('--private-output') || process.env.MOBILE_PRIVATE || `${outputOption}.private-${process.pid}`);
-  const suite = option('--suite') || 'smoke';
+  if (!bundleSet.candidate.name.startsWith('candidate-')) throw new Error('invalid historical candidate identity');
   const budget = new PhaseBudget('mobile-scenario', {
-    timeoutMs: suite === 'release' ? 45 * 60_000 : 30 * 60_000,
+    timeoutMs: 45 * 60_000,
     recoveryLimit: 8,
   });
   const diagnostics = new DiagnosticRecorder();
@@ -691,23 +567,21 @@ async function main(): Promise<void> {
   let measurementStarted = false;
   let measured: AndroidMeasurementOutcome | undefined;
   let identity: MeasurementIdentity = {
-    runId: process.env.GITHUB_RUN_ID || '', attempt: process.env.GITHUB_RUN_ATTEMPT || '', suite: suite as MeasurementIdentity['suite'],
+    runId: process.env.GITHUB_RUN_ID || '', attempt: process.env.GITHUB_RUN_ATTEMPT || '',
     platform: process.env.MOBILE_PLATFORM as MeasurementIdentity['platform'], baseline: baseline.name,
-    scenario: bundleSet.candidate.name === 'current-code-target' ? 'synthetic' : 'historical',
     sourceCommit: bundleSet.candidate.provenance.sourceCommit, sourceRunHeadSha: process.env.MOBILE_SOURCE_RUN_HEAD_SHA || '',
     candidateWebHash: bundleSet.candidate.identity.webHash, candidateBuild: bundleSet.candidate.identity.build, measurementId: 'ios-not-applicable',
   };
   let stage: string = 'fixture';
   try {
     validateMeasurementIdentity(identity);
-    fixtureInfo = await waitForInfo(infoFile, 180_000, budget);
+    fixtureInfo = await waitForFixtureInfo(infoFile, 180_000, budget);
     if (process.env.MOBILE_PLATFORM === 'android') await reversePorts(fixtureInfo, process.env.ANDROID_SERIAL || '', reverse);
     const platformOptions: PlatformOptions = {
       origin: fixtureInfo.app_url,
       appiumUrl: process.env.APPIUM_URL || 'http://127.0.0.1:4723',
       outputDir,
       certificate: fixtureInfo.ca_certificate,
-      setupUrl: fixtureInfo.setup_urls[0],
       deviceId: process.env.MOBILE_PLATFORM === 'android' ? process.env.ANDROID_SERIAL : process.env.IOS_SIMULATOR_UDID,
       budget,
       diagnostics,
@@ -718,10 +592,9 @@ async function main(): Promise<void> {
       measurement = new AndroidEnvironmentMeasurement(platformOptions.deviceId || '', outputDir, repositoryPath('tests/mobile/toolchains.json'), {}, budget);
       identity = { ...identity, measurementId: measurement.id };
       measurement.bind(identity);
-      measurement.requireGmsObservations();
       android.environmentMeasurement = measurement;
     }
-    result = await runUpgrade(platform, fixtureInfo, bundleSet, suite, (nextStage) => { stage = nextStage; }, budget, async () => {
+    result = await runUpgrade(platform, fixtureInfo, bundleSet, (nextStage) => { stage = nextStage; }, budget, async () => {
       if (!android || !measurement) return;
       await android.observeGmsStage('before-measurement-begin');
       await measurement.begin();
@@ -751,7 +624,7 @@ async function main(): Promise<void> {
     const failure = failureSnapshot(error, stage);
     result = {
       schema: 2, product: { status: 'FAIL', categories: ['REQUIRED_SCENARIO_FAILURE'] },
-      platform: process.env.MOBILE_PLATFORM || 'unknown', suite,
+      platform: process.env.MOBILE_PLATFORM || 'unknown',
       baseline: bundleSet.baselines[0]?.name || '', candidate: bundleSet.candidate.name,
       source_commit: bundleSet.candidate.provenance.sourceCommit,
       source_run_head_sha: process.env.MOBILE_SOURCE_RUN_HEAD_SHA || undefined,
@@ -776,7 +649,7 @@ async function main(): Promise<void> {
       if (platform && result) result.evidence = freezeEvidence(platform);
     });
     await attempt('session-teardown', async () => platform?.stopOwnedResources());
-    if (fixtureInfo) await attempt('fixture-shutdown', () => control(fixtureInfo!, '/shutdown', 'POST'));
+    if (fixtureInfo) await attempt('fixture-shutdown', () => fixtureControl(fixtureInfo!, '/shutdown', 'POST'));
     await attempt('fixture-stop', () => stopProcess(fixtureProcess.process));
     await removeReverses(process.env.ANDROID_SERIAL || '', reverse, attempt);
     await attempt('fixture-log', () => writeFile(resolve(outputDir, 'fixture.log'), redactText(fixtureProcess.output.join('')).slice(0, 100 * 1024 * 1024), { mode: 0o600 }));

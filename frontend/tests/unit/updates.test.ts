@@ -12,6 +12,7 @@ import {
   beginUpdateProgress,
   appUpdateStatus,
   cacheBustedAppUrl,
+  deployedAppTarget,
   checkAppUpdate,
   initializeAppUpdates,
   clearPendingRelayUpdate,
@@ -50,6 +51,15 @@ describe('release updates', () => {
     vi.restoreAllMocks();
   });
 
+  it('uses deployed assets only for the requested deployed version', () => {
+    const status = { deployedVersion: '1.2.3', deployedAssets: 7, deployedBuild: 'build-id' };
+    expect(deployedAppTarget(status)).toEqual({ version: '1.2.3', assets: 7, build: 'build-id' });
+    expect(deployedAppTarget(status, '1.2.4')).toEqual({ version: '1.2.4', assets: 0, build: '' });
+    expect(deployedAppTarget({ ...status, deployedBuild: undefined })).toEqual({
+      version: '1.2.3', assets: 7, build: '',
+    });
+  });
+
   it('compares only strict semantic versions', () => {
     expect(semverTuple('1.2.3')).toEqual([1, 2, 3]);
     expect(semverTuple('1.2')).toBeNull();
@@ -74,37 +84,10 @@ describe('release updates', () => {
     expect(newerBundle({ version: '0.8.0', assets: 4, build: 'same' }, { version: '0.8.0', assets: 4, build: 'same' })).toBe(false);
     expect(newerBundle({ version: '0.7.0', assets: 99 }, { version: '0.8.0', assets: 0 })).toBe(false);
   });
-  it('routes legacy app deployment owners through the one-time Terminal bootstrap', () => {
-    const connection = {
-      capabilities: ['self_update', 'app_deploy'],
-      releaseVersion: '0.13.2',
-      appDeploy: normalizeAppDeployment({ configured: true }),
-      update: normalizeRelayUpdate({ state: 'available' }),
-    };
-    connection.capabilities = [];
-    connection.releaseVersion = '0.13.3';
-    expect(relayNeedsManualBootstrap(connection)).toBe(true);
-    connection.capabilities = ['self_update', 'app_deploy'];
-    connection.releaseVersion = '0.13.2';
-
-
-    expect(relayNeedsManualBootstrap(connection)).toBe(true);
-    connection.releaseVersion = '0.13.3';
-    expect(relayNeedsManualBootstrap(connection)).toBe(false);
-    connection.releaseVersion = '0.13.2';
-    connection.appDeploy = normalizeAppDeployment({
-      configured: false,
-      reason: 'No HTTPS app deployment origin is configured',
-    });
-    expect(relayNeedsManualBootstrap(connection)).toBe(true);
-    connection.appDeploy = normalizeAppDeployment({ configured: false });
-    expect(relayNeedsManualBootstrap(
-      connection,
-      'deploy target app before relay: No HTTPS app deployment origin is configured',
-    )).toBe(true);
-    expect(relayNeedsManualBootstrap(connection, 'Release signature did not match')).toBe(false);
+  it('requires a manual update only without self-update support', () => {
+    expect(relayNeedsManualBootstrap({ capabilities: [] })).toBe(true);
+    expect(relayNeedsManualBootstrap({ capabilities: ['self_update', 'app_deploy'] })).toBe(false);
   });
-
 
   it('does not let stale relay metadata downgrade the running app version', () => {
     expect(get(appUpdateStatus).upstreamVersion).toBe(APP_VERSION);
@@ -148,7 +131,6 @@ describe('release updates', () => {
       state: 'deployment-required',
       deployedVersion: APP_VERSION,
       upstreamVersion: available,
-      upstreamAssets: 0,
       checkedAt: 123,
     });
     expect(get(appUpdateStatus).state).toBe('deployment-required');
@@ -279,6 +261,20 @@ describe('release updates', () => {
       phoneTarget: null,
     });
     expect(acknowledgePhoneUpdate()).toBe(false);
+  });
+
+  it('restores pending phone work from a deployment owner without a phone item', () => {
+    sessionStorage.setItem('herdr_update_progress', JSON.stringify({
+      targetVersion: '1.2.3',
+      relayIds: ['fedora'],
+      appRelayId: 'fedora',
+    }));
+    restoreUpdateProgress();
+    expect(get(updateProgressPlan)).toMatchObject({
+      appRelayId: 'fedora',
+      phoneAppRequired: true,
+      phoneTarget: { version: '1.2.3', assets: 0, build: '' },
+    });
   });
 
   it('tracks the phone independently from its deployment owner', () => {
@@ -425,6 +421,17 @@ describe('release updates', () => {
     vi.stubGlobal('fetch', fetcher);
 
     await expect(reloadUpdatedSameOriginApp(APP_VERSION)).resolves.toBe(false);
+    expect(fetcher).not.toHaveBeenCalled();
+
+    vi.unstubAllGlobals();
+  });
+
+  it('does not poll for a deployment version that is not a release number', async () => {
+    const fetcher = vi.fn();
+    vi.stubGlobal('fetch', fetcher);
+
+    await expect(reloadUpdatedSameOriginApp('dev')).resolves.toBe(false);
+    await expect(reloadUpdatedSameOriginApp('v0.12.0-3-gabc-dirty')).resolves.toBe(false);
     expect(fetcher).not.toHaveBeenCalled();
 
     vi.unstubAllGlobals();

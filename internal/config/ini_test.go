@@ -107,19 +107,3 @@ justtext
 		t.Fatal("expected error for missing delimiter")
 	}
 }
-
-func TestSectionNames(t *testing.T) {
-	input := `[alpha]
-a = 1
-[beta]
-b = 2
-`
-	ini, err := ParseINI(strings.NewReader(input))
-	if err != nil {
-		t.Fatal(err)
-	}
-	names := ini.SectionNames()
-	if len(names) != 2 {
-		t.Fatalf("sections = %v, want 2", names)
-	}
-}

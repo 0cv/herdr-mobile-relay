@@ -12,7 +12,7 @@ import (
 type sizedPane struct {
 	terminalID                  string
 	attach                      *attachment
-	leases                      map[string]panesize.Lease
+	leases                      panesize.Leases
 	baselineRows, columns, rows int
 	resizedAt                   time.Time
 }
@@ -33,18 +33,7 @@ func NewPaneSizer(client *Client) *PaneSizer {
 func (m *PaneSizer) Available() bool { return m != nil && m.client != nil }
 
 func (s *sizedPane) target(now time.Time) (int, int) {
-	cols, rows := 0, 0
-	for _, l := range s.leases {
-		if !l.ExpiresAt.After(now) {
-			continue
-		}
-		if cols == 0 || l.Columns < cols {
-			cols = l.Columns
-		}
-		if l.Rows > 0 && (rows == 0 || l.Rows < rows) {
-			rows = l.Rows
-		}
-	}
+	cols, rows := s.leases.ActiveAt(now).Narrowest()
 	// Core attaches always specify both dimensions: width-only leases retain
 	// the acquisition height, rather than following later desktop height changes.
 	if rows == 0 {
@@ -93,18 +82,20 @@ func (m *PaneSizer) reconcile(id string, s *sizedPane) error {
 	return nil
 }
 
+func (m *PaneSizer) revalidate(ctx context.Context, id string, s *sizedPane) {
+	opCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	if m.validate(opCtx, id, s) == nil {
+		_ = m.reconcile(id, s)
+	}
+}
+
 func (m *PaneSizer) Acquire(ctx context.Context, clientID, paneID string, columns, rows int) (int, int, error) {
 	if !m.Available() {
 		return 0, 0, panesize.ErrUnavailable
 	}
-	if clientID == "" || paneID == "" {
-		return 0, 0, panesize.ErrInvalidLease
-	}
-	if columns < panesize.MinColumns || columns > panesize.MaxColumns {
-		return 0, 0, panesize.ErrInvalidColumns
-	}
-	if rows != 0 && (rows < panesize.MinRows || rows > panesize.MaxRows) {
-		return 0, 0, panesize.ErrInvalidRows
+	if err := panesize.ValidateLease(clientID, paneID, columns, rows); err != nil {
+		return 0, 0, err
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -134,7 +125,7 @@ func (m *PaneSizer) Acquire(ctx context.Context, clientID, paneID string, column
 		if t.Rows <= 0 || t.Rows > 65535 {
 			return 0, 0, panesize.ErrSizeUnavailable
 		}
-		s = &sizedPane{terminalID: m.client.pane(*t).TerminalID, baselineRows: t.Rows, columns: t.Cols, rows: t.Rows, leases: make(map[string]panesize.Lease)}
+		s = &sizedPane{terminalID: m.client.pane(*t).TerminalID, baselineRows: t.Rows, columns: t.Cols, rows: t.Rows, leases: make(panesize.Leases)}
 	}
 	s.leases[clientID] = panesize.Lease{Columns: columns, Rows: rows, ExpiresAt: m.now().Add(panesize.LeaseTTL)}
 	cols, height := s.target(m.now())
@@ -181,15 +172,10 @@ func (m *PaneSizer) Release(ctx context.Context, clientID, paneID string, immedi
 		delete(m.gone, paneID)
 		return err
 	}
-	if l, ok := s.leases[clientID]; ok {
-		if immediate {
-			delete(s.leases, clientID)
-		} else {
-			if end := m.now().Add(panesize.ReleaseGrace); l.ExpiresAt.After(end) {
-				l.ExpiresAt = end
-				s.leases[clientID] = l
-			}
-		}
+	if immediate {
+		delete(s.leases, clientID)
+	} else {
+		s.leases.Shorten(clientID, m.now().Add(panesize.ReleaseGrace))
 	}
 	return m.reconcile(paneID, s)
 }
@@ -209,11 +195,7 @@ func (m *PaneSizer) ReleaseClient(ctx context.Context, clientID string) error {
 			m.drop(id, false)
 			continue
 		}
-		opCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-		if m.validate(opCtx, id, s) == nil {
-			_ = m.reconcile(id, s)
-		}
-		cancel()
+		m.revalidate(ctx, id, s)
 	}
 	return nil
 }
@@ -226,20 +208,12 @@ func (m *PaneSizer) sweep(ctx context.Context) {
 			m.drop(id, true)
 			continue
 		}
-		for owner, l := range s.leases {
-			if !l.ExpiresAt.After(m.now()) {
-				delete(s.leases, owner)
-			}
-		}
+		s.leases.RemoveExpired(m.now())
 		if cols, _ := s.target(m.now()); cols == 0 {
 			m.drop(id, false)
 			continue
 		}
-		opCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-		if m.validate(opCtx, id, s) == nil {
-			_ = m.reconcile(id, s)
-		}
-		cancel()
+		m.revalidate(ctx, id, s)
 	}
 }
 
@@ -277,7 +251,7 @@ func (m *PaneSizer) ReadGeometry(clientID, paneID string) (int, int, bool) {
 		m.drop(paneID, true)
 		return 0, 0, false
 	}
-	if l, ok := s.leases[clientID]; !ok || !l.ExpiresAt.After(m.now()) {
+	if _, ok := s.leases.ActiveAt(m.now())[clientID]; !ok {
 		return 0, 0, false
 	}
 	cols, rows := s.target(m.now())

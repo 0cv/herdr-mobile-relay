@@ -21,32 +21,46 @@ func (s *Store) IsE2EEAuthRejected(err error) bool {
 		errors.Is(err, ErrInvitationBurned)
 }
 
+func (s *Store) matchingInvitationLocked(selector transport.E2EEAuthSelector) *invitationRecord {
+	record := s.state.Invitation
+	if record == nil || record.InvitationID != selector.ID || record.Version != selector.Version {
+		return nil
+	}
+	return record
+}
+
+func (s *Store) expireInvitationLocked() error {
+	next := s.state.clone()
+	next.Invitation = nil
+	if err := s.commitLocked(next); err != nil {
+		return fmt.Errorf("expire invitation: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) ResolveE2EESecret(_ context.Context, selector transport.E2EEAuthSelector) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now().UTC()
 	switch selector.Kind {
 	case transport.E2EEAuthInvitation:
-		record := s.state.Invitation
-		if record == nil || record.InvitationID != selector.ID || record.Version != selector.Version {
+		record := s.matchingInvitationLocked(selector)
+		if record == nil {
 			return nil, ErrAuthentication
 		}
 		if !now.Before(record.ExpiresAt) {
-			if record.InvitationID == bootstrapInvitationID && (len(s.state.Credentials) == 0 || s.rearmBootstrap) {
-				previous := record.ExpiresAt
-				record.ExpiresAt = now.Add(invitationLifetime)
-				if err := s.persistLocked(); err != nil {
-					record.ExpiresAt = previous
-					return nil, fmt.Errorf("refresh bootstrap invitation: %w", err)
-				}
-			} else {
-				s.state.Invitation = nil
-				if err := s.persistLocked(); err != nil {
-					s.state.Invitation = record
-					return nil, fmt.Errorf("expire invitation: %w", err)
+			if record.InvitationID != bootstrapInvitationID || (len(s.state.Credentials) > 0 && !s.rearmBootstrap) {
+				if err := s.expireInvitationLocked(); err != nil {
+					return nil, err
 				}
 				return nil, ErrInvitationExpired
 			}
+			next := s.state.clone()
+			next.Invitation.ExpiresAt = now.Add(invitationLifetime)
+			if err := s.commitLocked(next); err != nil {
+				return nil, fmt.Errorf("refresh bootstrap invitation: %w", err)
+			}
+			record = s.state.Invitation
 		}
 		if record.FailedAttempts >= maxInviteAttempts {
 			return nil, ErrInvitationBurned
@@ -93,8 +107,8 @@ func (s *Store) CompleteE2EEAuth(_ context.Context, selector transport.E2EEAuthS
 }
 
 func (s *Store) recordFailedInvitationLocked(selector transport.E2EEAuthSelector) error {
-	record := s.state.Invitation
-	if record == nil || record.InvitationID != selector.ID || record.Version != selector.Version {
+	record := s.matchingInvitationLocked(selector)
+	if record == nil {
 		return ErrAuthentication
 	}
 	if record.InvitationID == bootstrapInvitationID {
@@ -104,29 +118,21 @@ func (s *Store) recordFailedInvitationLocked(selector transport.E2EEAuthSelector
 	}
 	now := s.now().UTC()
 	if !now.Before(record.ExpiresAt) {
-		previous := record
-		s.state.Invitation = nil
-		if err := s.persistLocked(); err != nil {
-			s.state.Invitation = previous
+		if err := s.expireInvitationLocked(); err != nil {
 			return err
 		}
 		return ErrInvitationExpired
 	}
-	previous := *record
-	record.FailedAttempts++
-	burned := record.FailedAttempts >= maxInviteAttempts
+	next := s.state.clone()
+	next.Invitation.FailedAttempts++
+	burned := next.Invitation.FailedAttempts >= maxInviteAttempts
 	if burned {
-		s.state.Invitation = nil
+		next.Invitation = nil
 	} else {
-		delay := time.Second << (record.FailedAttempts - 1)
-		record.NextAttemptAt = now.Add(delay)
+		delay := time.Second << (next.Invitation.FailedAttempts - 1)
+		next.Invitation.NextAttemptAt = now.Add(delay)
 	}
-	if err := s.persistLocked(); err != nil {
-		if burned {
-			s.state.Invitation = &previous
-		} else {
-			*record = previous
-		}
+	if err := s.commitLocked(next); err != nil {
 		return fmt.Errorf("persist invitation attempt: %w", err)
 	}
 	if burned {
@@ -136,16 +142,13 @@ func (s *Store) recordFailedInvitationLocked(selector transport.E2EEAuthSelector
 }
 
 func (s *Store) redeemInvitationLocked(selector transport.E2EEAuthSelector) (transport.E2EEAuthResult, error) {
-	record := s.state.Invitation
-	if record == nil || record.InvitationID != selector.ID || record.Version != selector.Version {
+	record := s.matchingInvitationLocked(selector)
+	if record == nil {
 		return transport.E2EEAuthResult{}, ErrAuthentication
 	}
 	now := s.now().UTC()
 	if !now.Before(record.ExpiresAt) {
-		previous := record
-		s.state.Invitation = nil
-		if err := s.persistLocked(); err != nil {
-			s.state.Invitation = previous
+		if err := s.expireInvitationLocked(); err != nil {
 			return transport.E2EEAuthResult{}, err
 		}
 		return transport.E2EEAuthResult{}, ErrInvitationExpired
@@ -157,11 +160,11 @@ func (s *Store) redeemInvitationLocked(selector transport.E2EEAuthSelector) (tra
 		}
 		return credentialAuthResult(s.state.Credentials[index], true)
 	}
-	deviceID, err := s.uniqueDeviceIDLocked()
+	deviceID, err := s.randomValue(identifierBytes)
 	if err != nil {
 		return transport.E2EEAuthResult{}, err
 	}
-	credentialID, err := s.uniqueCredentialIDLocked()
+	credentialID, err := s.randomValue(identifierBytes)
 	if err != nil {
 		return transport.E2EEAuthResult{}, err
 	}
@@ -181,11 +184,10 @@ func (s *Store) redeemInvitationLocked(selector transport.E2EEAuthSelector) (tra
 		},
 		Secret: secret,
 	}
-	record.PendingCredentialID = credentialID
-	s.state.Credentials = append(s.state.Credentials, credential)
-	if err := s.persistLocked(); err != nil {
-		s.state.Credentials = s.state.Credentials[:len(s.state.Credentials)-1]
-		record.PendingCredentialID = ""
+	next := s.state.clone()
+	next.Invitation.PendingCredentialID = credentialID
+	next.Credentials = append(next.Credentials, credential)
+	if err := s.commitLocked(next); err != nil {
 		clear(secretBytesValue)
 		return transport.E2EEAuthResult{}, fmt.Errorf("persist invitation redemption: %w", err)
 	}
@@ -203,26 +205,22 @@ func (s *Store) completeCredentialLocked(selector transport.E2EEAuthSelector) (t
 	if index < 0 {
 		return transport.E2EEAuthResult{}, ErrAuthentication
 	}
-	record := &s.state.Credentials[index]
-	if record.Revoked || record.Version != selector.Version {
+	current := s.state.Credentials[index]
+	if current.Revoked || current.Version != selector.Version {
 		return transport.E2EEAuthResult{}, ErrAuthentication
 	}
-	previousLastSeen := record.LastSeenAt
-	previousLocale := record.Locale
-	previousInvitation := s.state.Invitation
+	next := s.state.clone()
+	record := &next.Credentials[index]
 	record.LastSeenAt = s.now().UTC()
 	record.Locale = string(localize.NormalizeLocale(selector.Locale))
-	if invitation := s.state.Invitation; invitation != nil &&
+	if invitation := next.Invitation; invitation != nil &&
 		invitation.PendingCredentialID == record.CredentialID {
-		s.state.Invitation = nil
+		next.Invitation = nil
 	}
-	if err := s.persistLocked(); err != nil {
-		record.LastSeenAt = previousLastSeen
-		record.Locale = previousLocale
-		s.state.Invitation = previousInvitation
+	if err := s.commitLocked(next); err != nil {
 		return transport.E2EEAuthResult{}, fmt.Errorf("persist credential last seen: %w", err)
 	}
-	return credentialAuthResult(*record, false)
+	return credentialAuthResult(s.state.Credentials[index], false)
 }
 
 func credentialAuthResult(record credentialRecord, issueSecret bool) (transport.E2EEAuthResult, error) {
@@ -239,39 +237,6 @@ func credentialAuthResult(record credentialRecord, issueSecret bool) (transport.
 	}
 	result.CredentialSecret = secret
 	return result, nil
-}
-
-func (s *Store) uniqueDeviceIDLocked() (string, error) {
-	for attempt := 0; attempt < 8; attempt++ {
-		id, err := s.randomValue(identifierBytes)
-		if err != nil {
-			return "", err
-		}
-		unique := true
-		for index := range s.state.Credentials {
-			if s.state.Credentials[index].DeviceID == id {
-				unique = false
-				break
-			}
-		}
-		if unique {
-			return id, nil
-		}
-	}
-	return "", errors.New("could not generate unique device identifier")
-}
-
-func (s *Store) uniqueCredentialIDLocked() (string, error) {
-	for attempt := 0; attempt < 8; attempt++ {
-		id, err := s.randomValue(identifierBytes)
-		if err != nil {
-			return "", err
-		}
-		if s.credentialIndex(id) < 0 {
-			return id, nil
-		}
-	}
-	return "", errors.New("could not generate unique credential identifier")
 }
 
 func decodeStoredSecret(encoded string) ([]byte, error) {

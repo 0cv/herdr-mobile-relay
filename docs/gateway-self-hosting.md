@@ -375,7 +375,6 @@ Served on `HERDR_GATEWAY_ADDR`, normally behind the TLS proxy:
 | `GET /relay` | WebSocket. One multiplexed registration per computer relay. |
 | `GET /connect` | WebSocket. One phone connection. |
 | `GET /healthz` | Liveness and coarse load. |
-| `GET /whoami` | `{"ip":"<your public ip>"}`, used by relay reachability checks. |
 | `POST /probe` | Sends one UDP datagram back to the caller's own address, so the relay can test inbound UDP. |
 
 Address discovery listens separately on UDP `HERDR_GATEWAY_STUN_ADDR` and must be

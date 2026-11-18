@@ -2,72 +2,56 @@ package coordinator
 
 import (
 	"context"
-	"os"
-	"path/filepath"
-	"strings"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/profiles"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 )
+
+// startSettleBackstop only keeps a hung start from stalling the suite. The
+// start itself settles at its own deadline on the real clock, which can be
+// seconds away for the cancelled and timeout outcomes.
+const startSettleBackstop = 30 * time.Second
 
 func TestHermesLaunchReceiptFollowsStartNotTabCreation(t *testing.T) {
 	for _, outcome := range []string{"completed", "refused", "malformed", "cancelled", "timeout"} {
 		t.Run(outcome, func(t *testing.T) {
-			dir := t.TempDir()
-			home := filepath.Join(dir, "home")
-			cwd := filepath.Join(home, "Development")
-			if err := os.MkdirAll(cwd, 0700); err != nil {
-				t.Fatal(err)
+			env := newLaunchEnv(t, "hermes")
+			client := newLaunchFake()
+			client.target.WorkspaceID = "workspace"
+			client.workspaces = []herdr.Workspace{{ID: "workspace"}}
+			gate := newReleaseGate()
+			var startErr error
+			switch outcome {
+			case "refused":
+				startErr = refusalByCode("agent_pane_busy")
+			case "malformed":
+				startErr = startedFailure("response has no result envelope")
 			}
-			writeScript(t, dir, "hermes", "#!/bin/sh\nexit 0\n")
-			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-			record := filepath.Join(dir, "calls")
-			entered, release := filepath.Join(dir, "entered"), filepath.Join(dir, "release")
-			response := "printf '%s' '{\"result\":{\"agent\":{\"pane_id\":\"pane-new\"}}}'"
-			if outcome == "refused" {
-				response = "printf '%s' '{\"error\":{\"code\":\"agent_pane_busy\",\"message\":\"not an available shell\"}}' >&2; exit 1"
-			}
-			if outcome == "malformed" {
-				response = "printf '%s' '{\"result\":null}'"
-			}
-			bin := writeScript(t, dir, "herdr", "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \""+record+"\"\ncase \"$1 $2\" in\n"+
-				" 'workspace list') printf '%s' '{\"result\":{\"workspaces\":[{\"workspace_id\":\"workspace\"}]}}' ;;\n"+
-				" 'tab create') printf '%s' '{\"result\":{\"root_pane\":{\"pane_id\":\"pane-new\"},\"tab\":{\"tab_id\":\"tab-new\",\"workspace_id\":\"workspace\"}}}' ;;\n"+
-				" 'agent start') touch \""+entered+"\"; while [ ! -f \""+release+"\" ]; do sleep 0.01; done; "+response+" ;;\n"+
-				" *) exit 2 ;;\nesac\n")
-			socket := filepath.Join(testSocketDir(t), "herdr.sock")
-			startInventorySocket(t, socket, []any{map[string]any{"workspace_id": "workspace"}}, herdr.Pane{ID: "pane-new", TerminalID: "terminal-new", TabID: "tab-new", WorkspaceID: "workspace"})
-			client := herdr.NewClient(bin, socket)
-			d := NewDispatcher(client, NewState(testLogger()), nil, testLogger())
-			d.SetProfiles(profiles.NewResolver(filepath.Join(dir, "config"), nil))
-			d.lifecycle.home = home
+			client.setHook("StartAgent", gate.hook(func(context.Context, fakeCall) error { return startErr }))
+			d := newTestDispatcher(t, client, NewState(testLogger()))
+			d.SetProfiles(profiles.NewResolver(env.config, nil))
+			d.lifecycle.home = env.home
 			stopAfterRefusals(d.lifecycle, 1)
-			t.Cleanup(func() {
-				_ = os.WriteFile(release, nil, 0600)
-				_ = d.Close(context.Background())
-			})
+			t.Cleanup(gate.open)
 			budget := 8 * time.Second
 			if outcome == "timeout" {
 				budget = agentStartResponseReserve + 2*time.Second
 			}
 			ctx, cancel := context.WithTimeout(t.Context(), budget)
 			defer cancel()
-			message := map[string]any{"type": "agent_start", "request_id": "hermes-launch", "profile_id": "hermes", "workspace_id": "workspace", "name": "development-hermes", "cwd": cwd}
+			message := protocol.Inbound{Type: "agent_start", RequestID: "hermes-launch", ProfileID: "hermes", WorkspaceID: "workspace", Name: "development-hermes", Cwd: env.cwd}
 			pending := make(chan *CommandResult, 1)
 			go func() { pending <- d.Handle(ctx, message) }()
-			for {
-				if _, err := os.Stat(entered); err == nil {
-					break
-				}
-				select {
-				case result := <-pending:
-					t.Fatalf("start returned before fake Herdr started: %+v", result)
-				case <-ctx.Done():
-					t.Fatal("fake Herdr did not receive agent start")
-				case <-time.After(time.Millisecond):
-				}
+			select {
+			case <-gate.entered:
+			case result := <-pending:
+				t.Fatalf("start returned before fake Herdr started: %+v", result)
+			case <-ctx.Done():
+				t.Fatal("fake Herdr did not receive agent start")
 			}
 			select {
 			case result := <-pending:
@@ -77,14 +61,12 @@ func TestHermesLaunchReceiptFollowsStartNotTabCreation(t *testing.T) {
 			if outcome == "cancelled" {
 				cancel()
 			} else if outcome != "timeout" {
-				if err := os.WriteFile(release, nil, 0600); err != nil {
-					t.Fatal(err)
-				}
+				gate.open()
 			}
 			var result *CommandResult
 			select {
 			case result = <-pending:
-			case <-time.After(5 * time.Second):
+			case <-time.After(startSettleBackstop):
 				t.Fatal("start did not settle after Herdr result or cancellation")
 			}
 			if result.OK != (outcome == "completed") {
@@ -102,15 +84,12 @@ func TestHermesLaunchReceiptFollowsStartNotTabCreation(t *testing.T) {
 					t.Fatalf("duplicate did not replay the receipt: %+v", replay)
 				}
 			}
-			calls, err := os.ReadFile(record)
-			if err != nil {
-				t.Fatal(err)
+			starts := client.callsTo("StartAgent")
+			if len(starts) != 1 || !reflect.DeepEqual(starts[0].Args[:3], []any{"development-hermes", "hermes", "pane-new"}) || client.count("TabCreate") != 1 {
+				t.Fatalf("unexpected launch calls: %+v", client.recorded())
 			}
-			if strings.Count(string(calls), "agent start development-hermes --kind hermes --pane pane-new --timeout ") != 1 || strings.Count(string(calls), "tab create ") != 1 {
-				t.Fatalf("unexpected launch calls:\n%s", calls)
-			}
-			if strings.Contains(string(calls), "--focus") || strings.Contains(string(calls), "pane close") || strings.Contains(string(calls), "agent get") || strings.Contains(string(calls), "pane run") {
-				t.Fatalf("unexpected focus, cleanup, metadata wait or provider fallback:\n%s", calls)
+			if client.count("StopPane") != 0 || client.count("AgentGet") != 0 || client.count("PaneRun") != 0 {
+				t.Fatalf("unexpected cleanup, metadata wait or provider fallback: %+v", client.recorded())
 			}
 		})
 	}

@@ -4,20 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
-	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
 	relayrelease "github.com/0cv/herdr-mobile-relay/internal/release"
+	"github.com/0cv/herdr-mobile-relay/internal/workerjob"
 )
 
 func TestInstallPluginPinsExactCommitAndSuppressesSetup(t *testing.T) {
@@ -54,64 +51,6 @@ printf '%s\n' "$HERDR_MOBILE_RELAY_NO_AUTO_SETUP" > "$HERDR_TEST_ENV"
 	}
 	if string(value) != "1\n" {
 		t.Fatalf("HERDR_MOBILE_RELAY_NO_AUTO_SETUP = %q", value)
-	}
-}
-
-func TestRunCommandContextTerminatesDescendantHoldingOutputPipe(t *testing.T) {
-	root := t.TempDir()
-	pidPath := filepath.Join(root, "child.pid")
-	scriptPath := filepath.Join(root, "spawn-child.sh")
-	script := fmt.Sprintf(
-		"#!/bin/sh\n"+
-			"(trap '' TERM; sleep 30) &\n"+
-			"child=$!\n"+
-			"printf '%%s\\n' \"$child\" > %q\n"+
-			"wait\n",
-		pidPath,
-	)
-	if err := os.WriteFile(scriptPath, []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
-
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-	command := exec.Command("/bin/sh", scriptPath)
-	var commandErr error
-	done := make(chan struct{})
-	go func() {
-		_, commandErr = runCommandContext(ctx, command)
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(30 * time.Second):
-		t.Fatal("runCommandContext did not return after cancelling a descendant-held pipe")
-	}
-	if !errors.Is(commandErr, context.DeadlineExceeded) {
-		t.Fatalf("runCommandContext() error = %v, want deadline exceeded", commandErr)
-	}
-
-	pidData, err := os.ReadFile(pidPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	childPID, err := strconv.Atoi(strings.TrimSpace(string(pidData)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_ = syscall.Kill(childPID, syscall.SIGKILL)
-	})
-	deadline := time.Now().Add(time.Second)
-	for {
-		err := syscall.Kill(childPID, 0)
-		if err != nil && !errors.Is(err, syscall.EPERM) {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("descendant process %d survived process-group cancellation", childPID)
-		}
-		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -199,7 +138,7 @@ func TestWorkerRemovesJobWhenAnotherUpdateHoldsTheLock(t *testing.T) {
 	if err := os.MkdirAll(job.ReleaseRoot, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	lock, err := acquireLock(filepath.Join(job.ReleaseRoot, "update.lock"))
+	lock, err := workerjob.Lock(filepath.Join(job.ReleaseRoot, "update.lock"), ErrConcurrent)
 	if err != nil {
 		t.Fatal(err)
 	}

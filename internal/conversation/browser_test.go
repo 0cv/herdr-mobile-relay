@@ -83,11 +83,7 @@ func TestTrailingJSONLFragmentBecomesVisibleWithoutCorruption(t *testing.T) {
 	options.RecentBytes = int64(len(second) + 1 + len(partial))
 	options.DefaultPageSize = 1
 	options.MaxPageSize = 4
-	browser, err := NewBrowser(reader, t.TempDir(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, options)
 	scope := BrowseScope{Provider: "claude", CWD: "/work", SessionID: testSessionID}
 	recent, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 1})
 	if err != nil || len(recent.Entries) != 1 || recent.Entries[0].Text != "second" || recent.Diagnostics.CorruptRecords != 0 || recent.NextCursor == "" {
@@ -366,11 +362,7 @@ func TestBrowserSnapshotRejectsInPlaceRewrite(t *testing.T) {
 	options := DefaultBrowserOptions()
 	options.RecentBytes = 1
 	options.DefaultPageSize = 1
-	browser, err := NewBrowser(reader, t.TempDir(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, options)
 	scope := BrowseScope{Provider: "claude", CWD: "/work", SessionID: testSessionID}
 	latest, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 1})
 	if err != nil || latest.NextCursor == "" {
@@ -429,11 +421,7 @@ func TestBrowserCursorsAreSignedAndScopeBound(t *testing.T) {
 	)
 	options := DefaultBrowserOptions()
 	options.RecentBytes = 1
-	browser, err := NewBrowser(reader, t.TempDir(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, options)
 	scope := BrowseScope{Provider: "claude", CWD: "/work", SessionID: testSessionID}
 	page, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 1})
 	if err != nil || page.NextCursor == "" {
@@ -466,11 +454,7 @@ func TestBrowserRejectsExpiredCursorsAndCancelledRequests(t *testing.T) {
 	)
 	options := DefaultBrowserOptions()
 	options.RecentBytes = 1
-	browser, err := NewBrowser(reader, t.TempDir(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, options)
 	scope := BrowseScope{Provider: "claude", CWD: "/work", SessionID: testSessionID}
 	latest, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 1})
 	if err != nil || latest.NextCursor == "" {
@@ -549,11 +533,7 @@ func TestBrowserPreparationReportsQuotaFailureAndSupportsExplicitRetry(t *testin
 	options.RecentBytes = 1
 	options.SnapshotQuota = initialSnapshotBytes(t)
 	options.AggregateQuota = 1024 * 1024
-	browser, err := NewBrowser(reader, t.TempDir(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, options)
 	scope := BrowseScope{Provider: "claude", CWD: "/work", SessionID: testSessionID}
 	latest, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 1})
 	if err != nil || latest.NextCursor == "" {
@@ -620,4 +600,26 @@ func TestBrowserRecentWorksWithoutCacheAndRejectsChangedCursor(t *testing.T) {
 	if _, err := os.Stat(path); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func newTestBrowser(t *testing.T, reader *Reader, options BrowserOptions) *Browser {
+	t.Helper()
+	browser, err := NewBrowser(reader, t.TempDir(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = browser.Close() })
+	return browser
+}
+
+func signedNativeCursor(t *testing.T, browser *Browser, scope BrowseScope, revision, before string) string {
+	t.Helper()
+	cursor, err := encodeBrowseCursor(browser.key, browseCursor{
+		Mode: "native", Scope: browseScopeID(scope), Revision: revision, NativeBefore: before,
+		ExpiresAt: time.Now().Add(time.Hour).Unix(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cursor
 }

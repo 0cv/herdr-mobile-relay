@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"net"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,7 +15,6 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/coordinator"
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/protocol"
-	"github.com/0cv/herdr-mobile-relay/internal/transport"
 	"github.com/coder/websocket"
 )
 
@@ -33,10 +30,7 @@ func kimiIdentityServer(t *testing.T) (*Server, *coordinator.AgentState, string)
 	server.conversationB.Close()
 	server.herdrC.Close()
 	server.conversationM = conversation.NewReader(home)
-	browser, err := conversation.NewBrowser(server.conversationM, t.TempDir(), conversation.DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
+	browser := newTestBrowser(t, server.conversationM, conversation.DefaultBrowserOptions())
 	server.conversationB = browser
 	server.kimiProcessBirth = func(int) (string, error) { return "synthetic-start-1", nil }
 	socketDir, err := os.MkdirTemp("", "kimi-")
@@ -242,25 +236,10 @@ func TestKimiInferredIdentityHistoryHandlerFences(t *testing.T) {
 			if err != nil || page.NextCursor == "" {
 				t.Fatal("missing cursor")
 			}
-			server.hub.SetHandler(func(client *transport.ClientConn, message map[string]any, admitted func()) {
-				defer admitted()
-				inbound, err := protocol.DecodeMap(message)
-				if err != nil {
-					t.Error(err)
-					return
-				}
-				server.handleConversationHistory(client, inbound)
-			})
-			httpServer := httptest.NewServer(http.HandlerFunc(server.hub.HandleWebSocket))
-			defer httpServer.Close()
-			defer server.hub.Shutdown(context.Background())
+			useProductionHandler(t, server)
+			conn := dialHub(t, server)
 			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 			defer cancel()
-			conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(httpServer.URL, "http"), nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer conn.CloseNow()
 			changeKimiIdentity(t, server, agent, wire, change)
 			target := protocol.TargetRef{PaneID: agent.PaneID, TerminalID: agent.TerminalID, ServerSessionID: agent.ServerSessionID, AgentSessionID: agent.SessionID, Generation: agent.Generation}
 			for _, observe := range []bool{false, true} {

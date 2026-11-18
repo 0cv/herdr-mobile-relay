@@ -10,7 +10,7 @@ import (
 
 func TestPiBuiltinCatalog(t *testing.T) {
 	isolateAgentEnv(t)
-	catalog := CatalogForProfile("pi", "pi", t.TempDir(), "/nonexistent", nil, "", "0.87.0", "")
+	catalog := catalogFor("pi", t.TempDir(), "/nonexistent")
 	if catalog.Truncated {
 		t.Fatal("builtins-only catalog is truncated")
 	}
@@ -62,7 +62,7 @@ func (f piFixture) gitRepo(t *testing.T) {
 }
 
 func (f piFixture) catalog(cwd string) Catalog {
-	return CatalogForProfile("pi", "pi", cwd, f.home, nil, "", "0.82.1", "")
+	return catalogFor("pi", cwd, f.home)
 }
 
 func TestPiDiscoversProjectPiSkills(t *testing.T) {
@@ -141,7 +141,7 @@ func TestPiDiscoversUserSkillsFromActiveProfileAgentDir(t *testing.T) {
 	writeSkill(t, filepath.Join(f.home, ".pi", "profiles", "other", "agent", "skills"),
 		"other", "From another named profile")
 
-	catalog := CatalogForProfile("pi", "pi", f.repo, f.home, nil, "", "0.82.1", agentDir)
+	catalog := CatalogFor("pi", "pi", DiscoverContext{AgentDir: agentDir, Cwd: f.repo, Home: f.home})
 	command, ok := commandByName(catalog, "/skill:prof")
 	if !ok {
 		t.Fatal("the active named profile's skills must be discovered")
@@ -230,8 +230,12 @@ func TestPiINIConfiguredFormatSkipsNativeDiscovery(t *testing.T) {
 	explicit := filepath.Join(f.home, "explicit", "skills")
 	writeSkill(t, explicit, "explicit-one", "Explicitly configured")
 
-	catalog := CatalogForProfile("pi", "pi", f.repo, f.home,
-		[]string{explicit}, "skill:{name}", "0.82.1", "")
+	catalog := CatalogFor("pi", "pi", DiscoverContext{
+		Cwd:           f.repo,
+		Home:          f.home,
+		SkillDirs:     []string{explicit},
+		CommandFormat: "skill:{name}",
+	})
 	if _, ok := commandByName(catalog, "/skill:explicit-one"); !ok {
 		t.Error("the INI-configured directory must be scanned")
 	}
@@ -298,7 +302,7 @@ func TestPiEmptyHomeDoesNotScanServiceWorkingDirectory(t *testing.T) {
 	writeSkill(t, filepath.Join(scratch, ".agents", "skills"), "leak-pi", "Should never be discovered")
 	t.Chdir(scratch)
 
-	catalog := CatalogForProfile("pi", "pi", repo, "", nil, "", "0.82.1", "")
+	catalog := CatalogFor("pi", "pi", DiscoverContext{Cwd: repo})
 	if _, ok := commandByName(catalog, "/skill:leak-pi"); ok {
 		t.Fatal("empty ctx.Home must not make Pi scan the service's own working directory")
 	}

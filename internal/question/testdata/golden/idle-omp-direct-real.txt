@@ -1,0 +1,46 @@
+=== idle-omp-direct-real agent=omp
+LayoutHint: false
+Parse: nil
+Classify: {Kind:chat Prompt: say hello (just now)
+Tip: Lint/type errors piling up? `omp cleanse` (or /cleanse right here) hunts project diagnostics
+and fixes them with parallel subagents — esc cancels
+say hello
+Hello from the copy repro fixture.
+2026-08-29 10:40:00   10   8
+Connected to MCP server: openaiDeveloperDocs.
+/copy/copy
+Hello.
+2026-08-31 17:32:17   18K   101   3.0s   15.0/s
+Copied last message to clipboard
+󰵗  ·  cv ·  GPT-5.6-Sol · 󰪥 xhi ·  omp-copy-repro · 󰁑 01a058db                        Run /copy/copy command ·  18K ·  109 ·  15.0 tok/s · 󰙺 0.07 ·  6.4%/272K 󰁨 ·  272K ·  6.8s ·  17:33:19 Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== idle-omp-direct-real agent=hermes
+LayoutHint: false
+Parse: nil
+Classify: {Kind:unknown Prompt: say hello (just now) Tip: Lint/type errors piling up? `omp cleanse` (or /cleanse right here) hunts project diagnostics and fixes them with parallel subagents — esc cancels say hello Hello from the copy repro fixture. 2026-08-29 10:40:00  10  8 Connected to MCP server: openaiDeveloperDocs. /copy/copy Hello. 2026-08-31 17:32:17  18K  101  3.0s  15.0/s Copied last message to clipboard 󰵗 ·  cv ·  GPT-5.6-Sol · 󰪥 xhi ·  omp-copy-repro · 󰁑 01a058db Run /copy/copy command ·  18K ·  109 ·  Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== idle-omp-direct-real agent=agy
+LayoutHint: false
+Parse: nil
+Classify: {Kind:unknown Prompt: say hello (just now) Tip: Lint/type errors piling up? `omp cleanse` (or /cleanse right here) hunts project diagnostics and fixes them with parallel subagents — esc cancels say hello Hello from the copy repro fixture. 2026-08-29 10:40:00  10  8 Connected to MCP server: openaiDeveloperDocs. /copy/copy Hello. 2026-08-31 17:32:17  18K  101  3.0s  15.0/s Copied last message to clipboard 󰵗 ·  cv ·  GPT-5.6-Sol · 󰪥 xhi ·  omp-copy-repro · 󰁑 01a058db Run /copy/copy command ·  18K ·  109 ·  Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== idle-omp-direct-real agent=omp crlf
+LayoutHint: false
+Parse: nil
+Classify: {Kind:chat Prompt: say hello (just now)
+Tip: Lint/type errors piling up? `omp cleanse` (or /cleanse right here) hunts project diagnostics
+and fixes them with parallel subagents — esc cancels
+say hello
+Hello from the copy repro fixture.
+2026-08-29 10:40:00   10   8
+Connected to MCP server: openaiDeveloperDocs.
+/copy/copy
+Hello.
+2026-08-31 17:32:17   18K   101   3.0s   15.0/s
+Copied last message to clipboard
+󰵗  ·  cv ·  GPT-5.6-Sol · 󰪥 xhi ·  omp-copy-repro · 󰁑 01a058db                        Run /copy/copy command ·  18K ·  109 ·  15.0 tok/s · 󰙺 0.07 ·  6.4%/272K 󰁨 ·  272K ·  6.8s ·  17:33:19 Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""

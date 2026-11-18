@@ -47,8 +47,8 @@ describe('sequential ANSI SGR', () => {
     const text = '  │<&>\t界  ';
     const styled = `  \x1b[1;44m\x1b[38;2;0;128;0m${text.slice(2)}`;
     expect(ansiLineBackgroundIndent(styled)).toBe(2);
-    const [plain] = terminalHtmlRows(text, false, true);
-    const [row] = terminalHtmlRows(styled, false, true);
+    const [plain] = terminalHtmlRows(text, { preserveLineEnds: true });
+    const [row] = terminalHtmlRows(styled, { preserveLineEnds: true });
     expect({ ...row, html: '' }).toEqual({ ...plain, html: '' });
     expect(row.columns).toBe(12);
     expect(row.fixedGrid).toBe(true);

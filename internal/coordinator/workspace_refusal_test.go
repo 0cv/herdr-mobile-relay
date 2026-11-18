@@ -2,14 +2,10 @@ package coordinator
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
-	"path/filepath"
 	"reflect"
 	"testing"
-	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 )
@@ -30,6 +26,7 @@ func TestTopologyOutcomePrecedence(t *testing.T) {
 		{"invalid layout", "workspace_reorder", cli("invalid_params", "Layout is missing or ambiguous"), "not_started", "Layout is missing or ambiguous", code("invalid_params")},
 		{"dirty force", "worktree_remove", started(cli("dirty_worktree_requires_force", "private")), "not_started", "Worktree has uncommitted changes; force removal is required", map[string]any{"code": "dirty_worktree_requires_force", "force_available": true}},
 		{"known beats started", "workspace_reorder", started(cli("invalid_request", " refused ")), "not_started", "refused", code("invalid_request")},
+		{"operation in progress", "worktree_create", started(cli("worktree_operation_in_progress", " busy ")), "not_started", "busy", code("worktree_operation_in_progress")},
 		{"blank refusal", "workspace_reorder", cli("invalid_request", " "), "not_started", "Herdr refused the command", code("invalid_request")},
 		{"unknown started", "workspace_reorder", started(errors.New("private")), "dispatched_unknown", uncertain, unknown},
 		{"created beats deadline", "workspace_create", errors.Join(context.DeadlineExceeded, herdr.ErrCreatedTargetUnknown), "dispatched_unknown", uncertain, unknown},
@@ -52,8 +49,7 @@ func TestTopologyOutcomePrecedence(t *testing.T) {
 			data           any
 		}{c, "workspace_close", started(cli(c, "private")), "not_started", herdr.RefusalMessage(c), code(c)})
 	}
-	d := NewDispatcher(nil, NewState(testLogger()), nil, testLogger())
-	t.Cleanup(func() { _ = d.Close(context.Background()) })
+	d := newTestDispatcher(t, nil, NewState(testLogger()))
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Exercise errors.As/Is through both wrapping and nested joins.
@@ -67,8 +63,7 @@ func TestTopologyOutcomePrecedence(t *testing.T) {
 }
 
 func TestTopologyMoveBlockRefusal(t *testing.T) {
-	d := NewDispatcher(nil, NewState(testLogger()), nil, testLogger())
-	t.Cleanup(func() { _ = d.Close(context.Background()) })
+	d := newTestDispatcher(t, nil, NewState(testLogger()))
 	for _, started := range []bool{false, true} {
 		for _, partial := range []bool{false, true} {
 			t.Run(fmt.Sprintf("started=%t/partial=%t", started, partial), func(t *testing.T) {
@@ -94,8 +89,7 @@ func TestTopologyMoveBlockRefusal(t *testing.T) {
 
 // Partial application is an explicit safety override, including read/list errors.
 func TestTopologyPartialOutcomePrecedence(t *testing.T) {
-	d := NewDispatcher(nil, NewState(testLogger()), nil, testLogger())
-	t.Cleanup(func() { _ = d.Close(context.Background()) })
+	d := newTestDispatcher(t, nil, NewState(testLogger()))
 	for _, action := range []string{"workspace_reorder", "worktree_list"} {
 		for _, cause := range []error{
 			&herdr.CLIError{Code: "dirty_worktree_requires_force", Message: "dirty"},
@@ -113,49 +107,16 @@ func TestTopologyPartialOutcomePrecedence(t *testing.T) {
 }
 
 func TestTopologyMoveBlockSocketRefusal(t *testing.T) {
-	socket := filepath.Join(testSocketDir(t), "sock")
-	listener, err := net.Listen("unix", socket)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = listener.Close() })
-	done := make(chan error, 1)
-	go func() {
-		conn, err := listener.Accept()
-		if err != nil {
-			done <- err
-			return
-		}
-		defer conn.Close()
-		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-		var request struct {
-			ID     string `json:"id"`
-			Method string `json:"method"`
-			Params struct {
-				WorkspaceIDs []string `json:"workspace_ids"`
-				Before       string   `json:"before_workspace_id"`
-			} `json:"params"`
-		}
-		if err := json.NewDecoder(conn).Decode(&request); err != nil {
-			done <- err
-			return
-		}
-		if request.Method != "workspace.move_block" || !reflect.DeepEqual(request.Params.WorkspaceIDs, []string{"w1"}) || request.Params.Before != "w2" {
-			done <- fmt.Errorf("unexpected request: %+v", request)
-			return
-		}
-		done <- json.NewEncoder(conn).Encode(map[string]any{"id": request.ID, "error": map[string]any{"code": "workspace_move_block_failed", "message": " selection changed "}})
-	}()
-	client := herdr.NewClient("/binary/must-not-run", socket)
-	t.Cleanup(func() { _ = client.Close() })
-	d := NewDispatcher(client, NewState(testLogger()), nil, testLogger())
-	t.Cleanup(func() { _ = d.Close(context.Background()) })
+	client := newFakeBackend()
+	client.setHook("WorkspaceMoveBlock", func(context.Context, fakeCall) error {
+		return &herdr.CLIError{Code: "workspace_move_block_failed", Message: " selection changed "}
+	})
+	d := newTestDispatcher(t, client, NewState(testLogger()))
 	d.state.CommitWorkspaces([]herdr.Workspace{{ID: "w1"}, {ID: "w2"}})
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-	defer cancel()
-	got := d.HandleWorkspaceReorderBlock(ctx, "move-1", []string{"w1"}, "w2")
-	if err := <-done; err != nil {
-		t.Fatal(err)
+	got := d.HandleWorkspaceReorderBlock(t.Context(), "move-1", []string{"w1"}, "w2")
+	want := []fakeCall{{Method: "WorkspaceMoveBlock", Args: []any{[]string{"w1"}, "w2"}}}
+	if calls := client.recorded(); !reflect.DeepEqual(calls, want) {
+		t.Fatalf("calls = %+v, want %+v", calls, want)
 	}
 	if got.OK || got.Phase != "not_started" || got.Error != "selection changed" || !reflect.DeepEqual(got.Data, map[string]any{"code": "workspace_move_block_failed"}) {
 		t.Fatalf("result = %+v", got)

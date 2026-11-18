@@ -25,7 +25,7 @@ func TestGenericDiscoveryFollowsSymlinkedSkillDir(t *testing.T) {
 	}
 
 	commands, _ := discoverGenericSkills([]string{links}, "/{name}")
-	if !commandInList(commands, "/linked-skill") {
+	if !hasCommand(Catalog{Commands: commands}, "/linked-skill") {
 		t.Errorf("generic scanner dropped a symlinked skill dir; got %v", commandNamesIn(commands))
 	}
 }
@@ -41,7 +41,7 @@ func TestGenericDiscoveryIgnoresNonSkillEntries(t *testing.T) {
 	writeSkillAt(t, links, "real-skill", "Real")
 
 	commands, _ := discoverGenericSkills([]string{links}, "/{name}")
-	if !commandInList(commands, "/real-skill") {
+	if !hasCommand(Catalog{Commands: commands}, "/real-skill") {
 		t.Errorf("real skill missing; got %v", commandNamesIn(commands))
 	}
 	if len(commands) != 1 {

@@ -2,6 +2,7 @@ package herdr
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,13 +14,12 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/childenv"
+	"github.com/0cv/herdr-mobile-relay/internal/processgroup"
 )
 
 const (
 	defaultTimeout   = 15 * time.Second
 	maxOutputBytes   = 4 * 1024 * 1024
-	termGrace        = 2 * time.Second
-	waitDelay        = 4 * time.Second
 	shiftTabSequence = "\x1b[Z"
 )
 
@@ -97,6 +97,8 @@ var refusalCodes = map[string]struct{}{
 	"unknown_method":                         {},
 	"method_not_found":                       {},
 	"unsupported_method":                     {},
+	"worktree_operation_in_progress":         {},
+	"dirty_worktree_requires_force":          {},
 }
 
 var transientRefusalCodes = map[string]struct{}{
@@ -177,30 +179,6 @@ func (e *OutcomeError) Unwrap() error {
 	return errors.Join(ErrNotStarted, e.Err)
 }
 
-type limitedBuffer struct {
-	buf       bytes.Buffer
-	limit     int
-	truncated bool
-}
-
-func (b *limitedBuffer) Write(p []byte) (int, error) {
-	original := len(p)
-	remaining := b.limit - b.buf.Len()
-	if remaining <= 0 {
-		b.truncated = true
-		return original, nil
-	}
-	if len(p) > remaining {
-		p = p[:remaining]
-		b.truncated = true
-	}
-	_, err := b.buf.Write(p)
-	return original, err
-}
-
-func (b *limitedBuffer) Bytes() []byte  { return b.buf.Bytes() }
-func (b *limitedBuffer) String() string { return b.buf.String() }
-
 type Client struct {
 	bin          string
 	socketPath   string
@@ -221,28 +199,31 @@ func NewClient(bin, socketPath string) *Client {
 }
 
 type Pane struct {
-	ID             string `json:"pane_id"`
-	TerminalID     string `json:"terminal_id"`
-	TabID          string `json:"tab_id"`
-	TabLabel       string `json:"tab_label"`
-	TabNumber      int    `json:"tab_number"`
-	WorkspaceID    string `json:"workspace_id"`
-	Agent          string `json:"agent"`
-	Name           string `json:"name"`
-	Status         string `json:"agent_status"`
-	Focused        bool   `json:"focused"`
-	Cwd            string `json:"cwd"`
-	Revision       int    `json:"revision"`
-	StateChangeSeq int64  `json:"state_change_seq"`
-	Scroll         struct {
-		MaxOffsetFromBottom int `json:"max_offset_from_bottom"`
-	} `json:"scroll"`
-	ForegroundCwd string `json:"foreground_cwd"`
-	Session       string `json:"-"`
-	SessionRaw    struct {
-		Value string `json:"value"`
-		Kind  string `json:"kind"`
-	} `json:"agent_session"`
+	ID             string       `json:"pane_id"`
+	TerminalID     string       `json:"terminal_id"`
+	TabID          string       `json:"tab_id"`
+	TabLabel       string       `json:"tab_label"`
+	TabNumber      int          `json:"tab_number"`
+	WorkspaceID    string       `json:"workspace_id"`
+	Agent          string       `json:"agent"`
+	Name           string       `json:"name"`
+	Status         string       `json:"agent_status"`
+	Focused        bool         `json:"focused"`
+	Cwd            string       `json:"cwd"`
+	Revision       int          `json:"revision"`
+	StateChangeSeq int64        `json:"state_change_seq"`
+	Scroll         PaneScroll   `json:"scroll"`
+	ForegroundCwd  string       `json:"foreground_cwd"`
+	Session        AgentSession `json:"agent_session"`
+}
+
+type PaneScroll struct {
+	MaxOffsetFromBottom int `json:"max_offset_from_bottom"`
+}
+
+type AgentSession struct {
+	Value string `json:"value"`
+	Kind  string `json:"kind"`
 }
 
 type Workspace struct {
@@ -318,40 +299,25 @@ type CreateResult struct {
 	WorkspaceID string `json:"workspace_id"`
 }
 
-// UnmarshalJSON accepts both the nested Herdr 0.7.5 create responses and the
-// flat result returned by older versions and test fixtures.
 func (r *CreateResult) UnmarshalJSON(data []byte) error {
 	var wire struct {
-		PaneID      string    `json:"pane_id"`
-		TabID       string    `json:"tab_id"`
-		WorkspaceID string    `json:"workspace_id"`
-		RootPane    Pane      `json:"root_pane"`
-		Tab         Tab       `json:"tab"`
-		Workspace   Workspace `json:"workspace"`
-		Agent       AgentInfo `json:"agent"`
+		RootPane  Pane      `json:"root_pane"`
+		Tab       Tab       `json:"tab"`
+		Workspace Workspace `json:"workspace"`
+		Agent     AgentInfo `json:"agent"`
 	}
 	if err := json.Unmarshal(data, &wire); err != nil {
 		return err
 	}
 
-	r.PaneID = firstNonEmpty(wire.PaneID, wire.RootPane.ID, wire.Agent.PaneID)
-	r.TabID = firstNonEmpty(wire.TabID, wire.RootPane.TabID, wire.Tab.ID)
-	r.WorkspaceID = firstNonEmpty(
-		wire.WorkspaceID,
+	r.PaneID = cmp.Or(wire.RootPane.ID, wire.Agent.PaneID)
+	r.TabID = cmp.Or(wire.RootPane.TabID, wire.Tab.ID)
+	r.WorkspaceID = cmp.Or(
 		wire.RootPane.WorkspaceID,
 		wire.Tab.WorkspaceID,
 		wire.Workspace.ID,
 	)
 	return nil
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if value != "" {
-			return value
-		}
-	}
-	return ""
 }
 
 type AgentInfo struct {
@@ -391,9 +357,6 @@ func (c *Client) GetInventory(ctx context.Context) (*Inventory, error) {
 	if result.Agents == nil {
 		return nil, errors.New("herdr inventory: agent.list response has no agents")
 	}
-	for i := range *result.Agents {
-		(*result.Agents)[i].Session = (*result.Agents)[i].SessionRaw.Value
-	}
 	return &Inventory{Panes: *result.Agents}, nil
 }
 
@@ -406,9 +369,6 @@ func (c *Client) PaneList(ctx context.Context) ([]Pane, error) {
 	}
 	if result.Panes == nil {
 		return nil, errors.New("herdr pane list: pane.list response has no panes")
-	}
-	for index := range *result.Panes {
-		(*result.Panes)[index].Session = (*result.Panes)[index].SessionRaw.Value
 	}
 	return *result.Panes, nil
 }
@@ -634,16 +594,6 @@ func (c *Client) AgentGet(ctx context.Context, paneID string) (*AgentInfo, error
 	return &result, nil
 }
 
-func (c *Client) PaneProcessInfo(ctx context.Context, paneID string) (*PaneProcessInfo, error) {
-	var result struct {
-		ProcessInfo PaneProcessInfo `json:"process_info"`
-	}
-	if err := c.runResult(ctx, &result, "pane", "process-info", "--pane", paneID); err != nil {
-		return nil, fmt.Errorf("herdr pane process info: %w", err)
-	}
-	return &result.ProcessInfo, nil
-}
-
 // PaneGet asks the running Herdr server for one pane over a fresh socket
 // request. Unlike the agent inventory it also covers plain shell panes, and it
 // carries the terminal incarnation (terminal_id) a pane-size lease is bound to.
@@ -736,12 +686,8 @@ func (c *Client) ProbePaneVisible(ctx context.Context, paneID string, lines int,
 	return read.Content, nil
 }
 
-func (c *Client) SupportsRealtimePane(ctx context.Context) bool {
-	return c.SupportsPaneRead()
-}
-
 func (c *Client) Close() error {
-	return c.api.close()
+	return nil
 }
 
 func (c *Client) SendKeys(ctx context.Context, paneID string, keys []string) error {
@@ -790,11 +736,6 @@ func (c *Client) StopPane(ctx context.Context, paneID string) error {
 func (c *Client) RenameAgent(ctx context.Context, paneID, name string) error {
 	_, err := c.runCommand(ctx, "agent", "rename", paneID, name)
 	return err
-}
-
-// RenamePane is retained as a compatibility alias for callers being migrated.
-func (c *Client) RenamePane(ctx context.Context, paneID, name string) error {
-	return c.RenameAgent(ctx, paneID, name)
 }
 
 // StartAgent starts kind in paneID. agentArgs, when given, are the started
@@ -848,14 +789,6 @@ func (c *Client) runResult(ctx context.Context, result any, args ...string) erro
 		return fmt.Errorf("malformed result envelope: %w", err)
 	}
 	return nil
-}
-
-// run is retained for package-level process-boundary tests. Production callers
-// carry their own absolute deadline and use runCommand.
-func (c *Client) run(parent context.Context, timeout time.Duration, args ...string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(parent, timeout)
-	defer cancel()
-	return c.runCommand(ctx, args...)
 }
 
 type dispatchCheckKey struct{}
@@ -918,10 +851,10 @@ func (c *Client) runCommand(parent context.Context, args ...string) ([]byte, err
 	// Process-group termination owns cancellation. WaitDelay is the final
 	// backstop for inherited stdout/stderr descriptors held by a descendant
 	// that escaped the group before cancellation.
-	cmd.WaitDelay = waitDelay
+	cmd.WaitDelay = processgroup.WaitDelay
 
-	stdout := &limitedBuffer{limit: maxOutputBytes}
-	stderr := &limitedBuffer{limit: maxOutputBytes}
+	stdout := &processgroup.LimitedBuffer{Limit: maxOutputBytes}
+	stderr := &processgroup.LimitedBuffer{Limit: maxOutputBytes}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
@@ -938,12 +871,12 @@ func (c *Client) runCommand(parent context.Context, args ...string) ([]byte, err
 	case err := <-waitCh:
 		return commandResult(stdout, stderr, err)
 	case <-ctx.Done():
-		terminateProcessGroup(cmd.Process.Pid, waitCh)
+		processgroup.Terminate(cmd.Process.Pid, waitCh, 2*time.Second)
 		return nil, &OutcomeError{Started: true, Err: ctx.Err()}
 	}
 }
 
-func commandResult(stdout, stderr *limitedBuffer, waitErr error) ([]byte, error) {
+func commandResult(stdout, stderr *processgroup.LimitedBuffer, waitErr error) ([]byte, error) {
 	if waitErr == nil {
 		return append([]byte(nil), stdout.Bytes()...), nil
 	}
@@ -952,7 +885,7 @@ func commandResult(stdout, stderr *limitedBuffer, waitErr error) ([]byte, error)
 		return nil, &OutcomeError{Started: true, Err: waitErr}
 	}
 	diagnostic := strings.TrimSpace(stderr.String())
-	if !stderr.truncated && diagnostic != "" {
+	if !stderr.Truncated && diagnostic != "" {
 		var envelope cliErrorEnvelope
 		if err := json.Unmarshal([]byte(diagnostic), &envelope); err == nil &&
 			envelope.Error != nil && envelope.Error.Code != "" {
@@ -968,41 +901,13 @@ func commandResult(stdout, stderr *limitedBuffer, waitErr error) ([]byte, error)
 	if diagnostic == "" {
 		diagnostic = exitErr.Error()
 	}
-	if stderr.truncated {
+	if stderr.Truncated {
 		diagnostic += " (truncated)"
 	}
 	if len(diagnostic) > 500 {
 		diagnostic = diagnostic[:500] + "..."
 	}
 	return nil, &OutcomeError{Started: true, Err: fmt.Errorf("command failed: %s", diagnostic)}
-}
-
-func terminateProcessGroup(pgid int, waitCh <-chan error) {
-	_ = syscall.Kill(-pgid, syscall.SIGTERM)
-	timer := time.NewTimer(termGrace)
-	defer timer.Stop()
-	leaderDone := false
-	select {
-	case <-waitCh:
-		leaderDone = true
-		if !GroupAlive(pgid) {
-			return
-		}
-		<-timer.C
-	case <-timer.C:
-	}
-	_ = syscall.Kill(-pgid, syscall.SIGKILL)
-
-	if !leaderDone {
-		select {
-		case <-waitCh:
-		case <-time.After(2 * time.Second):
-		}
-	}
-	deadline := time.Now().Add(2 * time.Second)
-	for GroupAlive(pgid) && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
 }
 
 // ShellJoin is equivalent to shlex.join for the POSIX shell grammar used by
@@ -1024,10 +929,4 @@ func shellQuote(value string) string {
 		return value
 	}
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
-}
-
-// GroupAlive is exported only for process-boundary tests and diagnostics.
-func GroupAlive(pgid int) bool {
-	err := syscall.Kill(-pgid, 0)
-	return err == nil || errors.Is(err, syscall.EPERM)
 }

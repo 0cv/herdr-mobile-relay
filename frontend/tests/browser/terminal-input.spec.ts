@@ -118,7 +118,6 @@ test('literal input stays explicit in Terminal through reconnect and target swit
   await page.evaluate(() => (window as unknown as { closePrivateRelay: () => void }).closePrivateRelay());
   await expect(button(page, 'Keyboard')).toBeVisible();
   await expect.poll(() => page.evaluate(() => (window as unknown as { privateRelayReadyState: () => number }).privateRelayReadyState())).toBe(1);
-  await expect(page.locator('.prompt-composer .agent-progress, .prompt-composer [aria-atomic="true"]')).toHaveCount(0);
   await openManual(page);
   expect((await mutations()).length).toBe(beforeReconnect);
   await button(page, 'Back').click();
@@ -200,7 +199,6 @@ for (const view of manualViews) {
     await page.evaluate(() => (window as unknown as { closePrivateRelay: () => void }).closePrivateRelay());
     await expect.poll(() => page.evaluate(() => (window as unknown as { privateRelayConnections: () => number }).privateRelayConnections())).toBeGreaterThan(connections);
     await expect.poll(() => page.evaluate(() => (window as unknown as { privateRelayReadyState: () => number }).privateRelayReadyState())).toBe(1);
-    await expect(page.locator('.prompt-composer .agent-progress, .prompt-composer [aria-atomic="true"]')).toHaveCount(0);
     await expect(button(page, 'Send prompt')).toBeDisabled();
     await expect(button(page, 'Enter')).toBeDisabled();
     if (view === 'Terminal') await expect(page.locator('.question-form button[type="submit"]')).toBeDisabled();

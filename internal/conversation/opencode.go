@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -22,7 +23,6 @@ const (
 
 type openCodeReader struct {
 	home     string
-	binary   string
 	executor sqliteexec.Executor
 	mu       sync.Mutex
 	cache    map[string]openCodeCacheEntry
@@ -70,47 +70,23 @@ type openCodeRow struct {
 }
 
 func newOpenCodeReader(home string) *openCodeReader {
-	return &openCodeReader{home: home, binary: "sqlite3", executor: sqliteexec.MustFromEnv(), cache: make(map[string]openCodeCacheEntry), layouts: make(map[string]openCodeLayoutEntry)}
-}
-
-func (r *openCodeReader) queryExec() sqliteexec.Executor {
-	return resolveQueryExecutor(r.executor, r.binary)
+	return &openCodeReader{home: home, executor: sqliteexec.New(), cache: make(map[string]openCodeCacheEntry), layouts: make(map[string]openCodeLayoutEntry)}
 }
 
 func (r *openCodeReader) databases() ([]string, string) {
-	if exec := r.queryExec(); exec == nil || !exec.Ready() {
-		return nil, "source_unavailable"
-	}
-	roots := agentroots.OpenCodeData(r.home)
-	databases := make([]string, 0, len(roots))
-	for index, candidate := range agentroots.OpenCodeDBs(r.home) {
-		if index >= len(roots) {
-			break
-		}
-		if path := containedRegularFile(candidate, roots[index]); path != "" {
-			databases = append(databases, path)
-		}
-	}
-	if len(databases) == 0 {
-		return nil, "source_unavailable"
-	}
-	return databases, ""
+	return containedDatabases(agentroots.OpenCodeData(r.home), agentroots.OpenCodeDBs(r.home))
 }
 
-func (r *openCodeReader) read(sessionID, before string, limit int) ([]Entry, bool, bool, openCodeRow, string) {
-	return r.readContext(context.Background(), sessionID, before, limit)
-}
-
-func (r *openCodeReader) readContext(ctx context.Context, sessionID, before string, limit int) ([]Entry, bool, bool, openCodeRow, string) {
+func (r *openCodeReader) readContext(ctx context.Context, sessionID, before string, limit int) nativeReadResult[openCodeRow] {
 	if !validOpenCodeSessionID(sessionID) {
-		return nil, false, false, openCodeRow{}, "invalid_session"
+		return nativeReadResult[openCodeRow]{Code: "invalid_session"}
 	}
 	if before != "" && (len(before) > 256 || strings.ContainsAny(before, "\x00\r\n")) {
-		return nil, false, false, openCodeRow{}, "invalid_cursor"
+		return nativeReadResult[openCodeRow]{Code: "invalid_cursor"}
 	}
 	databases, code := r.databases()
 	if code != "" {
-		return nil, false, false, openCodeRow{}, code
+		return nativeReadResult[openCodeRow]{Code: code}
 	}
 	firstFailure := ""
 	for _, database := range databases {
@@ -125,18 +101,18 @@ func (r *openCodeReader) readContext(ctx context.Context, sessionID, before stri
 			continue
 		}
 		if before != "" && rows[0].CursorFound == 0 {
-			return nil, false, false, openCodeRow{}, "invalid_cursor"
+			return nativeReadResult[openCodeRow]{Code: "invalid_cursor"}
 		}
 		metadata := rows[0]
 		metadata.Database = database
 		entries, corrupt := parseOpenCodeRows(rows)
 		metadata.pendingIDs = openCodePendingIDs(rows, entries)
-		return entries, hasMore, corrupt, metadata, ""
+		return nativeReadResult[openCodeRow]{Entries: entries, HasMore: hasMore, Corrupt: corrupt, Metadata: metadata}
 	}
 	if firstFailure != "" {
-		return nil, false, false, openCodeRow{}, firstFailure
+		return nativeReadResult[openCodeRow]{Code: firstFailure}
 	}
-	return nil, false, false, openCodeRow{}, "invalid_session"
+	return nativeReadResult[openCodeRow]{Code: "invalid_session"}
 }
 
 func openCodeStamp(database string) (openCodeFileStamp, bool) {
@@ -174,10 +150,6 @@ func (r *openCodeReader) storeQuery(key string, stamp openCodeFileStamp, rows []
 	r.cache[key] = openCodeCacheEntry{
 		stamp: stamp, rows: append([]openCodeRow(nil), rows...), hasMore: hasMore,
 	}
-}
-
-func (r *openCodeReader) query(database, sessionID, before string, limit int) ([]openCodeRow, bool, string) {
-	return r.queryContext(context.Background(), database, sessionID, before, limit)
 }
 
 func (r *openCodeReader) queryContext(ctx context.Context, database, sessionID, before string, limit int) ([]openCodeRow, bool, string) {
@@ -251,7 +223,7 @@ func (r *openCodeReader) layoutContext(ctx context.Context, database string, sta
 	}
 	queryCtx, cancel := context.WithTimeout(ctx, openCodeQueryTimeout)
 	defer cancel()
-	raw, code := runSQLiteJSON(queryCtx, r.queryExec(), database,
+	raw, code := runSQLiteJSON(queryCtx, r.executor, database,
 		`SELECT name FROM sqlite_master WHERE type='table' AND name IN ('session','message','part','session_v2','session_message');`,
 		maxOpenCodeOutput)
 	if code != "" {
@@ -365,7 +337,7 @@ func (r *openCodeReader) queryV2(ctx context.Context, database, sessionID, befor
 func (r *openCodeReader) runRows(ctx context.Context, database, query string, limit int, v2 bool) ([]openCodeRow, bool, string) {
 	queryCtx, cancel := context.WithTimeout(ctx, openCodeQueryTimeout)
 	defer cancel()
-	raw, code := runSQLiteJSON(queryCtx, r.queryExec(), database, query, maxOpenCodeOutput)
+	raw, code := runSQLiteJSON(queryCtx, r.executor, database, query, maxOpenCodeOutput)
 	if code != "" {
 		return nil, false, code
 	}
@@ -373,9 +345,7 @@ func (r *openCodeReader) runRows(ctx context.Context, database, query string, li
 	if err := json.Unmarshal(raw, &rows); err != nil {
 		return nil, false, "source_corrupt"
 	}
-	for left, right := 0, len(rows)-1; left < right; left, right = left+1, right-1 {
-		rows[left], rows[right] = rows[right], rows[left]
-	}
+	slices.Reverse(rows)
 	for index := range rows {
 		rows[index].V2 = v2
 		if v2 {
@@ -413,23 +383,15 @@ func (r *openCodeReader) runRows(ctx context.Context, database, query string, li
 // directory, and `opencode -s` resumes them there from any launch directory,
 // so the pane cwd is not evidence of ownership. Codex and Pi likewise resolve
 // by session ID alone.
-func (r *Reader) readOpenCode(sessionID, before string, limit int) (Page, error) {
+func (r *Reader) readOpenCode(sessionID string, limit int) ([]Entry, error) {
 	sessionID = strings.TrimSpace(sessionID)
-	if limit < 1 {
-		limit = defaultPageSize
+	limit = clampPageLimit(limit)
+	result := r.openCode.readContext(context.Background(), sessionID, "", limit)
+	if result.Code != "" {
+		return nil, ErrUnavailable
 	}
-	if limit > maxPageSize {
-		limit = maxPageSize
-	}
-	entries, hasMore, corrupt, metadata, code := r.openCode.read(sessionID, before, limit)
-	if code != "" {
-		return unavailableCode(code, "OpenCode conversation history is unavailable."), nil
-	}
-	normalizeEntriesForResponse(entries)
-	return Page{
-		Available: true, Entries: append([]Entry(nil), entries...),
-		HasMore: hasMore, Total: metadata.Total, SourceCorrupt: corrupt,
-	}, nil
+	normalizeEntriesForResponse(result.Entries)
+	return append([]Entry(nil), result.Entries...), nil
 }
 
 func validOpenCodeSessionID(value string) bool {

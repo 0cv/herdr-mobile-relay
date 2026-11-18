@@ -99,8 +99,6 @@ export interface HybridTransportOverrides {
 }
 
 function forcedRelay(): boolean {
-  const flag: unknown = import.meta.env?.VITE_HERDR_FORCE_RELAY;
-  if (flag === true || flag === '1' || flag === 'true') return true;
   try {
     return ['1', 'true'].includes(localStorage.getItem(FORCE_RELAY_KEY) || '');
   } catch {

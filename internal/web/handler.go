@@ -3,7 +3,6 @@ package web
 import (
 	"crypto/sha256"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io/fs"
 	"mime"
@@ -30,24 +29,19 @@ var allowedAssets = map[string]bool{
 	"version.json":          true,
 	"release.json":          true,
 	"herdr-bootstrap.js":    true,
-	// Legacy stable asset names remain readable during the cutover. New
-	// bundles are admitted through the descriptor below.
-	"assets/app.js":  true,
-	"assets/app.css": true,
 }
 
 type Handler struct {
-	root             *os.Root
-	files            fs.FS
-	bundleHash       string
-	bundleVersion    string
-	bundleRevision   string
-	bundleBuild      string
-	bundleAssets     int
-	entryPath        string
-	descriptorLoaded bool
-	webFiles         map[string]bool
-	lazyAssets       map[string]bool
+	root           *os.Root
+	files          fs.FS
+	bundleHash     string
+	bundleVersion  string
+	bundleRevision string
+	bundleBuild    string
+	bundleAssets   int
+	entryPath      string
+	webFiles       map[string]bool
+	lazyAssets     map[string]bool
 }
 
 func NewHandler(webRoot string) (*Handler, error) {
@@ -171,16 +165,9 @@ func (h *Handler) isAllowedAsset(asset string) bool {
 		return true
 	}
 	if allowedAssets[asset] {
-		// A verified release must not silently keep serving the old stable
-		// application names. They are retained only so a legacy release tree
-		// remains usable while it is being replaced.
-		if h.descriptorLoaded && (asset == "assets/app.js" || asset == "assets/app.css") {
-			return false
-		}
 		return true
 	}
 	return h.isVersionedLazyAsset(asset) ||
-		isAttachmentHashWorker(asset) ||
 		strings.HasPrefix(asset, "icons/") ||
 		strings.HasPrefix(asset, "fonts/")
 }
@@ -193,7 +180,7 @@ func (h *Handler) immutableAsset(asset string) bool {
 // release descriptor file map. Only chunks referenced by the verified
 // application module, with the exact release asset version, are executable.
 func (h *Handler) isVersionedLazyAsset(asset string) bool {
-	return h.descriptorLoaded && h.lazyAssets[asset]
+	return h.lazyAssets[asset]
 }
 
 func (h *Handler) loadLazyAssets(scriptPath string) {
@@ -217,29 +204,6 @@ func (h *Handler) loadLazyAssets(scriptPath string) {
 		}
 		h.lazyAssets["assets/"+name] = true
 	}
-}
-
-func isAttachmentHashWorker(asset string) bool {
-	const (
-		prefix = "assets/attachment-hash.worker-"
-		suffix = ".js"
-	)
-	if !strings.HasPrefix(asset, prefix) || !strings.HasSuffix(asset, suffix) {
-		return false
-	}
-	hash := strings.TrimSuffix(strings.TrimPrefix(asset, prefix), suffix)
-	if hash == "" {
-		return false
-	}
-	for _, character := range hash {
-		if (character < 'a' || character > 'z') &&
-			(character < 'A' || character > 'Z') &&
-			(character < '0' || character > '9') &&
-			character != '_' && character != '-' {
-			return false
-		}
-	}
-	return true
 }
 
 func acceptsBrotli(header string) bool {
@@ -355,9 +319,6 @@ func (h *Handler) loadIdentity() {
 
 func (h *Handler) loadWebDescriptor() error {
 	descriptor, err := relayrelease.VerifyWebDescriptor(h.files, "")
-	if errors.Is(err, relayrelease.ErrWebDescriptorMissing) {
-		return nil
-	}
 	if err != nil {
 		return err
 	}
@@ -366,7 +327,6 @@ func (h *Handler) loadWebDescriptor() error {
 	for _, file := range descriptor.Files {
 		h.webFiles[file.Path] = true
 	}
-	h.descriptorLoaded = true
 	h.loadLazyAssets(descriptor.Files["javascript"].Path)
 	if h.bundleBuild == "" {
 		h.bundleBuild = descriptor.Build

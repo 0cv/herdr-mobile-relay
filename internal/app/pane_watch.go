@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/coordinator"
 	"github.com/0cv/herdr-mobile-relay/internal/history"
 	"github.com/0cv/herdr-mobile-relay/internal/panedelta"
 	"github.com/0cv/herdr-mobile-relay/internal/protocol"
@@ -44,26 +45,29 @@ type paneWatch struct {
 	probeFingerprint string
 }
 
-func (s *Server) startPaneWatch(client *transport.ClientConn, message map[string]any) {
-	paneID, _ := message["pane_id"].(string)
+func (s *Server) startPaneWatch(client *transport.ClientConn, inbound protocol.Inbound) {
+	paneID := inbound.PaneID
 	if paneID == "" {
 		return
 	}
-	lines := messageInt(message["lines"], 30)
+	lines := 30
+	if inbound.Lines != nil {
+		lines = *inbound.Lines
+	}
 	if lines < 1 {
 		lines = 1
 	} else if lines > history.MaxLines {
 		lines = history.MaxLines
 	}
-	format, _ := message["format"].(string)
+	format := inbound.Format
 	if format != "ansi" {
 		format = "text"
 	}
-	target := protocol.TargetRef{ServerSessionID: "primary", PaneID: paneID}
-	if inbound, err := protocol.DecodeMap(message); err == nil && inbound.Target != nil {
+	target := protocol.TargetRef{ServerSessionID: protocol.PrimaryServerSessionID, PaneID: paneID}
+	if inbound.Target != nil {
 		target = *inbound.Target
 	}
-	interval := requestedPaneWatchInterval(message["interval_ms"])
+	interval := requestedPaneWatchInterval(inbound.IntervalMS)
 	ctx, cancel := context.WithCancel(client.Context())
 	watch := &paneWatch{
 		client:   client,
@@ -83,8 +87,7 @@ func (s *Server) startPaneWatch(client *transport.ClientConn, message map[string
 	s.paneWatches[client.ID()] = watch
 	s.paneWatchMu.Unlock()
 
-	knownFingerprint, _ := message["content_fingerprint"].(string)
-	go s.runPaneWatch(watch, knownFingerprint)
+	go s.runPaneWatch(watch, inbound.ContentFingerprint)
 }
 
 func (s *Server) stopPaneWatch(clientID, paneID string) {
@@ -165,13 +168,17 @@ func (s *Server) pollPaneWatch(watch *paneWatch) {
 	acknowledged := watch.acknowledged
 	watch.mu.Unlock()
 
-	probe := s.dispatcher.HandleProbePane(watch.ctx, watchMessage(watch))
+	probe := s.dispatcher.HandleProbePane(watch.ctx, coordinator.PaneReadRequest{PaneID: watch.paneID, Format: watch.format})
 	probeContent, ok := successfulPaneContent(probe)
 	if !ok {
 		return
 	}
 	probeFingerprint := paneFingerprint(probeContent)
-	classificationAgentID, _ := s.agentInfo(watch.paneID)
+	agent, _ := s.state.Agent(watch.paneID)
+	classificationAgentID := ""
+	if agent != nil {
+		classificationAgentID = agent.Agent
+	}
 	if !paneWatchNeedsFrameRead(
 		previousProbe,
 		probeFingerprint,
@@ -204,9 +211,8 @@ func (s *Server) pollPaneWatch(watch *paneWatch) {
 }
 
 func (s *Server) readPaneWatchFrame(watch *paneWatch) (map[string]any, *paneWatchFrame) {
-	message := watchMessage(watch)
-	s.applyPaneReadLease(watch.client.ID(), message)
-	response := s.preparePaneResponse(message, s.dispatcher.HandleReadPane(watch.ctx, message))
+	request := s.paneReadRequest(watch.client.ID(), protocol.Inbound{PaneID: watch.paneID, Format: watch.format, Lines: &watch.lines})
+	response := s.preparePaneResponse(request, s.dispatcher.HandleReadPane(watch.ctx, request))
 	response["target"] = watch.target
 	content, ok := successfulPaneContent(response)
 	if !ok {
@@ -214,7 +220,11 @@ func (s *Server) readPaneWatchFrame(watch *paneWatch) (map[string]any, *paneWatc
 	}
 	contentFingerprint := paneFingerprint(content)
 	frameFingerprint := paneFrameFingerprint(response)
-	classificationAgentID, _ := s.agentInfo(watch.paneID)
+	agent, _ := s.state.Agent(watch.paneID)
+	classificationAgentID := ""
+	if agent != nil {
+		classificationAgentID = agent.Agent
+	}
 	resizeSettling, _ := response["resize_settling"].(bool)
 	response["content_fingerprint"] = contentFingerprint
 	return response, &paneWatchFrame{
@@ -245,9 +255,9 @@ func (s *Server) paneWatchCurrent(watch *paneWatch) bool {
 	return s.paneWatches[watch.client.ID()] == watch
 }
 
-func (s *Server) handlePaneApplied(client *transport.ClientConn, message map[string]any) {
-	paneID, _ := message["pane_id"].(string)
-	fingerprint, _ := message["content_fingerprint"].(string)
+func (s *Server) handlePaneApplied(client *transport.ClientConn, inbound protocol.Inbound) {
+	paneID := inbound.PaneID
+	fingerprint := inbound.ContentFingerprint
 	s.paneWatchMu.Lock()
 	watch := s.paneWatches[client.ID()]
 	s.paneWatchMu.Unlock()
@@ -269,8 +279,7 @@ func (s *Server) handlePaneApplied(client *transport.ClientConn, message map[str
 	s.hub.Send(client, map[string]any{"type": "pane_resync", "pane_id": paneID, "target": watch.target})
 }
 
-func requestedPaneWatchInterval(value any) time.Duration {
-	milliseconds := messageInt(value, int(defaultPaneWatchInterval/time.Millisecond))
+func requestedPaneWatchInterval(milliseconds int) time.Duration {
 	switch milliseconds {
 	case 100, 250, 500, 1_000:
 		return time.Duration(milliseconds) * time.Millisecond
@@ -279,30 +288,28 @@ func requestedPaneWatchInterval(value any) time.Duration {
 	}
 }
 
-func watchMessage(watch *paneWatch) map[string]any {
-	return map[string]any{
-		"pane_id": watch.paneID,
-		"lines":   watch.lines,
-		"format":  watch.format,
-		"target":  watch.target,
-	}
-}
-
-// applyPaneReadLease never trusts a client-supplied read geometry. A client
+// paneReadRequest never trusts a client-supplied read geometry. A client
 // that itself holds an active lease on the pane reads it at the leased size
 // (the viewport-only read path); every other client, including readers and
 // controllers with Resize Session off, reads the pane at Herdr's own size.
-func (s *Server) applyPaneReadLease(clientID string, message map[string]any) {
-	delete(message, "terminal_columns")
-	delete(message, "terminal_rows")
+func (s *Server) paneReadRequest(clientID string, inbound protocol.Inbound) coordinator.PaneReadRequest {
+	request := coordinator.PaneReadRequest{
+		PaneID:    inbound.PaneID,
+		RequestID: inbound.RequestID,
+		Format:    inbound.Format,
+		Lines:     30,
+	}
+	if inbound.Lines != nil {
+		request.Lines = *inbound.Lines
+	}
 	if s.paneSizeM == nil {
-		return
+		return request
 	}
-	paneID, _ := message["pane_id"].(string)
-	if columns, rows, ok := s.paneSizeM.ReadGeometry(clientID, paneID); ok {
-		message["terminal_columns"] = columns
-		message["terminal_rows"] = rows
+	if columns, rows, ok := s.paneSizeM.ReadGeometry(clientID, inbound.PaneID); ok {
+		request.Columns = columns
+		request.Rows = rows
 	}
+	return request
 }
 
 func paneWatchUpdate(

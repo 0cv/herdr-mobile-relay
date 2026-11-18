@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/0cv/herdr-mobile-relay/internal/textutil"
 )
 
 func TestFrontmatterBasic(t *testing.T) {
@@ -112,7 +114,7 @@ func TestReadSkillMetadataOversized(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/SKILL.md"
 	big := strings.Repeat("x", maxCommandFileSize+1)
-	writeTestFile(t, path, big)
+	writeFile(t, path, big)
 
 	_, ok := readSkillMetadata(path)
 	if ok {
@@ -125,7 +127,7 @@ func TestReadSkillMetadataLargeBody(t *testing.T) {
 		t.Run(fmt.Sprint(size), func(t *testing.T) {
 			path := t.TempDir() + "/SKILL.md"
 			frontmatter := "---\nname: large\ndescription: Large skill\n---\n"
-			writeTestFile(t, path, frontmatter+strings.Repeat("x", size-len(frontmatter)))
+			writeFile(t, path, frontmatter+strings.Repeat("x", size-len(frontmatter)))
 
 			fm, ok := readSkillMetadata(path)
 			if !ok {
@@ -162,8 +164,8 @@ Body text that must not leak into the description.
 		t.Errorf("description = %q, want %q", fm["description"], want)
 	}
 	wantCompact := `Use when: User wants to run Archon workflows. Triggers: "use archon to", "run archon".`
-	if got := compact(fm["description"], 240); got != wantCompact {
-		t.Errorf("compact(description) = %q, want %q", got, wantCompact)
+	if got := textutil.Compact(fm["description"], 240); got != wantCompact {
+		t.Errorf("textutil.Compact(description) = %q, want %q", got, wantCompact)
 	}
 	if fm["name"] != "archon" {
 		t.Errorf("name = %q", fm["name"])
@@ -317,13 +319,13 @@ func TestFrontmatterPlainScalarStartingWithPipe(t *testing.T) {
 func TestReadSkillMetadataBlockScalarFromFile(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/SKILL.md"
-	writeTestFile(t, path, "---\nname: deploy\ndescription: |\n  Ship the app\n  to production.\n---\nbody\n")
+	writeFile(t, path, "---\nname: deploy\ndescription: |\n  Ship the app\n  to production.\n---\nbody\n")
 
 	fm, ok := readSkillMetadata(path)
 	if !ok {
 		t.Fatal("expected ok")
 	}
-	if got := compact(fm["description"], 240); got != "Ship the app to production." {
+	if got := textutil.Compact(fm["description"], 240); got != "Ship the app to production." {
 		t.Errorf("description = %q", got)
 	}
 }
@@ -332,7 +334,7 @@ func TestReadSkillMetadataOversizedBlockScalar(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/SKILL.md"
 	body := strings.Repeat("  filler line\n", maxCommandFileSize/8)
-	writeTestFile(t, path, "---\nname: huge\ndescription: |\n"+body+"---\n")
+	writeFile(t, path, "---\nname: huge\ndescription: |\n"+body+"---\n")
 
 	if _, ok := readSkillMetadata(path); ok {
 		t.Error("oversized block scalar should still be rejected by maxCommandFileSize")

@@ -4,12 +4,11 @@ import { svelte } from '@sveltejs/vite-plugin-svelte';
 import type { Plugin } from 'vite';
 import { defineConfig } from 'vitest/config';
 import versions from './build-versions.json' with { type: 'json' };
-import { assetIdentity as digest } from './scripts/asset-identity.mjs';
 import { pagesHeaders } from './scripts/pages-policy.ts';
+import { productVersionFromManifest } from './scripts/release-rules.ts';
 
 const manifest = readFileSync(fileURLToPath(new URL('../herdr-plugin.toml', import.meta.url)), 'utf8');
-const productVersion = manifest.match(/^version = "([0-9]+\.[0-9]+\.[0-9]+)"$/m)?.[1];
-if (!productVersion) throw new Error('herdr-plugin.toml must declare a MAJOR.MINOR.PATCH version');
+const productVersion = productVersionFromManifest(manifest);
 const versionMetadata = `${JSON.stringify({ version: productVersion, assets: versions.assets })}\n`;
 const BUILD_ID_MARKER = '__HERDR_BUILD_ID__';
 
@@ -23,16 +22,7 @@ type BundleAsset = {
   fileName: string;
   source: string | Uint8Array;
 };
-type BundleItem = BundleChunk | BundleAsset;
-type Bundle = Record<string, BundleItem>;
-
-function releaseBootstrap(): string {
-  return '<!doctype html><script src="/herdr-bootstrap.js"></script>\n';
-}
-
-function bootstrapScript(entryPath: string): string {
-  return `const e = new URL(window.__HERDR_ENTRY__ || ${JSON.stringify(`/${entryPath}`)}, location);\n  e.search = location.search;\n  e.hash = location.hash;\n  location.replace(e);\n`;
-}
+type Bundle = Record<string, BundleChunk | BundleAsset>;
 
 const releaseStyleNames = [
   ['--primary-foreground', '--pf'], ['--terminal-link-visited', '--tlv'], ['--composer-padding-block', '--cpb'],
@@ -52,29 +42,36 @@ function compactReleaseStyleNames(source: string): string {
   return source;
 }
 
+function setupManifestSource(): string {
+  const manifest = JSON.parse(readFileSync(new URL('./public/manifest.webmanifest', import.meta.url), 'utf8'));
+  delete manifest.start_url;
+  return `${JSON.stringify(manifest, null, 2)}\n`;
+}
+
 function stableReleaseAssets(): Plugin {
-  const serveVersionMetadata = (
+  const serveReleaseMetadata = (
     request: { url?: string },
     response: { setHeader(name: string, value: string): void; end(body: string): void },
     next: () => void,
   ) => {
     const pathname = new URL(request.url || '/', 'http://vite.local').pathname;
-    if (pathname !== '/version.json') {
+    if (pathname !== '/version.json' && pathname !== '/setup.webmanifest') {
       next();
       return;
     }
-    response.setHeader('Content-Type', 'application/json; charset=utf-8');
+    response.setHeader('Content-Type', pathname === '/setup.webmanifest'
+      ? 'application/manifest+json; charset=utf-8' : 'application/json; charset=utf-8');
     response.setHeader('Cache-Control', 'no-cache, no-store');
-    response.end(versionMetadata);
+    response.end(pathname === '/setup.webmanifest' ? setupManifestSource() : versionMetadata);
   };
   return {
     name: 'stable-release-assets',
     enforce: 'post',
     configureServer(server) {
-      server.middlewares.use(serveVersionMetadata);
+      server.middlewares.use(serveReleaseMetadata);
     },
     configurePreviewServer(server) {
-      server.middlewares.use(serveVersionMetadata);
+      server.middlewares.use(serveReleaseMetadata);
     },
     generateBundle(_options, bundle: Bundle) {
       const appJavascript = Object.values(bundle).find(
@@ -96,89 +93,11 @@ function stableReleaseAssets(): Plugin {
       const whitespaceTable = '` \t\n\\r\\f\\xA0\\v\uFEFF`';
       const escapedWhitespaceTable = '" \\t\\n\\r\\f\\xA0\\v\\uFEFF"';
       appJavascript.code = appJavascript.code.replaceAll(whitespaceTable, escapedWhitespaceTable);
-      if (!appJavascript.code.includes(BUILD_ID_MARKER)) {
-        this.error('Application bundle is missing its build identity marker');
-      }
-      // The build identity is derived from canonical bundle bytes with the
-      // marker still present. It is therefore stable even though the identity
-      // is injected into the running bundle before its final content digest is
-      // used as the URL and descriptor identity.
-      const canonical = `${appJavascript.code}\u0000${appStylesheet.source}`;
-      const build = digest(canonical).sha256;
-      appJavascript.code = appJavascript.code.replaceAll(BUILD_ID_MARKER, build);
 
-      const javascriptIdentity = digest(appJavascript.code);
-      const stylesheetIdentity = digest(appStylesheet.source);
-      appJavascript.fileName = `assets/app-${javascriptIdentity.sha256}.js`;
-      appStylesheet.fileName = `assets/app-${stylesheetIdentity.sha256}.css`;
-
-      const html = bundle['index.html'];
-      if (!html || html.type !== 'asset' || typeof html.source !== 'string') {
-        this.error('Vite did not emit index.html');
-      }
-      let entrySource = html.source
-        .replaceAll('assets/app.js', appJavascript.fileName)
-        .replaceAll('assets/app.css', appStylesheet.fileName)
-        .replaceAll('src="manifest-loader.js"', 'src="/manifest-loader.js"')
-        .replaceAll('href="icons/', 'href="/icons/')
-        .replace(/>\s+</g, '><')
-        .replace(/\s{2,}/g, ' ')
-        .replace(/\s+\/>/g, '/>')
-        .replace(/(\s)((?!(?:src|href|integrity)=")[A-Za-z_:][\w:.-]*)="([A-Za-z0-9_./:#?-]+)"/g, '$1$2=$3')
-        .replace(/\/>/g, '>');
-      entrySource = entrySource.replace(
-        new RegExp(`(<script[^>]*src=["']/?${appJavascript.fileName.replaceAll('/', '\\/')}["'][^>]*)>`),
-        (match: string, prefix: string) => `${prefix} integrity="${javascriptIdentity.integrity}"${/\bcrossorigin(?:[=\s]|$)/i.test(prefix) ? '' : ' crossorigin="anonymous"'}>`,
-      );
-      entrySource = entrySource.replace(
-        new RegExp(`(<link[^>]*href=["']/?${appStylesheet.fileName.replaceAll('/', '\\/')}["'][^>]*)>`),
-        (match: string, prefix: string) => `${prefix} integrity="${stylesheetIdentity.integrity}"${/\bcrossorigin(?:[=\s]|$)/i.test(prefix) ? '' : ' crossorigin="anonymous"'}>`,
-      );
-
-      const entryPath = `builds/${productVersion}-${versions.assets}-${build.slice(0, 16)}/index.html`;
-      const entryIdentity = digest(entrySource);
-      const files = {
-        entry: { path: entryPath, sha256: entryIdentity.sha256, integrity: entryIdentity.integrity },
-        javascript: { path: appJavascript.fileName, sha256: javascriptIdentity.sha256, integrity: javascriptIdentity.integrity },
-        stylesheet: { path: appStylesheet.fileName, sha256: stylesheetIdentity.sha256, integrity: stylesheetIdentity.integrity },
-      };
-      const descriptor = {
-        schema: 1,
-        version: productVersion,
-        assets: versions.assets,
-        build,
-        entry: `/${entryPath}`,
-        files,
-      };
-      const serializedDescriptor = `${JSON.stringify(descriptor, null, 2)}\n`;
-      const serializedVersion = `${JSON.stringify({
-        version: productVersion,
-        assets: versions.assets,
-        build,
-        entry: descriptor.entry,
-        script: `/${appJavascript.fileName}`,
-        style: `/${appStylesheet.fileName}`,
-        script_sha256: javascriptIdentity.sha256,
-        style_sha256: stylesheetIdentity.sha256,
-      })}\n`;
-
-      this.emitFile({ type: 'asset', fileName: entryPath, source: entrySource });
-      html.source = releaseBootstrap();
-      this.emitFile({ type: 'asset', fileName: 'herdr-bootstrap.js', source: bootstrapScript(entryPath) });
-      this.emitFile({ type: 'asset', fileName: 'release.json', source: serializedDescriptor });
-      this.emitFile({ type: 'asset', fileName: 'version.json', source: serializedVersion });
-      this.emitFile({
-        type: 'asset',
-        fileName: '_redirects',
-        source: `/ /${entryPath} 302\n/index.html /${entryPath} 302\n`,
-      });
       this.emitFile({ type: 'asset', fileName: '_headers', source: pagesHeaders() });
+      this.emitFile({ type: 'asset', fileName: 'setup.webmanifest', source: setupManifestSource() });
     },
   };
-}
-
-export function assetContentVersion(source: string | Uint8Array): string {
-  return digest(source).sha256.slice(0, 16);
 }
 
 // HERDR_DEV_RUNTIME=1 builds the bundle with Svelte's dev runtime, whose

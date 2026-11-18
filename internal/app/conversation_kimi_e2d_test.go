@@ -175,11 +175,7 @@ func kimiE2dDuplicateSource(t *testing.T) (*Server, *coordinator.AgentState, str
 	t.Setenv("KIMI_CODE_HOME", "")
 	server.conversationB.Close()
 	server.conversationM = conversation.NewReader(home)
-	browser, err := conversation.NewBrowser(server.conversationM, t.TempDir(), conversation.DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { browser.Close() })
+	browser := newTestBrowser(t, server.conversationM, conversation.DefaultBrowserOptions())
 	server.conversationB = browser
 	agent := &coordinator.AgentState{PaneID: "pane", TerminalID: "terminal", ServerSessionID: "primary", Agent: "kimi", Cwd: "/fixture", Status: "working"}
 	server.enrichKimiSessions(t.Context(), []*coordinator.AgentState{agent})
@@ -194,7 +190,7 @@ func TestKimiE2dReportedContentPolicy(t *testing.T) {
 	agent.ConversationInferred, agent.ConversationSource, agent.ConversationInferredOwner = false, "", ""
 	server.state.CommitInventory([]*coordinator.AgentState{agent}, server.state.RevisionCounter())
 	agent, _ = server.state.Agent(agent.PaneID)
-	if got := server.captureFinishedPane(t.Context(), agent.PaneID, agent.Agent, agent.Cwd, agent.SessionID); got != "Seed answer" {
+	if got := server.captureFinishedPane(t.Context(), agent.PaneID, agent.Agent, agent.Cwd, agent.SessionID, projectContextForAgent(agent)); got != "Seed answer" {
 		t.Fatalf("reported-ID completion changed: %q", got)
 	}
 	entries := server.enrichActivityResponses([]activity.Entry{{Kind: "finished", PaneID: agent.PaneID, Agent: "kimi", Session: agent.SessionID}})

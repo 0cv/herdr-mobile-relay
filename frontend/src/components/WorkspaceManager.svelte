@@ -1,13 +1,17 @@
 <script lang="ts">
+  import { pathBase } from '$lib/paths';
   import { createReorderHold } from '$lib/reorder-hold';
-  import { displacedSlot, insertionSlot, slotGap, type ReorderSlot } from '$lib/reorder-geometry';
+  import { createReorderDrag, measureReorderSlots } from '$lib/reorder-drag.svelte';
   import { tick } from 'svelte';
+  import { createDirectoryLoader } from '$lib/directory-loader';
   import DirectoryPicker from '$components/DirectoryPicker.svelte';
   import AppDialog from '$components/ui/AppDialog.svelte';
   import Button from '$components/ui/Button.svelte';
   import Card from '$components/ui/Card.svelte';
   import { navigate } from '$lib/router';
-  import { CommandError, relayStore } from '$lib/store';
+  import { CommandError } from '$lib/command-error';
+  import { relayStore } from '$lib/store';
+  import * as workspaceCommands from '$lib/workspace-commands';
   import { informativePath, relayWorkspaceTrees, workspaceProvenance, type RelayWorkspaceTree } from '$lib/workspaces';
   import type { RelayWorkspace, WorktreeListing } from '$lib/types';
 
@@ -47,18 +51,8 @@
   };
   let confirming = $state<ConfirmingAction | null>(null);
   let movingWorkspace = $state('');
-  let workspaceDrag = $state<{
-    owner: HTMLElement;
-    sourceKey: string;
-    pointerId: number;
-    startY: number;
-    deltaY: number;
-    insertIdx: number;
-    items: ReorderSlot[];
-    gap: number;
-  } | null>(null);
+  const workspaceDrag = createReorderDrag();
   let pendingWorkspaceOrder = $state<{ relayId: string; order: string[] } | null>(null);
-  let directoryLoadGeneration = 0;
   let worktreeLoadGeneration = 0;
   const cancelWorkspaceReorders = new Set<() => void>();
 
@@ -114,7 +108,7 @@
     worktreeWorkspaceId = '';
     worktreeOpen = false;
     worktreeListing = null;
-    if (workspaceManagementAvailable) void loadDirectory('');
+    if (workspaceManagementAvailable) void directoryLoader.load('');
   });
 
   $effect(() => {
@@ -158,26 +152,17 @@
   function isReadOnly(relay: string): boolean {
     return readOnlyRelayIds.has(relay);
   }
-  function pathBase(path: string): string {
-    return path.replace(/[\\/]+$/, '').split(/[\\/]/).filter(Boolean).at(-1) || 'workspace';
-  }
 
-  async function loadDirectory(path: string) {
-    const loadRelayId = relayId;
-    const generation = ++directoryLoadGeneration;
-    if (!loadRelayId || !connection?.capabilities.includes('directory_browser')) return;
-    try {
-      const listing = await relayStore.listDirectories(loadRelayId, path);
-      if (generation !== directoryLoadGeneration || relayId !== loadRelayId) return;
+  const directoryLoader = createDirectoryLoader(
+    () => ({ relayId, connection }),
+    (listing) => {
       if (listing.current.path) {
         cwd = listing.current.path;
-        if (!label) label = pathBase(cwd);
+        if (!label) label = pathBase(cwd) || 'workspace';
       }
-    } catch (caught) {
-      if (generation !== directoryLoadGeneration || relayId !== loadRelayId) return;
-      setStatus((caught as Error).message, true);
-    }
-  }
+    },
+    (caught) => setStatus((caught as Error).message, true),
+  );
 
   function setStatus(message: string, failed = false) {
     status = message;
@@ -197,7 +182,7 @@
 
   function openCreateWorkspace() {
     if (isReadOnly(relayId)) return;
-    label ||= pathBase(cwd);
+    label ||= pathBase(cwd) || 'workspace';
     directoryOpen = false;
     createOpen = true;
   }
@@ -212,7 +197,7 @@
     if (!relayId || isReadOnly(relayId) || !cwd || !label.trim()) return;
     busy = true;
     try {
-      await relayStore.createWorkspace(relayId, cwd, label.trim());
+      await workspaceCommands.createWorkspace(relayId, cwd, label.trim());
       setStatus(`Created workspace ${label.trim()}.`);
       label = '';
       closeCreateWorkspace();
@@ -251,7 +236,7 @@
     if (isReadOnly(workspace.relay_id) || !renameLabel.trim()) return;
     busy = true;
     try {
-      await relayStore.renameWorkspace(workspace, renameLabel.trim());
+      await workspaceCommands.renameWorkspace(workspace, renameLabel.trim());
       setStatus(`Renamed workspace to ${renameLabel.trim()}.`);
       await finishRename();
     } catch (caught) {
@@ -266,7 +251,7 @@
     const hold = createReorderHold(node);
 
     function clearOwnedDrag() {
-      if (workspaceDrag?.owner === node) workspaceDrag = null;
+      workspaceDrag.clear(node);
     }
 
     function cancel() {
@@ -279,7 +264,7 @@
       if (!workspaceReorderAvailable || current.tree.workspace.relay_id !== relayId || !event.isPrimary || event.button !== 0 || movingWorkspace || isReadOnly(current.tree.workspace.relay_id)) return;
       if (event.target instanceof Element && event.target.closest('button, input, select, textarea, a') && !event.target.closest('.workspace-drag-handle')) return;
       hold.start(event, () => {
-        const items = measureWorkspaceSlots(node);
+        const items = measureReorderSlots(node, '.workspace-management-list', '.workspace-management-slot', 'workspaceKey');
         if (items.length < 2) {
           hold.reset();
           return;
@@ -290,21 +275,12 @@
           return;
         }
         hold.lift();
-        workspaceDrag = {
-          owner: node,
-          sourceKey: current.tree.workspace.workspace_id,
-          pointerId: hold.pointerId,
-          startY: hold.startY + window.scrollY,
-          deltaY: 0,
-          insertIdx: sourceIdx,
-          items,
-          gap: slotGap(items),
-        };
+        workspaceDrag.begin(node, hold, '', current.tree.workspace.workspace_id, items);
       });
     }
 
     const stopListening = hold.listen(onPointerDown, {
-      move: trackWorkspaceDrag,
+      move: (event) => workspaceDrag.track(event, ''),
       finish: (event) => finishWorkspaceDrag(event, current.tree),
       cancel: clearOwnedDrag,
     });
@@ -321,41 +297,9 @@
     };
   }
 
-  function measureWorkspaceSlots(node: HTMLElement): ReorderSlot[] {
-    const container = node.closest('.workspace-management-list');
-    if (!container) return [];
-    return [...container.querySelectorAll<HTMLElement>('.workspace-management-slot')].map((slot) => {
-      const bounds = slot.getBoundingClientRect();
-      return {
-        id: slot.dataset.workspaceKey || '',
-        top: bounds.top + window.scrollY,
-        height: bounds.height,
-      };
-    });
-  }
-
-  function trackWorkspaceDrag(event: PointerEvent) {
-    if (!workspaceDrag || workspaceDrag.pointerId !== event.pointerId) return;
-    if (event.clientY < 72) window.scrollBy(0, -12);
-    else if (event.clientY > window.innerHeight - 72) window.scrollBy(0, 12);
-    const pointerY = event.clientY + window.scrollY;
-    const insertIdx = insertionSlot(workspaceDrag.items, workspaceDrag.sourceKey, pointerY);
-    workspaceDrag = { ...workspaceDrag, deltaY: pointerY - workspaceDrag.startY, insertIdx };
-  }
-
-  function workspaceShift(workspaceID: string): string {
-    if (!workspaceDrag) return '';
-    if (workspaceID === workspaceDrag.sourceKey) return `translateY(${workspaceDrag.deltaY}px)`;
-    const { items, sourceKey, insertIdx, gap } = workspaceDrag;
-    return displacedSlot(items, sourceKey, workspaceID, insertIdx, gap);
-  }
-
   function finishWorkspaceDrag(event: PointerEvent, tree: RelayWorkspaceTree) {
-    if (!workspaceDrag || workspaceDrag.pointerId !== event.pointerId) return;
-    const completed = workspaceDrag;
-    workspaceDrag = null;
-    const sourceIdx = completed.items.findIndex((item) => item.id === completed.sourceKey);
-    if (sourceIdx < 0 || completed.insertIdx === sourceIdx) return;
+    const completed = workspaceDrag.finish(event, '');
+    if (!completed) return;
     void commitWorkspaceReorder(tree, completed.insertIdx);
   }
 
@@ -387,7 +331,7 @@
       const legacyInsertIndex = beforeWorkspaceID
         ? relayWorkspaces.findIndex((workspace) => workspace.workspace_id === beforeWorkspaceID)
         : relayWorkspaces.length;
-      await relayStore.reorderWorkspaceBlock(
+      await workspaceCommands.reorderWorkspaceBlock(
         tree.workspace.relay_id,
         tree.workspaceIds,
         beforeWorkspaceID,
@@ -460,12 +404,12 @@
     busy = true;
     try {
       if (action.kind === 'close' || action.kind === 'close_group') {
-        await relayStore.closeWorkspace(action.workspace, action.kind === 'close_group'
+        await workspaceCommands.closeWorkspace(action.workspace, action.kind === 'close_group'
           ? { closeGroup: true, expectedWorkspaceIds: action.workspaceIDs }
           : undefined);
         setStatus(`Closed workspace${action.kind === 'close_group' ? ' group' : ''} ${action.workspace.label}.`);
       } else {
-        await relayStore.removeWorktree(action.workspace, action.force);
+        await workspaceCommands.removeWorktree(action.workspace, action.force);
         setStatus(`Removed worktree ${action.workspace.label}.`);
       }
       cancelConfirm();
@@ -528,7 +472,7 @@
     worktreeError = '';
     worktreeLoading = true;
     try {
-      const listing = await relayStore.listWorktrees(workspace);
+      const listing = await workspaceCommands.listWorktrees(workspace);
       // A slower listing for a previously shown workspace must not land
       // under the dialog's current title; its Open buttons would then send
       // paths from one repository with another one's workspace id.
@@ -568,7 +512,7 @@
     if (!workspace || isReadOnly(workspace.relay_id) || !branch.trim()) return;
     busy = true;
     try {
-      await relayStore.createWorktree(workspace, {
+      await workspaceCommands.createWorktree(workspace, {
         branch: branch.trim(),
         base: base.trim(),
         label: worktreeLabel.trim(),
@@ -597,7 +541,7 @@
     if (!workspace || isReadOnly(workspace.relay_id)) return;
     busy = true;
     try {
-      await relayStore.openWorktree(workspace, { path });
+      await workspaceCommands.openWorktree(workspace, { path });
       setStatus(`Opened worktree ${labelValue}.`);
       await refreshWorktrees(workspace);
     } catch (caught) {
@@ -723,11 +667,11 @@
     {/if}
     {#each displayWorkspaceTrees as tree (tree.workspace.workspace_id)}
       <div
-        class:workspace-dragging={workspaceDrag?.sourceKey === tree.workspace.workspace_id}
+        class:workspace-dragging={workspaceDrag.isSource('', tree.workspace.workspace_id)}
         class="workspace-management-slot"
         data-workspace-key={tree.workspace.workspace_id}
         title={workspaceReorderAvailable ? "Hold to reorder this workspace." : undefined}
-        style:transform={workspaceShift(tree.workspace.workspace_id) || undefined}
+        style:transform={workspaceDrag.shift('', tree.workspace.workspace_id) || undefined}
         use:workspaceReorderPress={{ tree }}
       >
         <Card>
@@ -756,15 +700,14 @@
 >
   <form class="form-stack" onsubmit={createWorkspace}>
     <span id="workspace-cwd-label" class="field-label">Working Directory</span>
-    <div class:open={directoryOpen} class="directory-browser" aria-labelledby="workspace-cwd-label">
-      <DirectoryPicker
-        {connection}
-        {cwd}
-        listId="workspace-directory-list"
-        bind:open={directoryOpen}
-        onselect={loadDirectory}
-      />
-    </div>
+    <DirectoryPicker
+      labelId="workspace-cwd-label"
+      {connection}
+      {cwd}
+      listId="workspace-directory-list"
+      bind:open={directoryOpen}
+      onselect={directoryLoader.load}
+    />
     <label for="workspace-label">Label</label>
     <input id="workspace-label" bind:value={label} maxlength="128" required autocomplete="off" />
     <div class="button-row">

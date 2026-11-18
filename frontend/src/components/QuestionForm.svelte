@@ -1,7 +1,8 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import Button from '$components/ui/Button.svelte';
-  import { CommandError, relayStore } from '$lib/store';
+  import { CommandError } from '$lib/command-error';
+  import { relayStore } from '$lib/store';
   import {
     answerFailureToast,
     createQuestionDraft,
@@ -31,7 +32,7 @@
   } = $props();
 
   let draft = $state<QuestionDraft>({ selected: new Set(), otherSelected: false, otherText: '' });
-  let singleChoice = $state<number | typeof OTHER_CHOICE | null>(null);
+  const singleChoice = $state<{ value: number | typeof OTHER_CHOICE | null }>({ value: null });
   let activeKey = '';
   let formElement: HTMLFormElement;
   let progress = $derived.by(() => {
@@ -45,10 +46,10 @@
   function applyDraft(next: QuestionDraft) {
     draft = next;
     if (interaction.kind !== 'single_select') {
-      singleChoice = null;
+      singleChoice.value = null;
       return;
     }
-    singleChoice = next.otherSelected
+    singleChoice.value = next.otherSelected
       ? OTHER_CHOICE
       : next.selected.values().next().value ?? null;
   }
@@ -193,7 +194,7 @@
             type="radio"
             name="question-answer"
             value={index}
-            bind:group={singleChoice}
+            bind:group={singleChoice.value}
             onchange={(event) => choose(index, event.currentTarget.checked)}
           />
         {/if}
@@ -220,7 +221,7 @@
           type="radio"
           name="question-answer"
           value={OTHER_CHOICE}
-          bind:group={singleChoice}
+          bind:group={singleChoice.value}
           aria-label={interaction.other?.label || 'Other'}
           onchange={(event) => chooseOther(event.currentTarget.checked)}
         />

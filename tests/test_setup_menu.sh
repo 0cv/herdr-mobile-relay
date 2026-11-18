@@ -4,6 +4,8 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/herdr-menu-test.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
+# shellcheck source=lib.sh
+. "$REPO_DIR/tests/lib.sh"
 unset HERDR_BIN_PATH
 export HOME="$WORK/home" XDG_CONFIG_HOME="$WORK/config" XDG_DATA_HOME="$WORK/data"
 export HERDR_PLUGIN_CONFIG_DIR="$WORK/plugin" HERDR_RELAY_ENV="$WORK/config/relay.env"
@@ -60,8 +62,6 @@ restore() { mv "$WORK/$1.hidden" "$WORK/bin/$1"; }
 
 menu() { printf '%b' "$1" | bash "$WORK/relay/plugin-setup-menu.sh"; }
 items() { printf '%s\n' "$1" | grep -E '^  [123bq]\. ' || true; }
-expect() { [[ "$1" == *"$2"* ]] || { printf 'Missing: %s\n' "$2" >&2; exit 1; }; }
-reject() { [[ "$1" != *"$2"* ]] || { printf 'Unexpected: %s\n' "$2" >&2; exit 1; }; }
 
 > "$HERDR_RELAY_ENV"
 without hc
@@ -216,9 +216,12 @@ expect "$output" 'ACTION: tailscale-off.sh '
 [[ "$(printf '%s\n' "$output" | grep -c '^Tailscale$')" == 2 ]]
 
 printf "CLOUDFLARED_CONFIG='%s/cloudflared.yml'\n" "$WORK" > "$HERDR_RELAY_ENV"
-printf 'hostname: relay.example.test\n' > "$WORK/cloudflared.yml"
+printf 'hostname: "relay.example.test" # public hostname\n' > "$WORK/cloudflared.yml"
 output="$(menu 'q\n')"
 expect "$output" '  1. Cloudflare (active)'
+expect "$output" '  Phone path: Cloudflare tunnel relay.example.test'
+reject "$output" '"relay.example.test"'
+reject "$output" '# public hostname'
 output="$(HERDR_RELAY_BACKEND=hc menu 'q\n')"
 expect "$output" "Herdr TUI relay (phone shows $HOST)"
 reject "$output" 'Herdr app relay'
@@ -387,23 +390,5 @@ EOF
 output="$(menu '3\n5\nb\nq\n')"
 expect "$output" 'Enter 1–4, b or q.'
 [[ "$(printf '%s\n' "$output" | grep -c 'What should your phone control?')" == 2 ]]
-
-# Every script the menu can run, directly or through another, ships in the release.
-seen=" "
-queue="plugin-setup-menu"
-while [ -n "$queue" ]; do
-    set -- $queue
-    name="$1"
-    shift
-    queue="$*"
-    case "$seen" in *" $name "*) continue ;; esac
-    seen="$seen$name "
-    grep -qE "^ +$name\.sh( |;)" "$REPO_DIR/scripts/package-release.sh" ||
-        [ "$name" = plugin-setup-menu ] ||
-        { echo "release bundle is missing relay/$name.sh" >&2; exit 1; }
-    for next in $(grep -oE '[a-z][a-z-]+\.sh' "$REPO_DIR/relay/$name.sh" | sed 's/\.sh$//'); do
-        [ ! -f "$REPO_DIR/relay/$next.sh" ] || queue="$queue $next"
-    done
-done
 
 echo 'setup menu tests passed'

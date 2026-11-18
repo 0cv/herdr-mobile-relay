@@ -55,9 +55,6 @@ func NewJSONLRecordReader(
 	start, end, maxBytes int64,
 	progress func(JSONLRecordProgress),
 ) (*JSONLRecordReader, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	if file == nil {
 		return nil, errors.New("jsonl record reader requires a file")
 	}
@@ -153,8 +150,10 @@ func (r *JSONLRecordReader) Next() (JSONLRecord, error) {
 			return JSONLRecord{}, err
 		}
 		if r.position >= r.end {
-			if info, err := r.file.Stat(); err == nil && info.Size() < r.end {
-				return JSONLRecord{}, errJSONLSourceTruncated
+			if r.file != nil {
+				if info, err := r.file.Stat(); err == nil && info.Size() < r.end {
+					return JSONLRecord{}, errJSONLSourceTruncated
+				}
 			}
 			return JSONLRecord{}, io.EOF
 		}
@@ -251,104 +250,29 @@ func (r *JSONLRecordReader) reportProgress() {
 	})
 }
 
+func newJSONLBytesReader(ctx context.Context, data []byte, start int64, startsInside bool, maxBytes int64) *JSONLRecordReader {
+	reader := &JSONLRecordReader{
+		ctx:          ctx,
+		start:        start,
+		end:          start + int64(len(data)),
+		position:     start,
+		maxBytes:     maxBytes,
+		startsInside: startsInside,
+		boundaryRead: true,
+	}
+	reader.reader = bufio.NewReaderSize(&jsonlSourceReader{source: bytes.NewReader(data), owner: reader}, defaultJSONLBufferBytes)
+	return reader
+}
+
 // collectJSONLRecordsBytes parses a single already-read range. Claude footer
 // discovery uses this form so hashing, boundary checks, and marker parsing do
-// not reread the same 64 KiB from disk three times.
+// not reread the same 64 KiB from disk three times. Oversized records are
+// counted and left out of the result.
 func collectJSONLRecordsBytes(ctx context.Context, data []byte, start int64, startsInside bool, maxBytes int64) ([]JSONLRecord, int, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	if start < 0 || maxBytes < 1 {
 		return nil, 0, errors.New("invalid jsonl record range")
 	}
-	reader := bufio.NewReaderSize(bytes.NewReader(data), defaultJSONLBufferBytes)
-	end := start + int64(len(data))
-	position := start
-	records := make([]JSONLRecord, 0)
-	overSized := 0
-	first := true
-	for position < end {
-		if err := ctx.Err(); err != nil {
-			return nil, overSized, err
-		}
-		record := JSONLRecord{Start: position}
-		var raw []byte
-		var rawBytes int64
-		over := false
-		hadNewline := false
-		for {
-			if err := ctx.Err(); err != nil {
-				return nil, overSized, err
-			}
-			fragment, err := reader.ReadSlice('\n')
-			if len(fragment) > 0 {
-				position += int64(len(fragment))
-				content := fragment
-				if content[len(content)-1] == '\n' {
-					hadNewline = true
-					content = content[:len(content)-1]
-					if len(content) > 0 && content[len(content)-1] == '\r' {
-						content = content[:len(content)-1]
-					}
-				}
-				if !over {
-					if rawBytes+int64(len(content)) > maxBytes {
-						over = true
-						raw = nil
-					} else {
-						raw = append(raw, content...)
-						rawBytes += int64(len(content))
-					}
-				}
-			}
-			switch {
-			case err == nil:
-				break
-			case errors.Is(err, bufio.ErrBufferFull):
-				continue
-			case errors.Is(err, io.EOF):
-				break
-			default:
-				return nil, overSized, err
-			}
-			break
-		}
-		record.End = position
-		if startsInside && first {
-			first = false
-			continue
-		}
-		first = false
-		if over {
-			overSized++
-			continue
-		}
-		if strings.TrimSpace(string(raw)) == "" {
-			continue
-		}
-		record.Raw = raw
-		record.Oversized = false
-		record.Trailing = !hadNewline
-		record.Complete = hadNewline || json.Valid(raw)
-		if !record.Complete {
-			record.Trailing = true
-		}
-		record.StartsInside = startsInside && record.Start == start
-		records = append(records, record)
-	}
-	return records, overSized, nil
-}
-
-func collectJSONLRecords(
-	ctx context.Context,
-	file *os.File,
-	start, end, maxBytes int64,
-	progress func(JSONLRecordProgress),
-) ([]JSONLRecord, int, error) {
-	reader, err := NewJSONLRecordReader(ctx, file, start, end, maxBytes, progress)
-	if err != nil {
-		return nil, 0, err
-	}
+	reader := newJSONLBytesReader(ctx, data, start, startsInside, maxBytes)
 	records := make([]JSONLRecord, 0)
 	overSized := 0
 	for {

@@ -1,3 +1,5 @@
+import { base64Decode } from './base64url';
+
 /**
  * The relay encodes QR codes with the same library it uses for the terminal
  * setup code and sends the modules packed into bits, so the app only unpacks
@@ -20,7 +22,7 @@ export function qrBitmap(size: unknown, modules: unknown): QrBitmap | null {
   if (typeof modules !== 'string') return null;
   let bytes: Uint8Array;
   try {
-    bytes = Uint8Array.from(atob(modules), (character) => character.charCodeAt(0));
+    bytes = base64Decode(modules);
   } catch {
     return null;
   }

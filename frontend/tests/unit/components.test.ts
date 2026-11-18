@@ -2,7 +2,7 @@ import { tick } from 'svelte';
 import { get } from 'svelte/store';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import AgentList from '$components/AgentList.svelte';
 import ConversationHistory from '$components/ConversationHistory.svelte';
 import WorkspaceManager from '$components/WorkspaceManager.svelte';
@@ -10,35 +10,18 @@ import ActivityView from '$components/ActivityView.svelte';
 import QuestionForm from '$components/QuestionForm.svelte';
 import TerminalView from '$components/TerminalView.svelte';
 import LaunchView from '$components/LaunchView.svelte';
-import { CommandError, relayStore } from '$lib/store';
+import { CommandError } from '$lib/command-error';
+import { relayStore } from '$lib/store';
+import { closeWorkspace, listWorktrees, reorderWorkspaceBlock } from '$lib/workspace-commands';
 import { AttachmentBatchController } from '$lib/attachments';
 import { clearPromptDraft } from '$lib/prompt-drafts';
 import { reloadRisk } from '$lib/reload-guard';
 import { targetRefForAgent } from '$lib/resource-id';
 import { hiddenServers, setHomeLayout, setServerHidden } from '$lib/preferences';
 import type { Agent, AgentProfile, CommandResult, QuestionInteraction, RelayConnectionView, RelayWorkspace, SlashCommandCatalog, WorktreeListing } from '$lib/types';
+import { MockWebSocket } from '../support/relay';
 
 const INCOMPLETE_CATALOG_NOTICE = 'Command suggestions may be incomplete because a discovery limit was reached. Typing searches only loaded suggestions; you can still send a command manually.';
-
-class SlashCommandWebSocket {
-  static CONNECTING = 0;
-  static OPEN = 1;
-  static CLOSING = 2;
-  static CLOSED = 3;
-  static instances: SlashCommandWebSocket[] = [];
-  readyState = SlashCommandWebSocket.CONNECTING;
-  protocol = '';
-  sent: string[] = [];
-  onopen: (() => void) | null = null;
-  onclose: ((event?: { code: number }) => void) | null = null;
-  onerror: (() => void) | null = null;
-  onmessage: ((event: { data: string }) => void) | null = null;
-  constructor(readonly url: string) { SlashCommandWebSocket.instances.push(this); }
-  send(payload: string) { this.sent.push(payload); }
-  close() { this.readyState = SlashCommandWebSocket.CLOSED; }
-  open() { this.readyState = SlashCommandWebSocket.OPEN; this.onopen?.(); }
-  message(payload: unknown) { this.onmessage?.({ data: JSON.stringify(payload) }); }
-}
 
 const blockedAgent: Agent = {
   relay_id: 'fedora', relay_label: 'Fedora', raw_pane_id: 'w1:p1', pane_id: 'fedora::w1:p1',
@@ -60,7 +43,15 @@ function launchConnection(agentProfiles: AgentProfile[], hermesProfiles: string[
   } as unknown as RelayConnectionView;
 }
 
+vi.mock('$lib/workspace-commands', async original => ({ ...await original<typeof import('$lib/workspace-commands')>(), reorderWorkspaceBlock: vi.fn(), closeWorkspace: vi.fn(), listWorktrees: vi.fn() }));
+
 describe('accessible Svelte interactions', () => {
+  beforeEach(() => {
+    vi.mocked(reorderWorkspaceBlock).mockReset();
+    vi.mocked(closeWorkspace).mockReset();
+    vi.mocked(listWorktrees).mockReset();
+  });
+
   it('offers explicit browser pairing in the deferred agent-list empty state', async () => {
     const user = userEvent.setup();
     const relay = { id: 'invited', label: 'Invited', url: 'wss://invited.example', token: '' };
@@ -222,11 +213,11 @@ describe('accessible Svelte interactions', () => {
 
   it('filters the full real-store catalog and revalidates each palette opening', async () => {
     const user = userEvent.setup();
-    vi.stubGlobal('WebSocket', SlashCommandWebSocket);
+    vi.stubGlobal('WebSocket', MockWebSocket);
     relayStore.destroy();
     relayStore.relayConfigs.set([]);
     relayStore.addRelay({ label: 'Fedora', url: 'ws://127.0.0.1:8871', token: '' });
-    const socket = SlashCommandWebSocket.instances.at(-1)!;
+    const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
     socket.message({
       type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora',
@@ -1291,7 +1282,7 @@ describe('accessible Svelte interactions', () => {
     relayStore.connections.set(new Map([['fedora', connection as never]]));
     relayStore.workspaces.set([workspace('w1', 'One'), workspace('w2', 'Two')]);
     // A never-settling reorder keeps the optimistic order pending under test.
-    const reorder = vi.spyOn(relayStore, 'reorderWorkspaceBlock')
+    const reorder = vi.mocked(reorderWorkspaceBlock)
       .mockReturnValue(new Promise<CommandResult>(() => {}));
     try {
       const { container } = render(WorkspaceManager);
@@ -1334,7 +1325,7 @@ describe('accessible Svelte interactions', () => {
     relayStore.relayConfigs.set([{ id: 'fedora', label: 'Fedora', url: 'wss://fedora', token: '' }]);
     relayStore.connections.set(new Map([['fedora', connection as never]]));
     relayStore.workspaces.set([primary, child]);
-    const close = vi.spyOn(relayStore, 'closeWorkspace')
+    const close = vi.mocked(closeWorkspace)
       .mockRejectedValueOnce(Object.assign(
         new CommandError('Close the workspace group explicitly'),
         { data: { code: 'workspace_group_close_required', workspace_ids: ['w1', 'w2'] } },
@@ -1395,7 +1386,7 @@ describe('accessible Svelte interactions', () => {
     relayStore.workspaces.set([alphaPrimary, alphaChild, betaPrimary, betaChild]);
     let rejectClose!: (reason?: unknown) => void;
     const pending = new Promise<CommandResult>((_resolve, reject) => { rejectClose = reject; });
-    const close = vi.spyOn(relayStore, 'closeWorkspace').mockReturnValue(pending);
+    const close = vi.mocked(closeWorkspace).mockReturnValue(pending);
     try {
       render(WorkspaceManager);
       await vi.waitFor(() => expect(screen.getAllByRole('button', { name: 'Close' }).length).toBeGreaterThan(0));
@@ -1438,7 +1429,7 @@ describe('accessible Svelte interactions', () => {
     relayStore.relayConfigs.set([{ id: 'fedora', label: 'Fedora', url: 'wss://fedora', token: '' }]);
     relayStore.connections.set(new Map([['fedora', connection as never]]));
     relayStore.workspaces.set([primary, child]);
-    const close = vi.spyOn(relayStore, 'closeWorkspace').mockRejectedValue(
+    const close = vi.mocked(closeWorkspace).mockRejectedValue(
       Object.assign(new CommandError('Close the workspace group explicitly'), {
         data: { code: 'workspace_group_close_required', workspace_ids: ['w1', 'w2'] },
       }),
@@ -1645,7 +1636,7 @@ describe('accessible Svelte interactions', () => {
     relayStore.workspaces.set([workspace('w1', 'One'), workspace('w2', 'Two')]);
     let releaseFirst = (_: WorktreeListing) => {};
     const first = new Promise<WorktreeListing>((resolve) => { releaseFirst = resolve; });
-    const list = vi.spyOn(relayStore, 'listWorktrees')
+    const list = vi.mocked(listWorktrees)
       .mockImplementationOnce(() => first)
       .mockImplementationOnce(() => Promise.resolve(listing('two', 'feature-two')));
     try {

@@ -948,28 +948,15 @@ func TestProbeTargetsOnlyTheRequester(t *testing.T) {
 	}
 }
 
-func TestWhoamiAndHealthz(t *testing.T) {
+func TestHealthz(t *testing.T) {
 	h := newHarness(t, Options{Version: "0.17.1", Revision: "abc123"})
-
-	response, err := http.Get(h.url + "/whoami")
-	if err != nil {
-		t.Fatalf("get whoami: %v", err)
-	}
-	defer response.Body.Close()
-	var whoami whoamiResponse
-	if err := json.NewDecoder(response.Body).Decode(&whoami); err != nil {
-		t.Fatalf("decode whoami: %v", err)
-	}
-	if whoami.IP != "127.0.0.1" {
-		t.Fatalf("whoami reports %q, want 127.0.0.1", whoami.IP)
-	}
 
 	health, err := http.Get(h.url + "/healthz")
 	if err != nil {
 		t.Fatalf("get healthz: %v", err)
 	}
 	defer health.Body.Close()
-	var report healthResponse
+	var report gatewaywire.HealthResponse
 	if err := json.NewDecoder(health.Body).Decode(&report); err != nil {
 		t.Fatalf("decode healthz: %v", err)
 	}

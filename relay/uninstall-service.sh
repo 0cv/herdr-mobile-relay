@@ -13,10 +13,9 @@ if [ "${HERDR_TAILSCALE_FULL_UNINSTALL:-}" != 1 ]; then
 fi
 
 LABELS=("$RELAY_LAUNCHD_LABEL")
-[ "$HERDR_RELAY_BACKEND" != herdr ] || LABELS+=("com.herdr-remote.service")
 
 for label in "${LABELS[@]}"; do
-    plist="$HOME/Library/LaunchAgents/$label.plist"
+    plist="$(relay_service_file)"
     launchctl bootout "gui/$UID" "$plist" >/dev/null 2>&1 || true
     rm -f "$plist"
 done

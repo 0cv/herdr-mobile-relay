@@ -38,7 +38,7 @@ func TestSlashCommandCatalogFitsOutboundHubBudget(t *testing.T) {
 		slashcmd.Catalog{Commands: commands, Metadata: metadata, Status: "partial"},
 		"req-large-catalog", "list_slash_commands", "pane-large-catalog",
 	)
-	message := commandResultMessage(&coordinator.CommandResult{
+	message := coordinator.CommandResultMessage(&coordinator.CommandResult{
 		RequestID: "req-large-catalog",
 		Action:    "list_slash_commands",
 		OK:        true,
@@ -110,8 +110,8 @@ func formatTestIndex(index int) string {
 	return fmt.Sprintf("%04d", index)
 }
 
-func TestCommandResultMessageKeepsPythonMandatoryEmptyFields(t *testing.T) {
-	got := commandResultMessage(&coordinator.CommandResult{
+func TestCommandResultMessageIncludesEmptyError(t *testing.T) {
+	got := coordinator.CommandResultMessage(&coordinator.CommandResult{
 		RequestID: "req-001",
 		Action:    "prompt",
 		OK:        true,
@@ -133,7 +133,7 @@ func TestCommandResultMessageKeepsPythonMandatoryEmptyFields(t *testing.T) {
 }
 
 func TestCommandResultMessageIncludesData(t *testing.T) {
-	got := commandResultMessage(&coordinator.CommandResult{
+	got := coordinator.CommandResultMessage(&coordinator.CommandResult{
 		RequestID: "req-data",
 		Action:    "agent_start",
 		OK:        true,

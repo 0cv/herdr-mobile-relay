@@ -16,7 +16,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -41,24 +40,6 @@ type hybridEnv struct {
 
 func setupHybridEnv(t *testing.T) *hybridEnv {
 	t.Helper()
-	root := repoRoot(t)
-	tmpDir := t.TempDir()
-
-	binaries := map[string]string{
-		"fake-herdr":         "./cmd/fake-herdr",
-		"herdr-mobile-relay": "./cmd/herdr-mobile-relay",
-		"herdr-gateway":      "./cmd/herdr-gateway",
-	}
-	paths := make(map[string]string, len(binaries))
-	for name, pkg := range binaries {
-		out := filepath.Join(tmpDir, name)
-		build := exec.Command("go", "build", "-o", out, pkg)
-		build.Dir = root
-		if combined, err := build.CombinedOutput(); err != nil {
-			t.Fatalf("build %s: %v\n%s", name, err, combined)
-		}
-		paths[name] = out
-	}
 
 	gatewayPort := freePort(t)
 	env := &hybridEnv{
@@ -66,7 +47,7 @@ func setupHybridEnv(t *testing.T) *hybridEnv {
 		gatewayWS:   fmt.Sprintf("ws://127.0.0.1:%d", gatewayPort),
 	}
 
-	gateway := exec.Command(paths["herdr-gateway"])
+	gateway := exec.Command(builtBinaries.gateway)
 	gateway.Env = append(os.Environ(),
 		fmt.Sprintf("HERDR_GATEWAY_ADDR=127.0.0.1:%d", gatewayPort),
 		// The binary defaults address discovery to :3478. A test must never bind a
@@ -84,53 +65,16 @@ func setupHybridEnv(t *testing.T) *hybridEnv {
 	t.Cleanup(func() { stopProcess(gateway) })
 	waitForStatus(t, env.gatewayHTTP, "/healthz", http.StatusOK)
 
-	scenario := `{"panes":[{"pane_id":"pane-1","terminal_id":"terminal-1","agent":"claude","name":"test","agent_status":"working","tab_id":"tab-1","workspace_id":"ws-1","cwd":"/tmp","revision":1,"foreground_cwd":"/tmp"}],"tabs":[{"tab_id":"tab-1","workspace_id":"ws-1","label":"main","number":1,"cwd":"/tmp"}]}`
-	scenarioPath := filepath.Join(tmpDir, "scenario.json")
-	if err := os.WriteFile(scenarioPath, []byte(scenario), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	webDir := filepath.Join(tmpDir, "web")
-	if err := os.MkdirAll(webDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(webDir, "index.html"), []byte("<html>test</html>"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	relayPort := freePort(t)
-	env.relayHTTP = fmt.Sprintf("http://127.0.0.1:%d", relayPort)
-	socketPath := filepath.Join(testSocketDir(t), "herdr.sock")
-	socketListener := startInventorySocket(t, socketPath, scenario)
-	relay := exec.Command(paths["herdr-mobile-relay"])
-	relay.Env = append(os.Environ(),
-		fmt.Sprintf("HERDR_RELAY_PORT=%d", relayPort),
-		fmt.Sprintf("HERDR_RELAY_PLUGIN_PORT=%d", freePort(t)),
-		"HERDR_RELAY_HOST=127.0.0.1",
-		"HERDR_RELAY_TOKEN="+relayKey,
-		"HERDR_RELAY_INSTANCE_ID=hybrid-blackbox",
-		"HERDR_GATEWAY_URL="+env.gatewayWS,
-		// Port mapping would reach for the LAN router from a test run.
-		"HERDR_REACHABILITY_PORT_MAPPING=false",
-		fmt.Sprintf("HERDR_BIN=%s", paths["fake-herdr"]),
-		fmt.Sprintf("HERDR_WEB_ROOT=%s", webDir),
-		"HERDR_RELAY_POLL_INTERVAL=0.5",
-		fmt.Sprintf("FAKE_HERDR_SCENARIO=%s", scenarioPath),
-		fmt.Sprintf("FAKE_HERDR_OPERATIONS=%s", filepath.Join(tmpDir, "operations.jsonl")),
-		fmt.Sprintf("XDG_CONFIG_HOME=%s", filepath.Join(tmpDir, "config")),
-		fmt.Sprintf("XDG_CACHE_HOME=%s", filepath.Join(tmpDir, "cache")),
-		fmt.Sprintf("HERDR_SOCKET_PATH=%s", socketPath),
-		stubLaunchctlPath(t),
-	)
-	relay.Stdout = os.Stdout
-	relay.Stderr = os.Stderr
-	if err := relay.Start(); err != nil {
-		t.Fatalf("start relay: %v", err)
-	}
-	t.Cleanup(func() {
-		stopProcess(relay)
-		_ = socketListener.Close()
+	relay := startRelay(t, relayOptions{
+		instanceID: "hybrid-blackbox",
+		token:      relayKey,
+		env: []string{
+			"HERDR_GATEWAY_URL=" + env.gatewayWS,
+			// Port mapping would reach for the LAN router from a test run.
+			"HERDR_REACHABILITY_PORT_MAPPING=false",
+		},
 	})
-	waitForStatus(t, env.relayHTTP, "/readyz", http.StatusOK)
+	env.relayHTTP = relay.httpBase
 	return env
 }
 
@@ -532,7 +476,7 @@ func TestGatewayPathControlsRelay(t *testing.T) {
 		}
 
 		p.sendMessage(ctx, map[string]any{
-			"type":              "send_text",
+			"type":              "submit_prompt",
 			"protocol":          3,
 			"request_id":        "gw-1",
 			"pane_id":           "pane-1",
@@ -704,13 +648,7 @@ func TestRelayWithoutGatewayIsUnchanged(t *testing.T) {
 		t.Fatalf("a relay with no gateway reported %v", gateway)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	conn, _, err := websocket.Dial(ctx, env.wsURL, nil)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer conn.Close(websocket.StatusNormalClosure, "")
+	ctx, conn := dial(t, env, 15*time.Second)
 
 	for range 20 {
 		_, data, err := conn.Read(ctx)

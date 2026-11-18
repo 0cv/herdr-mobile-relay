@@ -12,7 +12,7 @@ func paddedFile(t *testing.T, path, content string, size int) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeTestFile(t, path, content+strings.Repeat("x", size-len(content)))
+	writeFile(t, path, content+strings.Repeat("x", size-len(content)))
 }
 
 func findCatalogCommand(catalog Catalog, name string) (Command, bool) {
@@ -39,7 +39,7 @@ func TestClaudeSkillsWithLargeBodies(t *testing.T) {
 	skill(cwd, "project-large", 100*1024)
 	skill(cwd, "project-oversized", maxCommandFileSize+1)
 
-	catalog := CatalogFor("claude", cwd, home)
+	catalog := catalogFor("claude", cwd, home)
 	for _, name := range []string{"/personal-large", "/personal-at-limit", "/project-large"} {
 		command, ok := findCatalogCommand(catalog, name)
 		if !ok {
@@ -70,7 +70,7 @@ func TestClaudeCommandsWithLargeBodies(t *testing.T) {
 	paddedFile(t, filepath.Join(commands, "internal.md"), "---\nuser-invocable: false\n---\n", 100*1024)
 	paddedFile(t, filepath.Join(commands, "oversized.md"), "---\nhidden: true\n---\n", maxCommandFileSize+1)
 
-	catalog := CatalogFor("claude", t.TempDir(), home)
+	catalog := catalogFor("claude", t.TempDir(), home)
 	described, ok := findCatalogCommand(catalog, "/described")
 	if !ok {
 		t.Fatal("/described missing")
@@ -100,7 +100,7 @@ func TestQoderSkillWithLargeBody(t *testing.T) {
 	paddedFile(t, filepath.Join(home, ".qoder", "skills", "large", "SKILL.md"),
 		"---\nname: large\ndescription: Large skill\n---\n", 100*1024)
 
-	catalog := CatalogFor("qoder", t.TempDir(), home)
+	catalog := catalogFor("qoder", t.TempDir(), home)
 	command, ok := findCatalogCommand(catalog, "/large")
 	if !ok {
 		t.Fatal("/large missing")

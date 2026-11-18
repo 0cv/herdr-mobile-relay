@@ -3,16 +3,15 @@ package profiles
 import (
 	"context"
 	"log/slog"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/0cv/herdr-mobile-relay/internal/childenv"
 	"github.com/0cv/herdr-mobile-relay/internal/config"
 )
 
@@ -42,15 +41,6 @@ var defaultAliases = map[string]string{
 	"devin cli":       "devin",
 }
 
-// defaultSkillDirs and defaultCommandFormats hold no defaults: every provider
-// discovers its own skill directories the way its agent does, and a default
-// format would make CommandConfig report every such profile as explicitly
-// configured, permanently routing it down the INI escape hatch. Both maps stay
-// because the INI [skills] and [commands] sections populate them at runtime.
-var defaultSkillDirs = map[string][]string{}
-
-var defaultCommandFormats = map[string]string{}
-
 type IntegrationStatuser interface {
 	IntegrationStatus(ctx context.Context) ([]byte, error)
 }
@@ -70,15 +60,7 @@ type Resolver struct {
 	skillDirs            map[string][]string
 	formats              map[string]string
 	warned               map[string]bool
-	versions             map[string]cachedVersion
 }
-
-type cachedVersion struct {
-	value   string
-	expires time.Time
-}
-
-var semanticVersionPattern = regexp.MustCompile(`\b[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?\b`)
 
 func NewResolver(configHome string, herdr IntegrationStatuser) *Resolver {
 	return &Resolver{
@@ -87,11 +69,10 @@ func NewResolver(configHome string, herdr IntegrationStatuser) *Resolver {
 		ownership:  make(map[string]profileOwnership),
 		observed:   make(map[string]PaneIdentity),
 		unobserved: make(map[string]bool),
-		aliases:    cloneAliases(defaultAliases),
-		skillDirs:  cloneStringSlices(defaultSkillDirs),
-		formats:    cloneStrings(defaultCommandFormats),
+		aliases:    maps.Clone(defaultAliases),
+		skillDirs:  make(map[string][]string),
+		formats:    make(map[string]string),
 		warned:     make(map[string]bool),
-		versions:   make(map[string]cachedVersion),
 	}
 }
 
@@ -170,9 +151,9 @@ func (r *Resolver) loadINI() (
 	skillDirs map[string][]string,
 	formats map[string]string,
 ) {
-	aliases = cloneAliases(defaultAliases)
-	skillDirs = cloneStringSlices(defaultSkillDirs)
-	formats = cloneStrings(defaultCommandFormats)
+	aliases = maps.Clone(defaultAliases)
+	skillDirs = make(map[string][]string)
+	formats = make(map[string]string)
 	iniPath := filepath.Join(r.configHome, "herdr", "agent-profiles.ini")
 	data, err := os.ReadFile(iniPath)
 	if err != nil {
@@ -319,9 +300,9 @@ func (r *Resolver) Forget(paneID string) {
 	}
 }
 
-// ResolvePane picks the profile for a pane: slash-command discovery, version
-// display, and the agent that Clear and Restart start. A verified launch record
-// wins; otherwise the profile matching the agent name Herdr reports is used.
+// ResolvePane picks the profile of the agent running in a pane. A verified
+// launch record wins; otherwise the profile matching the agent name Herdr
+// reports is used.
 func (r *Resolver) ResolvePane(paneID, reportedAgent string) string {
 	if profileID := r.verifiedProfile(paneID); profileID != "" {
 		return profileID
@@ -351,43 +332,7 @@ func (r *Resolver) Reload() {
 	r.mu.Lock()
 	r.cached = nil
 	r.expires = time.Time{}
-	r.versions = make(map[string]cachedVersion)
 	r.mu.Unlock()
-}
-
-func (r *Resolver) AgentVersion(profileID string) string {
-	profileID = strings.ToLower(strings.TrimSpace(profileID))
-	if profileID == "" {
-		return ""
-	}
-	r.mu.Lock()
-	if cached, ok := r.versions[profileID]; ok && time.Now().Before(cached.expires) {
-		r.mu.Unlock()
-		return cached.value
-	}
-	r.mu.Unlock()
-
-	profile, ok := r.Profile(profileID)
-	if !ok || len(profile.Argv) == 0 {
-		return ""
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	cmd := childenv.CommandContext(ctx, profile.Argv[0], "--version")
-	output, err := cmd.CombinedOutput()
-	version := ""
-	if err == nil {
-		version = semanticVersionPattern.FindString(string(output))
-	}
-	r.mu.Lock()
-	r.versions[profileID] = cachedVersion{value: version, expires: time.Now().Add(5 * time.Minute)}
-	r.mu.Unlock()
-	return version
-}
-
-func (r *Resolver) CommandConfig(profileID string) ([]string, string, bool) {
-	dirs, format, suppressed := r.CommandDiscovery(profileID)
-	return dirs, format, !suppressed && format != ""
 }
 
 // CommandDiscovery preserves an explicit "off" independently from an absent or
@@ -435,30 +380,6 @@ func expandedPaths(paths []string) []string {
 func binaryPath(name string) (string, bool) {
 	path, err := exec.LookPath(name)
 	return path, err == nil
-}
-
-func cloneAliases(source map[string]string) map[string]string {
-	result := make(map[string]string, len(source))
-	for key, value := range source {
-		result[key] = value
-	}
-	return result
-}
-
-func cloneStrings(source map[string]string) map[string]string {
-	result := make(map[string]string, len(source))
-	for key, value := range source {
-		result[key] = value
-	}
-	return result
-}
-
-func cloneStringSlices(source map[string][]string) map[string][]string {
-	result := make(map[string][]string, len(source))
-	for key, value := range source {
-		result[key] = append([]string(nil), value...)
-	}
-	return result
 }
 
 func cloneProfiles(source []Profile) []Profile {

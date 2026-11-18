@@ -5,10 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -16,7 +13,6 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/conversation"
 	"github.com/0cv/herdr-mobile-relay/internal/coordinator"
 	"github.com/0cv/herdr-mobile-relay/internal/protocol"
-	"github.com/0cv/herdr-mobile-relay/internal/transport"
 	"github.com/coder/websocket"
 )
 
@@ -69,11 +65,7 @@ func TestDatabaseLoadedHistoryEditDelivery(t *testing.T) {
 			server := testServerWithCacheDir(t.TempDir())
 			server.conversationB.Close()
 			reader := conversation.NewReader(t.TempDir())
-			browser, err := conversation.NewBrowser(reader, t.TempDir(), conversation.DefaultBrowserOptions())
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer browser.Close()
+			browser := newTestBrowser(t, reader, conversation.DefaultBrowserOptions())
 			defer server.herdrC.Close()
 			server.conversationM, server.conversationB = reader, browser
 			defer func() {
@@ -106,30 +98,10 @@ func TestDatabaseLoadedHistoryEditDelivery(t *testing.T) {
 			server.state.CommitInventory([]*coordinator.AgentState{{PaneID: "loaded-pane", TerminalID: "loaded-terminal", ServerSessionID: "primary", Agent: provider, Cwd: root, SessionID: session, AgentSessionID: session, Status: "working"}}, server.state.RevisionCounter())
 			agent, _ := server.state.Agent("loaded-pane")
 			target := protocol.TargetRef{PaneID: agent.PaneID, TerminalID: agent.TerminalID, ServerSessionID: agent.ServerSessionID, AgentSessionID: session, Generation: agent.Generation}
-			server.hub.SetHandler(func(client *transport.ClientConn, message map[string]any, admitted func()) {
-				defer admitted()
-				inbound, err := protocol.DecodeMap(message)
-				if err != nil {
-					t.Error(err)
-					return
-				}
-				if inbound.Type == "get_conversation_updates" {
-					server.handleConversationUpdates(client, inbound)
-					return
-				}
-				server.handleConversationHistory(client, inbound)
-			})
-			server.hub.SetOnDisconnect(func(client *transport.ClientConn) { server.stopConversationFeed(client.ID(), "") })
-			httpServer := httptest.NewServer(http.HandlerFunc(server.hub.HandleWebSocket))
-			defer httpServer.Close()
-			defer server.hub.Shutdown(context.Background())
+			useProductionHandler(t, server)
+			conn := dialHub(t, server)
 			ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 			defer cancel()
-			conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(httpServer.URL, "http"), nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer conn.CloseNow()
 			request := func(message map[string]any, result any) {
 				t.Helper()
 				message["pane_id"], message["target"], message["request_id"] = agent.PaneID, target, "loaded-request"
@@ -137,7 +109,7 @@ func TestDatabaseLoadedHistoryEditDelivery(t *testing.T) {
 				if err := conn.Write(ctx, websocket.MessageText, raw); err != nil {
 					t.Fatal(err)
 				}
-				_, raw, err = conn.Read(ctx)
+				_, raw, err := conn.Read(ctx)
 				if err != nil {
 					t.Fatal(err)
 				}

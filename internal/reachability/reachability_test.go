@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/gatewaywire"
 	"github.com/0cv/herdr-mobile-relay/internal/portmap"
 )
 
@@ -30,10 +31,6 @@ type fakeGateway struct {
 	send bool
 	// decoy makes /probe emit an unrelated datagram first.
 	decoy bool
-	// whoami is the body returned by GET /whoami.
-	whoami string
-	// whoamiStatus overrides the /whoami status code when non-zero.
-	whoamiStatus int
 
 	mu     sync.Mutex
 	ports  []uint16
@@ -45,27 +42,21 @@ func (g *fakeGateway) routes(t *testing.T) http.Handler {
 	t.Helper()
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/whoami", func(w http.ResponseWriter, r *http.Request) {
-		if g.whoamiStatus != 0 {
-			w.WriteHeader(g.whoamiStatus)
-		}
-		io.WriteString(w, g.whoami)
-	})
 	mux.HandleFunc("/probe", func(w http.ResponseWriter, r *http.Request) {
-		var req probeRequest
-		body, err := io.ReadAll(io.LimitReader(r.Body, maxResponseBytes))
+		var req gatewaywire.ProbeRequest
+		body, err := io.ReadAll(io.LimitReader(r.Body, gatewaywire.MaxHTTPResponseBytes))
 		if err != nil || json.Unmarshal(body, &req) != nil {
 			http.Error(w, `{"error":"bad_request"}`, http.StatusBadRequest)
 			return
 		}
 		token, err := base64.RawURLEncoding.DecodeString(req.Token)
-		if err != nil || len(token) != tokenBytes {
+		if err != nil || len(token) != gatewaywire.ProbeTokenBytes {
 			g.record(0, req.Token, "malformed token")
 			http.Error(w, `{"error":"bad_token"}`, http.StatusBadRequest)
 			return
 		}
-		if req.Port < minProbePort {
-			g.record(req.Port, req.Token, "invalid port")
+		if req.Port < gatewaywire.MinProbePort {
+			g.record(uint16(req.Port), req.Token, "invalid port")
 			http.Error(w, `{"error":"invalid_port"}`, http.StatusBadRequest)
 			return
 		}
@@ -75,10 +66,10 @@ func (g *fakeGateway) routes(t *testing.T) http.Handler {
 			http.Error(w, `{"error":"no_source"}`, http.StatusInternalServerError)
 			return
 		}
-		g.record(req.Port, req.Token, "")
+		g.record(uint16(req.Port), req.Token, "")
 
 		if g.send {
-			conn, err := net.Dial("udp", net.JoinHostPort(host, itoa(req.Port)))
+			conn, err := net.Dial("udp", net.JoinHostPort(host, itoa(uint16(req.Port))))
 			if err != nil {
 				http.Error(w, `{"error":"dial"}`, http.StatusInternalServerError)
 				return
@@ -91,7 +82,7 @@ func (g *fakeGateway) routes(t *testing.T) http.Handler {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(probeResponse{Sent: true, ObservedIP: host})
+		json.NewEncoder(w).Encode(gatewaywire.ProbeResponse{Sent: true, ObservedIP: host})
 	})
 	return mux
 }
@@ -128,7 +119,7 @@ func TestHTTPBase(t *testing.T) {
 		{in: "  http://gw.example.com  ", want: "http://gw.example.com"},
 	}
 	for _, tc := range tests {
-		got, err := httpBase(tc.in)
+		got, err := gatewaywire.HTTPBase(tc.in)
 		if err != nil {
 			t.Fatalf("httpBase(%q): %v", tc.in, err)
 		}
@@ -138,75 +129,21 @@ func TestHTTPBase(t *testing.T) {
 	}
 
 	for _, bad := range []string{"", "   ", "gw.example.com", "ftp://gw.example.com", "wss://"} {
-		if got, err := httpBase(bad); err == nil {
+		if got, err := gatewaywire.HTTPBase(bad); err == nil {
 			t.Errorf("httpBase(%q) = %q, want an error", bad, got)
 		}
 	}
 }
 
-func TestPublicIP(t *testing.T) {
-	gateway := &fakeGateway{whoami: `{"ip":"203.0.113.9"}`}
-	server := httptest.NewServer(gateway.routes(t))
-	defer server.Close()
-
-	prober := NewProber(server.URL, testLogger())
-	addr, err := prober.PublicIP(context.Background())
-	if err != nil {
-		t.Fatalf("PublicIP: %v", err)
+func TestSelfTestRejectsMalformedGatewayURL(t *testing.T) {
+	prober := NewProber("nonsense", testLogger())
+	if _, err := prober.SelfTest(context.Background(), time.Second); err == nil {
+		t.Fatal("SelfTest accepted a malformed gateway url")
 	}
-	if addr != netip.MustParseAddr("203.0.113.9") {
-		t.Fatalf("PublicIP = %s, want 203.0.113.9", addr)
-	}
-}
-
-func TestPublicIPErrors(t *testing.T) {
-	tests := []struct {
-		name    string
-		gateway *fakeGateway
-	}{
-		{name: "malformed json", gateway: &fakeGateway{whoami: "{not json"}},
-		{name: "malformed ip", gateway: &fakeGateway{whoami: `{"ip":"not-an-ip"}`}},
-		{name: "empty ip", gateway: &fakeGateway{whoami: `{}`}},
-		{name: "server error", gateway: &fakeGateway{whoami: `{"ip":"203.0.113.9"}`, whoamiStatus: http.StatusBadGateway}},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			server := httptest.NewServer(tc.gateway.routes(t))
-			defer server.Close()
-
-			prober := NewProber(server.URL, testLogger())
-			if addr, err := prober.PublicIP(context.Background()); err == nil {
-				t.Fatalf("PublicIP = %s, want an error", addr)
-			}
-		})
-	}
-
-	t.Run("unreachable gateway", func(t *testing.T) {
-		server := httptest.NewServer((&fakeGateway{whoami: "{}"}).routes(t))
-		url := server.URL
-		server.Close()
-
-		prober := NewProber(url, testLogger())
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		if _, err := prober.PublicIP(ctx); err == nil {
-			t.Fatal("PublicIP succeeded against a closed gateway")
-		}
-	})
-
-	t.Run("bad gateway url", func(t *testing.T) {
-		prober := NewProber("nonsense", testLogger())
-		if _, err := prober.PublicIP(context.Background()); err == nil {
-			t.Fatal("PublicIP accepted a malformed gateway url")
-		}
-		if _, err := prober.SelfTest(context.Background(), time.Second); err == nil {
-			t.Fatal("SelfTest accepted a malformed gateway url")
-		}
-	})
 }
 
 func TestSelfTestReachableWithPortMapping(t *testing.T) {
-	gateway := &fakeGateway{send: true, decoy: true, whoami: `{"ip":"203.0.113.9"}`}
+	gateway := &fakeGateway{send: true, decoy: true}
 	server := httptest.NewServer(gateway.routes(t))
 	defer server.Close()
 
@@ -221,11 +158,10 @@ func TestSelfTestReachableWithPortMapping(t *testing.T) {
 		// A loopback test cannot translate ports, so the external port has
 		// to stay the bound one; the address is what the router reported.
 		return &portmap.Mapping{
-			External:  netip.AddrPortFrom(netip.MustParseAddr("203.0.113.11"), internalPort),
-			Internal:  internalPort,
-			Method:    portmap.MethodPCP,
-			Lifetime:  lifetime,
-			ExpiresAt: time.Now().Add(lifetime),
+			External: netip.AddrPortFrom(netip.MustParseAddr("203.0.113.11"), internalPort),
+			Internal: internalPort,
+			Method:   portmap.MethodPCP,
+			Lifetime: lifetime,
 		}, nil
 	}
 
@@ -259,8 +195,8 @@ func TestSelfTestReachableWithPortMapping(t *testing.T) {
 	if len(failures) != 0 {
 		t.Fatalf("gateway rejected the request: %v", failures)
 	}
-	if decoded, err := base64.RawURLEncoding.DecodeString(tokens[0]); err != nil || len(decoded) != tokenBytes {
-		t.Fatalf("token %q is not %d unpadded base64url bytes", tokens[0], tokenBytes)
+	if decoded, err := base64.RawURLEncoding.DecodeString(tokens[0]); err != nil || len(decoded) != gatewaywire.ProbeTokenBytes {
+		t.Fatalf("token %q is not %d unpadded base64url bytes", tokens[0], gatewaywire.ProbeTokenBytes)
 	}
 }
 

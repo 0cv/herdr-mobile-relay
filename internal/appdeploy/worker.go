@@ -21,13 +21,16 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/atomicfile"
 	"github.com/0cv/herdr-mobile-relay/internal/childenv"
 	"github.com/0cv/herdr-mobile-relay/internal/processgroup"
+	"github.com/0cv/herdr-mobile-relay/internal/relayenv"
 	"github.com/0cv/herdr-mobile-relay/internal/release"
 	"github.com/0cv/herdr-mobile-relay/internal/setuphelper"
+	"github.com/0cv/herdr-mobile-relay/internal/textutil"
+	"github.com/0cv/herdr-mobile-relay/internal/workerjob"
 	"github.com/andybalholm/brotli"
 )
 
@@ -37,13 +40,10 @@ const (
 	// upload path can fail with a generic exit status; 4.125.0 is the
 	// current tested release and the deployment below skips that cache path.
 	WranglerVersion           = "4.125.0"
-	deploymentStartupGrace    = 30 * time.Second
 	publicVerificationTimeout = 2 * time.Minute
 	publicRequestTimeout      = 20 * time.Second
 	deploymentTimeout         = 15 * time.Minute
 )
-
-var ansiEscapePattern = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
 
 var (
 	projectPattern             = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,57}[a-z0-9])?$`)
@@ -78,7 +78,7 @@ type State struct {
 func Run(ctx context.Context, jobPath string) error {
 	ctx, cancel := context.WithTimeout(ctx, deploymentTimeout)
 	defer cancel()
-	job, err := loadJob(jobPath)
+	job, err := workerjob.Load[Job](jobPath, "app deployment")
 	if err != nil {
 		return err
 	}
@@ -89,9 +89,9 @@ func Run(ctx context.Context, jobPath string) error {
 	// thousands.
 	defer func() { _ = os.Remove(jobPath) }()
 	started := time.Now().UTC().Format(time.RFC3339)
-	statePath := filepath.Join(job.RuntimeDir, "app-deploy-state.json")
+	deployStatePath := statePath(job.RuntimeDir)
 	fail := func(deployErr error) error {
-		stateErr := writeState(statePath, State{
+		stateErr := writeState(deployStatePath, State{
 			State:          "failed",
 			TargetVersion:  job.Version,
 			TargetRevision: job.Revision,
@@ -110,7 +110,7 @@ func Run(ctx context.Context, jobPath string) error {
 	if err := os.MkdirAll(job.RuntimeDir, 0o700); err != nil {
 		return fail(err)
 	}
-	lock, err := lockFile(filepath.Join(job.RuntimeDir, "app-deploy.lock"))
+	lock, err := workerjob.Lock(filepath.Join(job.RuntimeDir, "app-deploy.lock"), errDeployLocked)
 	if err != nil {
 		if errors.Is(err, errDeployLocked) {
 			return err
@@ -135,14 +135,10 @@ func Run(ctx context.Context, jobPath string) error {
 		if deployErr != nil {
 			value.Error = safeError(deployErr)
 		}
-		_ = writeState(statePath, value)
+		_ = writeState(deployStatePath, value)
 	}
 	write("deploying", nil)
 
-	if err := verifyWebBundle(job); err != nil {
-		write("failed", err)
-		return err
-	}
 	// launchd (macOS) and systemd-run (Linux) hand the worker an
 	// inherited working directory the deploy does not own: on macOS that is the
 	// read-only filesystem root. Wrangler resolves its account config cache at
@@ -216,13 +212,7 @@ var cloudflareCredentialKeys = [...]string{
 
 func commandEnvironmentWithCloudflareCredentials(nodeDir string, environment []string) ([]string, error) {
 	result := commandEnvironment(nodeDir, environment)
-	filename := strings.TrimSpace(os.Getenv("HERDR_RELAY_ENV"))
-	if filename == "" {
-		if directory := strings.TrimSpace(os.Getenv("HERDR_PLUGIN_CONFIG_DIR")); directory != "" {
-			filename = filepath.Join(directory, "relay.env")
-		}
-	}
-	values, err := readCloudflareCredentials(filename, result)
+	values, err := relayenv.Read(cloudflareCredentialKeys[:]...)
 	if err != nil {
 		return nil, err
 	}
@@ -238,255 +228,6 @@ func commandEnvironmentWithCloudflareCredentials(nodeDir string, environment []s
 		result = replaceEnvironmentValue(result, key, value)
 	}
 	return result, nil
-}
-
-func readCloudflareCredentials(filename string, environment []string) (map[string]string, error) {
-	values := make(map[string]string, len(cloudflareCredentialKeys))
-	if filename == "" {
-		return values, nil
-	}
-	data, err := os.ReadFile(filename)
-	if err != nil {
-		return values, nil
-	}
-	assignments := make(map[string]string)
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
-		key, value, ok := strings.Cut(line, "=")
-		if !ok {
-			continue
-		}
-		key = strings.TrimSpace(key)
-		if !isShellVariableName(key) {
-			continue
-		}
-		assignments[key] = value
-	}
-	resolver := &shellVariableResolver{
-		assignments: assignments,
-		environment: environmentValues(environment),
-		states:      make(map[string]uint8),
-		values:      make(map[string]string),
-	}
-	for _, key := range cloudflareCredentialKeys {
-		value, err := resolver.resolve(key)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", key, err)
-		}
-		values[key] = value
-	}
-	return values, nil
-}
-
-type shellVariableResolver struct {
-	assignments map[string]string
-	environment map[string]string
-	states      map[string]uint8
-	values      map[string]string
-}
-
-func (r *shellVariableResolver) resolve(name string) (string, error) {
-	if value, ok := r.values[name]; ok {
-		return value, nil
-	}
-	if r.states[name] == 1 {
-		return "", fmt.Errorf("cyclic relay environment variable %q", name)
-	}
-	raw, ok := r.assignments[name]
-	if !ok {
-		value := r.environment[name]
-		r.values[name] = value
-		return value, nil
-	}
-	r.states[name] = 1
-	value, err := parseShellEnvironmentValue(raw, r.resolve)
-	if err != nil {
-		delete(r.states, name)
-		return "", err
-	}
-	r.states[name] = 2
-	r.values[name] = value
-	return value, nil
-}
-
-func environmentValues(environment []string) map[string]string {
-	values := make(map[string]string, len(environment))
-	for _, item := range environment {
-		key, value, ok := strings.Cut(item, "=")
-		if ok && isShellVariableName(key) {
-			values[key] = value
-		}
-	}
-	return values
-}
-
-func isShellVariableName(value string) bool {
-	if value == "" || !isShellVariableNameStart(value[0]) {
-		return false
-	}
-	for index := range len(value) - 1 {
-		if !isShellVariableNamePart(value[index+1]) {
-			return false
-		}
-	}
-	return true
-}
-
-func isShellVariableNameStart(value byte) bool {
-	return value == '_' || value >= 'A' && value <= 'Z' || value >= 'a' && value <= 'z'
-}
-
-func isShellVariableNamePart(value byte) bool {
-	return isShellVariableNameStart(value) || value >= '0' && value <= '9'
-}
-
-func shellVariableReference(value string, index int) (string, int, bool) {
-	if index+1 >= len(value) {
-		return "", index + 1, false
-	}
-	if value[index+1] == '{' {
-		closing := strings.IndexByte(value[index+2:], '}')
-		if closing < 0 {
-			return "", index + 1, false
-		}
-		closing += index + 2
-		name := value[index+2 : closing]
-		if !isShellVariableName(name) {
-			return "", closing + 1, false
-		}
-		return name, closing + 1, true
-	}
-	if !isShellVariableNameStart(value[index+1]) {
-		return "", index + 1, false
-	}
-	end := index + 2
-	for end < len(value) && isShellVariableNamePart(value[end]) {
-		end++
-	}
-	return value[index+1 : end], end, true
-}
-
-func parseShellEnvironmentValue(value string, resolve func(string) (string, error)) (string, error) {
-	return unquoteShellWord(strings.TrimSpace(stripShellInlineComment(value)), resolve)
-}
-
-func stripShellInlineComment(value string) string {
-	quote := byte(0)
-	escaped := false
-	escapedWhitespace := false
-	for index := range len(value) {
-		char := value[index]
-		if escaped {
-			escaped = false
-			escapedWhitespace = char == ' ' || char == '\t'
-			continue
-		}
-		if char == '\\' && quote != '\'' {
-			escaped = true
-			escapedWhitespace = false
-			continue
-		}
-		if quote != 0 {
-			if char == quote {
-				quote = 0
-			}
-			escapedWhitespace = false
-			continue
-		}
-		if char == '\'' || char == '"' {
-			quote = char
-			escapedWhitespace = false
-			continue
-		}
-		if char == '#' && index > 0 &&
-			(value[index-1] == ' ' || value[index-1] == '\t') &&
-			!escapedWhitespace {
-			return value[:index]
-		}
-		escapedWhitespace = false
-	}
-	return value
-}
-
-func unquoteShellWord(value string, resolve func(string) (string, error)) (string, error) {
-	var result strings.Builder
-	quote := byte(0)
-	escaped := false
-	for index := 0; index < len(value); {
-		char := value[index]
-		if escaped {
-			if quote == '"' && char != '$' && char != '`' && char != '"' && char != '\\' {
-				result.WriteByte('\\')
-			}
-			result.WriteByte(char)
-			escaped = false
-			index++
-			continue
-		}
-		if char == '$' && quote != '\'' {
-			name, next, ok := shellVariableReference(value, index)
-			if !ok || resolve == nil {
-				return "", errors.New("unsupported shell variable expansion in relay.env")
-			}
-			expanded, err := resolve(name)
-			if err != nil {
-				return "", err
-			}
-			result.WriteString(expanded)
-			index = next
-			continue
-		}
-		if char == '`' && quote != '\'' {
-			return "", errors.New("unsupported command substitution in relay.env")
-		}
-		if quote == 0 {
-			switch char {
-			case ' ', '\t':
-				return "", errors.New("unquoted whitespace in relay.env value")
-			case ';', '&', '|', '<', '>', '(', ')', '*', '?', '[', '~':
-				return "", fmt.Errorf("unsupported shell syntax %q in relay.env value", char)
-			}
-		}
-		if quote == '\'' {
-			if char == '\'' {
-				quote = 0
-			} else {
-				result.WriteByte(char)
-			}
-			index++
-			continue
-		}
-		if quote == '"' {
-			if char == '\\' {
-				escaped = true
-			} else if char == '"' {
-				quote = 0
-			} else {
-				result.WriteByte(char)
-			}
-			index++
-			continue
-		}
-		if char == '\\' {
-			escaped = true
-		} else if char == '\'' || char == '"' {
-			quote = char
-		} else {
-			result.WriteByte(char)
-		}
-		index++
-	}
-	if escaped {
-		return "", errors.New("unterminated shell escape in relay.env value")
-	}
-	if quote != 0 {
-		return "", errors.New("unterminated shell quote in relay.env value")
-	}
-	return result.String(), nil
 }
 
 func environmentValue(environment []string, key string) (string, bool) {
@@ -523,18 +264,6 @@ func commandEnvironment(nodeDir string, environment []string) []string {
 	}
 	result = append(result, "PATH="+nodeDir+string(os.PathListSeparator)+pathValue)
 	return result
-}
-
-func loadJob(filename string) (Job, error) {
-	data, err := os.ReadFile(filename)
-	if err != nil {
-		return Job{}, fmt.Errorf("read app deployment job: %w", err)
-	}
-	var job Job
-	if err := json.Unmarshal(data, &job); err != nil {
-		return Job{}, fmt.Errorf("parse app deployment job: %w", err)
-	}
-	return job, nil
 }
 
 func validate(job Job) error {
@@ -694,11 +423,15 @@ func verifyPublicWith(
 	client *http.Client,
 	retryDelay func(int) time.Duration,
 ) error {
+	targetDescriptor, err := verifiedTargetWebDescriptor(job)
+	if err != nil {
+		return err
+	}
 	client = publicClient(client, job.Origin)
 	nonce := time.Now().UnixNano()
 	var lastErr error
 	for attempt := 0; ; attempt++ {
-		retryable, err := checkPublicBundle(ctx, job, client, nonce, attempt)
+		retryable, err := checkPublicBundle(ctx, job, client, targetDescriptor, nonce, attempt)
 		if err == nil {
 			return nil
 		}
@@ -971,25 +704,31 @@ func checkCanonicalPublicBundle(
 	return false, fmt.Errorf("missing canonical public asset /%s returned HTTP 200", missingPath)
 }
 
+func fetchDecoded(
+	ctx context.Context,
+	client *http.Client,
+	origin, resource, cacheBust, acceptEncoding string,
+) ([]byte, bool, error) {
+	body, headers, err := fetchPublicResource(ctx, client, origin, resource, cacheBust, acceptEncoding)
+	if err != nil {
+		return nil, publicErrorRetryable(err), err
+	}
+	body, err = decodePublicRepresentation(body, headers)
+	return body, err != nil, err
+}
+
 func checkPublicBundle(
 	ctx context.Context,
 	job Job,
 	client *http.Client,
+	targetDescriptor release.WebDescriptor,
 	nonce int64,
 	attempt int,
 ) (bool, error) {
-	targetDescriptor, err := verifiedTargetWebDescriptor(job)
-	if err != nil {
-		return false, err
-	}
 	cacheBust := fmt.Sprintf("%s-%d-%d", job.Revision, nonce, attempt)
-	descriptorData, descriptorHeaders, err := fetchPublicResource(ctx, client, job.Origin, "release.json", cacheBust, "identity")
+	descriptorData, retryable, err := fetchDecoded(ctx, client, job.Origin, "release.json", cacheBust, "identity")
 	if err != nil {
-		return publicErrorRetryable(err), err
-	}
-	descriptorData, err = decodePublicRepresentation(descriptorData, descriptorHeaders)
-	if err != nil {
-		return true, err
+		return retryable, err
 	}
 	var rawDescriptor release.WebDescriptor
 	if err := json.Unmarshal(descriptorData, &rawDescriptor); err != nil {
@@ -1007,27 +746,19 @@ func checkPublicBundle(
 	files := make(map[string][]byte, len(targetDescriptor.Files))
 	for _, name := range []string{"entry", "javascript", "stylesheet"} {
 		descriptorFile := targetDescriptor.Files[name]
-		identityBody, identityHeaders, fetchErr := fetchPublicResource(
+		identityBody, retryable, err := fetchDecoded(
 			ctx, client, job.Origin, descriptorFile.Path, cacheBust+"-"+name, "identity",
 		)
-		if fetchErr != nil {
-			return publicErrorRetryable(fetchErr), fetchErr
-		}
-		identityBody, decodeErr := decodePublicRepresentation(identityBody, identityHeaders)
-		if decodeErr != nil {
-			return true, decodeErr
+		if err != nil {
+			return retryable, err
 		}
 		files[descriptorFile.Path] = identityBody
 
-		compressedBody, compressedHeaders, fetchErr := fetchPublicResource(
+		compressedBody, retryable, err := fetchDecoded(
 			ctx, client, job.Origin, descriptorFile.Path, cacheBust+"-br-"+name, "br",
 		)
-		if fetchErr != nil {
-			return publicErrorRetryable(fetchErr), fetchErr
-		}
-		compressedBody, decodeErr = decodePublicRepresentation(compressedBody, compressedHeaders)
-		if decodeErr != nil {
-			return true, decodeErr
+		if err != nil {
+			return retryable, err
 		}
 		if publicDigest(compressedBody) != descriptorFile.SHA256 {
 			return true, fmt.Errorf("public representation for %s does not match its descriptor", name)
@@ -1036,28 +767,20 @@ func checkPublicBundle(
 	if _, err := release.VerifyWebDescriptorData(descriptorData, files, job.Version); err != nil {
 		return true, errors.New("public web release descriptor verification failed")
 	}
-	versionData, versionHeaders, err := fetchPublicResource(
+	versionData, retryable, err := fetchDecoded(
 		ctx, client, job.Origin, "version.json", cacheBust+"-version", "identity",
 	)
 	if err != nil {
-		return publicErrorRetryable(err), err
-	}
-	versionData, err = decodePublicRepresentation(versionData, versionHeaders)
-	if err != nil {
-		return true, err
+		return retryable, err
 	}
 	if err := verifyPublicVersionMetadata(versionData, job, targetDescriptor); err != nil {
 		return true, fmt.Errorf("public web bundle identity: %w", err)
 	}
-	compressedVersionData, compressedVersionHeaders, err := fetchPublicResource(
+	compressedVersionData, retryable, err := fetchDecoded(
 		ctx, client, job.Origin, "version.json", cacheBust+"-version-br", "br",
 	)
 	if err != nil {
-		return publicErrorRetryable(err), err
-	}
-	compressedVersionData, err = decodePublicRepresentation(compressedVersionData, compressedVersionHeaders)
-	if err != nil {
-		return true, err
+		return retryable, err
 	}
 	if err := verifyPublicVersionMetadata(compressedVersionData, job, targetDescriptor); err != nil {
 		return true, fmt.Errorf("public compressed web bundle identity: %w", err)
@@ -1104,57 +827,13 @@ func verifyVersion(data []byte, version, revision string) error {
 	return nil
 }
 
-func lockFile(filename string) (*os.File, error) {
-	file, err := os.OpenFile(filename, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return nil, err
-	}
-	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		file.Close()
-		if errors.Is(err, syscall.EWOULDBLOCK) {
-			return nil, errDeployLocked
-		}
-		return nil, fmt.Errorf("lock app deployment: %w", err)
-	}
-	return file, nil
-}
-
 func writeState(filename string, state State) error {
-	data, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-	directory := filepath.Dir(filename)
-	if err := os.MkdirAll(directory, 0o700); err != nil {
-		return err
-	}
-	temp, err := os.CreateTemp(directory, ".app-deploy-state.")
-	if err != nil {
-		return err
-	}
-	tempName := temp.Name()
-	defer os.Remove(tempName)
-	if err := temp.Chmod(0o600); err != nil {
-		temp.Close()
-		return err
-	}
-	if _, err := temp.Write(data); err != nil {
-		temp.Close()
-		return err
-	}
-	if err := temp.Sync(); err != nil {
-		temp.Close()
-		return err
-	}
-	if err := temp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tempName, filename)
+	_, err := atomicfile.WriteJSON(filename, state, 0o600)
+	return err
 }
 
 func compact(value string, limit int) string {
-	value = ansiEscapePattern.ReplaceAllString(value, "")
+	value = textutil.StripANSI(value)
 	value = strings.Join(strings.Fields(value), " ")
 	if len(value) <= limit {
 		return value

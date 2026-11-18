@@ -1,3 +1,5 @@
+import { pathBase } from './paths';
+
 export function validAgentName(value: unknown): boolean {
   return /^[a-z][a-z0-9_-]{0,31}$/.test(String(value || ''));
 }
@@ -10,8 +12,7 @@ export function launchNamePart(value: unknown, fallback: string): string {
 }
 
 export function suggestedLaunchName(cwd: string, profileId: string): string {
-  const parts = String(cwd || '').replace(/[\\/]+$/, '').split(/[\\/]/).filter(Boolean);
-  const directory = launchNamePart(parts.pop(), 'project');
+  const directory = launchNamePart(pathBase(String(cwd || '')), 'project');
   const agent = launchNamePart(profileId, 'agent');
   const suffix = `-${agent.slice(0, 12)}`;
   return `${directory.slice(0, Math.max(1, 32 - suffix.length))}${suffix}`;

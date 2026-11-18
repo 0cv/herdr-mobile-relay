@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	relayprotocol "github.com/0cv/herdr-mobile-relay/internal/protocol"
 	"io"
 	"io/fs"
 	"os"
@@ -15,6 +14,9 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+
+	"github.com/0cv/herdr-mobile-relay/internal/atomicfile"
+	relayprotocol "github.com/0cv/herdr-mobile-relay/internal/protocol"
 )
 
 const (
@@ -244,34 +246,8 @@ func Build(root, version, revision, target string) (Manifest, error) {
 }
 
 func writeManifest(root string, manifest Manifest) error {
-	data, err := json.MarshalIndent(manifest, "", "  ")
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-	destination := filepath.Join(root, ManifestName)
-	temp, err := os.CreateTemp(root, "."+ManifestName+".")
-	if err != nil {
-		return err
-	}
-	tempName := temp.Name()
-	defer os.Remove(tempName)
-	if err := temp.Chmod(0o644); err != nil {
-		temp.Close()
-		return err
-	}
-	if _, err := temp.Write(data); err != nil {
-		temp.Close()
-		return err
-	}
-	if err := temp.Sync(); err != nil {
-		temp.Close()
-		return err
-	}
-	if err := temp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tempName, destination)
+	_, err := atomicfile.WriteJSON(filepath.Join(root, ManifestName), manifest, 0o644)
+	return err
 }
 
 func cleanRelative(name string) (string, error) {

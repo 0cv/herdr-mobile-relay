@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -39,7 +40,6 @@ const (
 
 type agyReader struct {
 	home     string
-	binary   string
 	executor sqliteexec.Executor
 }
 
@@ -59,20 +59,7 @@ type agyPageMeta struct {
 }
 
 func newAgyReader(home string) *agyReader {
-	return &agyReader{home: home, binary: "sqlite3", executor: sqliteexec.MustFromEnv()}
-}
-
-func (r *agyReader) queryExec() sqliteexec.Executor {
-	return resolveQueryExecutor(r.executor, r.binary)
-}
-
-func isAgyAgent(agent string) bool {
-	switch normalizedAgent(agent) {
-	case "agy", "antigravity", "antigravitycli":
-		return true
-	default:
-		return false
-	}
+	return &agyReader{home: home, executor: sqliteexec.New()}
 }
 
 func (r *agyReader) locate(sessionID string) Location {
@@ -83,9 +70,6 @@ func (r *agyReader) locate(sessionID string) Location {
 func (r *agyReader) locateContext(sessionID string) (Location, string) {
 	if !canonicalSessionID.MatchString(sessionID) {
 		return Location{}, "invalid_session"
-	}
-	if exec := r.queryExec(); exec == nil || !exec.Ready() {
-		return Location{}, "source_unavailable"
 	}
 	for _, root := range agentroots.Agy(r.home) {
 		if path := containedRegularFile(filepath.Join(root, sessionID+".db"), root); path != "" {
@@ -109,21 +93,16 @@ func (r *agyReader) databasePaths(sessionID string) []string {
 	return paths
 }
 
-func (r *agyReader) readFromContext(ctx context.Context, database, before string, limit int) ([]Entry, bool, bool, agyPageMeta, string) {
+func (r *agyReader) readFromContext(ctx context.Context, database, before string, limit int) nativeReadResult[agyPageMeta] {
 	var cursor int64 = -1
 	if before != "" {
 		value, err := strconv.ParseInt(before, 10, 64)
 		if err != nil || value < 0 {
-			return nil, false, false, agyPageMeta{}, "invalid_cursor"
+			return nativeReadResult[agyPageMeta]{Code: "invalid_cursor"}
 		}
 		cursor = value
 	}
-	if limit < 1 {
-		limit = defaultPageSize
-	}
-	if limit > maxPageSize {
-		limit = maxPageSize
-	}
+	limit = clampPageLimit(limit)
 	cursorFilter := ""
 	if cursor >= 0 {
 		cursorFilter = fmt.Sprintf(" AND idx < %d", cursor)
@@ -136,7 +115,7 @@ func (r *agyReader) readFromContext(ctx context.Context, database, before string
 	)
 	rows, code := r.queryRows(ctx, database, query)
 	if code != "" {
-		return nil, false, false, agyPageMeta{}, code
+		return nativeReadResult[agyPageMeta]{Code: code}
 	}
 	hasMore := len(rows) > limit
 	if hasMore {
@@ -147,22 +126,20 @@ func (r *agyReader) readFromContext(ctx context.Context, database, before string
 		meta.SchemaVersion = rows[0].SchemaVersion
 		meta.OldestIdx = rows[len(rows)-1].Idx
 	}
-	for left, right := 0, len(rows)-1; left < right; left, right = left+1, right-1 {
-		rows[left], rows[right] = rows[right], rows[left]
-	}
+	slices.Reverse(rows)
 	entries, corrupt := parseAgyRows(rows)
 	if len(rows) > 0 && len(entries) > 0 {
 		if toolCorrupt := r.attachToolResults(ctx, database, rows[0].Idx, rows[len(rows)-1].Idx, entries); toolCorrupt {
 			corrupt = true
 		}
 	}
-	return entries, hasMore, corrupt, meta, ""
+	return nativeReadResult[agyPageMeta]{Entries: entries, HasMore: hasMore, Corrupt: corrupt, Metadata: meta}
 }
 
 func (r *agyReader) queryRows(ctx context.Context, database, query string) ([]agyRow, string) {
 	queryCtx, cancel := context.WithTimeout(ctx, agyQueryTimeout)
 	defer cancel()
-	raw, code := runSQLiteJSON(queryCtx, r.queryExec(), database, query, maxAgyOutput)
+	raw, code := runSQLiteJSON(queryCtx, r.executor, database, query, maxAgyOutput)
 	if code != "" {
 		return nil, code
 	}
@@ -331,25 +308,19 @@ func agyTimestamp(step []pbField) string {
 	return time.Unix(int64(seconds), int64(nanos)).UTC().Format(time.RFC3339Nano)
 }
 
-func (r *Reader) readAgyFor(sessionID, before string, limit int) (Page, error) {
+func (r *Reader) readAgyFor(sessionID string, limit int) ([]Entry, error) {
 	sessionID = strings.TrimSpace(sessionID)
 	if !canonicalSessionID.MatchString(sessionID) {
-		return unavailableCode("invalid_session", "This agent has not reported a conversation session yet."), nil
+		return nil, ErrUnavailable
 	}
 	location, code := r.agy.locateContext(sessionID)
 	if code != "" {
-		return unavailableCode(code, "Antigravity conversation history is unavailable."), nil
+		return nil, ErrUnavailable
 	}
-	entries, hasMore, corrupt, _, code := r.agy.readFromContext(context.Background(), location.Path, before, limit)
-	if code != "" {
-		return unavailableCode(code, "Antigravity conversation history is unavailable."), nil
+	result := r.agy.readFromContext(context.Background(), location.Path, "", limit)
+	if result.Code != "" {
+		return nil, ErrUnavailable
 	}
-	normalizeEntriesForResponse(entries)
-	return Page{
-		Available:     true,
-		Entries:       append([]Entry(nil), entries...),
-		HasMore:       hasMore,
-		Total:         UnknownTotal,
-		SourceCorrupt: corrupt,
-	}, nil
+	normalizeEntriesForResponse(result.Entries)
+	return append([]Entry(nil), result.Entries...), nil
 }

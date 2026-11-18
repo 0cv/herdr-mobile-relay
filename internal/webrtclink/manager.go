@@ -8,12 +8,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"log/slog"
+	"maps"
 	"net"
 	"net/netip"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,6 +21,7 @@ import (
 	"github.com/pion/ice/v4"
 	"github.com/pion/webrtc/v4"
 
+	"github.com/0cv/herdr-mobile-relay/internal/framing"
 	"github.com/0cv/herdr-mobile-relay/internal/transport"
 )
 
@@ -36,10 +36,6 @@ const (
 	// maxRemoteCandidates bounds the trickled candidates accepted per session;
 	// further candidates are dropped, not errors.
 	maxRemoteCandidates = 64
-
-	// stallSweepInterval is how often partially received frames are checked
-	// against framing.StallTimeout.
-	stallSweepInterval = 5 * time.Second
 
 	// stunDiscoveryTimeout bounds one address-discovery round trip against the
 	// gateway's STUN listener.
@@ -65,16 +61,7 @@ var (
 	// errNoSTUNServer reports address discovery with nothing to discover
 	// against: the gateway advertised no STUN port, or none has arrived yet.
 	errNoSTUNServer = errors.New("webrtclink: no stun server configured")
-	// errNoMappedAddress reports that address discovery ran and no address
-	// family answered, which is what a silent or unreachable STUN listener
-	// looks like.
-	errNoMappedAddress = errors.New("webrtclink: stun address discovery produced no mapping")
 )
-
-// stunFamilies are the networks address discovery probes independently. A
-// dual-stack relay has a mapping per family, and the IPv6 one is the easiest
-// direct path that exists: there is no NAT in front of it to traverse.
-var stunFamilies = [...]string{"udp4", "udp6"}
 
 // SessionKey identifies one negotiation: the relayed client that asked for the
 // upgrade and the request id it used for signaling.
@@ -100,13 +87,6 @@ type Options struct {
 	UDPPort int
 	// MaxSessions bounds concurrent sessions; 0 selects defaultMaxSessions.
 	MaxSessions int
-	// NAT1To1IPs are externally reachable addresses (from a port mapping or
-	// operator configuration) advertised as server-reflexive candidates.
-	NAT1To1IPs []string
-	// STUNServers are "stun:host:port" endpoints used to discover the mapped
-	// address of the shared ICE socket. Only the first is used; the relay has
-	// exactly one gateway to ask.
-	STUNServers []string
 	// OnLocalCandidate delivers a locally gathered candidate to the signaling
 	// layer. Nil disables trickle from the relay side.
 	OnLocalCandidate func(SessionKey, Candidate)
@@ -138,15 +118,11 @@ type Manager struct {
 	direct  atomic.Int64
 	relayed atomic.Int64
 
-	mu     sync.Mutex
-	closed bool
-	// nat1To1 holds addresses supplied by the port mapper or the operator.
-	nat1To1 []string
-	// stunServers holds the address-discovery endpoints; see Options.
-	stunServers []string
-	// discovered holds the mappings STUN last reflected for the shared socket,
-	// at most one per address family.
-	discovered []netip.AddrPort
+	mu         sync.Mutex
+	closed     bool
+	nat1To1    string
+	stunServer string
+	discovered netip.AddrPort
 	api        *webrtc.API
 	sessions   map[SessionKey]*session
 }
@@ -179,8 +155,6 @@ func New(opts Options) (*Manager, error) {
 		maxSessions: maxSessions,
 		udp:         udp,
 		mux:         mux,
-		nat1To1:     append([]string(nil), opts.NAT1To1IPs...),
-		stunServers: append([]string(nil), opts.STUNServers...),
 		sessions:    make(map[SessionKey]*session),
 	}
 	m.api = m.newAPILocked()
@@ -212,22 +186,15 @@ func (m *Manager) newAPILocked() *webrtc.API {
 	return webrtc.NewAPI(webrtc.WithSettingEngine(settings))
 }
 
-// natIPsLocked composes the addresses advertised as 1:1 mapped: whatever the
-// port mapper or the operator supplied, plus every discovered address whose
-// port the NAT preserved. A discovery on a different port cannot be expressed
-// as a 1:1 mapping and is trickled as a synthesised candidate instead. It must
-// be called with mu held.
 func (m *Manager) natIPsLocked() []string {
-	ips := append([]string(nil), m.nat1To1...)
-	for _, mapped := range m.discovered {
-		if !mapped.IsValid() || int(mapped.Port()) != m.LocalPort() {
-			continue
+	var ips []string
+	if m.nat1To1 != "" {
+		ips = append(ips, m.nat1To1)
+	}
+	if mapped := m.discovered; mapped.IsValid() && int(mapped.Port()) == m.LocalPort() {
+		if ip := mapped.Addr().String(); ip != m.nat1To1 {
+			ips = append(ips, ip)
 		}
-		ip := mapped.Addr().String()
-		if slices.Contains(ips, ip) {
-			continue
-		}
-		ips = append(ips, ip)
 	}
 	return ips
 }
@@ -241,185 +208,24 @@ func (m *Manager) LocalPort() int {
 	return addr.Port
 }
 
-// SetNAT1To1IPs replaces the externally reachable addresses advertised to new
-// sessions. Existing sessions keep the addresses they negotiated with.
-func (m *Manager) SetNAT1To1IPs(ips []string) {
+func (m *Manager) SetNAT1To1IP(ip string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.closed {
 		return
 	}
-	m.nat1To1 = append([]string(nil), ips...)
+	m.nat1To1 = ip
 	m.api = m.newAPILocked()
-	m.logger.Info("webrtc mapped addresses updated", "count", len(m.nat1To1))
+	m.logger.Info("webrtc port mapping updated")
 }
 
-// SetSTUNServers replaces the address-discovery endpoints. It mirrors
-// SetNAT1To1IPs: new values apply to the next discovery, and a closed Manager
-// ignores the update.
-func (m *Manager) SetSTUNServers(servers []string) {
+func (m *Manager) SetSTUNServer(server string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.closed {
 		return
 	}
-	m.stunServers = append([]string(nil), servers...)
-}
-
-// DiscoverMappedAddress asks the first configured STUN server what address it
-// sees, using the shared ICE socket. The answer therefore describes the exact
-// socket every session already gathers on, which is what makes it publishable
-// as a reflexive candidate.
-func (m *Manager) DiscoverMappedAddresses(ctx context.Context) ([]netip.AddrPort, error) {
-	m.mu.Lock()
-	closed := m.closed
-	var server string
-	if len(m.stunServers) > 0 {
-		server = m.stunServers[0]
-	}
-	m.mu.Unlock()
-
-	if closed {
-		return nil, errManagerClosed
-	}
-	if server == "" {
-		return nil, errNoSTUNServer
-	}
-	hostPort, err := stunHostPort(server)
-	if err != nil {
-		return nil, err
-	}
-
-	// Deliberately one family. IPv6 needs no reflexive discovery at all: there
-	// is no NAT to reflect through, so a global IPv6 address is already a
-	// reachable host candidate and pion gathers it directly (the socket is
-	// dual-stack and UDP6 is in the network types). Asking for it anyway costs
-	// real time — pion's universal mux cannot answer an IPv6 XOR-mapped request
-	// through the shared socket, verified against v4.4.2, so every attempt would
-	// burn the full discovery timeout on a keepalive that runs every 10 s.
-	mapped, err := m.discoverOn(ctx, "udp", hostPort)
-	if err != nil {
-		return nil, fmt.Errorf("webrtclink: stun address discovery: %w", err)
-	}
-	return []netip.AddrPort{mapped}, nil
-}
-
-// discoverOn asks the STUN server for the mapping of the shared socket in one
-// address family.
-func (m *Manager) discoverOn(ctx context.Context, network, hostPort string) (netip.AddrPort, error) {
-	serverAddr, err := net.ResolveUDPAddr(network, hostPort)
-	if err != nil {
-		return netip.AddrPort{}, fmt.Errorf("resolve %s stun server: %w", network, err)
-	}
-	ctx, cancel := context.WithTimeout(ctx, stunDiscoveryTimeout)
-	defer cancel()
-	reflected, err := m.mux.GetXORMappedAddrContext(ctx, serverAddr, stunDiscoveryTimeout)
-	if err != nil {
-		return netip.AddrPort{}, fmt.Errorf("%s: %w", network, err)
-	}
-	addr, ok := netip.AddrFromSlice(reflected.IP)
-	if !ok {
-		return netip.AddrPort{}, fmt.Errorf("%s: stun server returned an unusable address", network)
-	}
-	return netip.AddrPortFrom(addr.Unmap(), uint16(reflected.Port)), nil
-}
-
-// stunHostPort turns a "stun:host:port" endpoint into a dialable host:port. A
-// bare host:port is accepted too, so an operator-supplied value works either
-// way.
-func stunHostPort(server string) (string, error) {
-	hostPort := strings.TrimPrefix(server, "stun:")
-	host, port, err := net.SplitHostPort(hostPort)
-	if err != nil {
-		return "", fmt.Errorf("webrtclink: invalid stun server %q", server)
-	}
-	if host == "" || port == "" {
-		return "", fmt.Errorf("webrtclink: invalid stun server %q", server)
-	}
-	return net.JoinHostPort(host, port), nil
-}
-
-// PublishMappedAddresses advertises the discovered mappings to ICE. Rebuilding
-// the API makes every mapping available to future sessions. Existing sessions
-// were created from the previous API, so each mapping is also trickled to them;
-// this matters even when the NAT preserved the port, particularly when initial
-// discovery races the first phone offer or the relay changes networks.
-func (m *Manager) PublishMappedAddresses(mapped []netip.AddrPort) {
-	usable := make([]netip.AddrPort, 0, len(mapped))
-	for _, addr := range mapped {
-		if !addr.IsValid() || addr.Addr().IsUnspecified() {
-			continue
-		}
-		usable = append(usable, netip.AddrPortFrom(addr.Addr().Unmap(), addr.Port()))
-	}
-	if len(usable) == 0 {
-		return
-	}
-
-	m.mu.Lock()
-	if m.closed {
-		m.mu.Unlock()
-		return
-	}
-	m.discovered = usable
-	m.api = m.newAPILocked()
-	// Sessions already reserved captured the previous API. Trickle every
-	// mapping to them; session-level deduplication keeps repeated discovery from
-	// emitting the same candidate twice.
-	live := make([]*session, 0, len(m.sessions))
-	for _, s := range m.sessions {
-		live = append(live, s)
-	}
-	m.mu.Unlock()
-
-	for _, s := range live {
-		for _, addr := range usable {
-			s.publishSrflx(addr)
-		}
-	}
-	m.logger.Info("webrtc mapped addresses discovered",
-		"families", len(usable), "sessions_notified", len(live))
-}
-
-// srflxCandidate renders one synthesised server-reflexive candidate for the
-// discovered mapping. Synthesising it is legitimate because the mapping
-// belongs to the very socket ICE listens on: the phone probes this address,
-// the connectivity check arrives on our mux socket, and pion pairs the source
-// as a peer-reflexive candidate exactly as it would for a gathered one.
-func (m *Manager) srflxCandidate(mapped netip.AddrPort) string {
-	relatedIP, relatedPort := m.relatedAddress(mapped.Addr())
-	return fmt.Sprintf("candidate:%s %d udp %d %s %d typ srflx raddr %s rport %d",
-		srflxFoundation(mapped.Addr()), srflxComponent, srflxPriority,
-		mapped.Addr().String(), mapped.Port(), relatedIP, relatedPort)
-}
-
-// relatedAddress reports the base of the synthesised candidate. The shared
-// socket is normally bound to the wildcard address, and raddr must stay in the
-// mapped address' family for the line to parse, so an unusable base degrades
-// to the unspecified address rather than to a mismatched one.
-func (m *Manager) relatedAddress(mapped netip.Addr) (string, int) {
-	unspecified := "0.0.0.0"
-	if !mapped.Is4() {
-		unspecified = "::"
-	}
-	addr, ok := m.udp.LocalAddr().(*net.UDPAddr)
-	if !ok {
-		return unspecified, 0
-	}
-	local, valid := netip.AddrFromSlice(addr.IP)
-	if !valid || local.Unmap().Is4() != mapped.Is4() || local.IsUnspecified() {
-		return unspecified, addr.Port
-	}
-	return local.Unmap().String(), addr.Port
-}
-
-// srflxFoundation derives a foundation that is stable per discovered address.
-// RFC 8445 only requires candidates sharing a type, base and server to share a
-// foundation, and the relay has exactly one of each.
-func srflxFoundation(addr netip.Addr) string {
-	sum := fnv.New32a()
-	_, _ = sum.Write([]byte(addr.String()))
-	return strconv.FormatUint(uint64(sum.Sum32()), 10)
+	m.stunServer = server
 }
 
 // Candidate types are the only ICE detail worth reporting: they answer "why is
@@ -455,10 +261,7 @@ type SessionReport struct {
 // SessionReports snapshots every live session for status reporting.
 func (m *Manager) SessionReports() []SessionReport {
 	m.mu.Lock()
-	live := make([]*session, 0, len(m.sessions))
-	for _, s := range m.sessions {
-		live = append(live, s)
-	}
+	live := slices.Collect(maps.Values(m.sessions))
 	m.mu.Unlock()
 
 	reports := make([]SessionReport, 0, len(live))
@@ -504,7 +307,7 @@ func (m *Manager) HandleOffer(ctx context.Context, key SessionKey, offerSDP stri
 	}
 	s := m.newSessionLocked(key)
 	api := m.api
-	discovered := append([]netip.AddrPort(nil), m.discovered...)
+	discovered := m.discovered
 	live := len(m.sessions)
 	m.mu.Unlock()
 
@@ -513,12 +316,8 @@ func (m *Manager) HandleOffer(ctx context.Context, key SessionKey, offerSDP stri
 		s.close("negotiation failed")
 		return "", err
 	}
-	// A discovery whose port the NAT changed is not in the API's NAT1To1 set,
-	// so a session starting after it has to be told about each one separately.
-	for _, mapped := range discovered {
-		if mapped.IsValid() && int(mapped.Port()) != m.LocalPort() {
-			s.publishSrflx(mapped)
-		}
+	if discovered.IsValid() && int(discovered.Port()) != m.LocalPort() {
+		s.publishSrflx(discovered)
 	}
 	m.logger.Info("webrtc session negotiated", "sessions", live)
 	return answer, nil
@@ -548,10 +347,7 @@ func (m *Manager) Close() error {
 		return nil
 	}
 	m.closed = true
-	live := make([]*session, 0, len(m.sessions))
-	for _, s := range m.sessions {
-		live = append(live, s)
-	}
+	live := slices.Collect(maps.Values(m.sessions))
 	m.mu.Unlock()
 
 	for _, s := range live {
@@ -577,7 +373,13 @@ func (m *Manager) lookup(key SessionKey) *session {
 func (m *Manager) newSessionLocked(key SessionKey) *session {
 	// A DataChannel-only answer carries exactly one media section, mid "0";
 	// the first real local candidate confirms it.
-	s := &session{key: key, manager: m, sdpMid: "0"}
+	s := &session{
+		key:         key,
+		manager:     m,
+		sdpMid:      "0",
+		localTypes:  make(map[string]int, 4),
+		remoteTypes: make(map[string]int, 4),
+	}
 	s.ctx, s.cancel = context.WithCancel(m.baseCtx)
 	m.sessions[key] = s
 	return s
@@ -619,7 +421,7 @@ func (m *Manager) Outcomes() Outcomes {
 
 // goServe hands an open connection to the hub on its own goroutine, tracked so
 // Close waits for it. It reports false once the Manager is closing.
-func (m *Manager) goServe(s *session, conn *dataChannelConn) bool {
+func (m *Manager) goServe(s *session, conn *transport.ChunkConn) bool {
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
@@ -639,7 +441,7 @@ func (m *Manager) goServe(s *session, conn *dataChannelConn) bool {
 // sweep abandons sessions whose inbound frame assembly stalled.
 func (m *Manager) sweep() {
 	defer m.wg.Done()
-	ticker := time.NewTicker(stallSweepInterval)
+	ticker := time.NewTicker(framing.StallSweepInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -655,13 +457,10 @@ func (m *Manager) sweep() {
 // progress before now.
 func (m *Manager) sweepStalled(now time.Time) {
 	m.mu.Lock()
-	live := make([]*session, 0, len(m.sessions))
-	for _, s := range m.sessions {
-		live = append(live, s)
-	}
+	live := slices.Collect(maps.Values(m.sessions))
 	m.mu.Unlock()
 	for _, s := range live {
-		if conn := s.connection(); conn != nil && conn.stalled(now) {
+		if conn := s.connection(); conn != nil && conn.Stalled(now) {
 			s.close("inbound frame assembly stalled")
 		}
 	}
@@ -680,7 +479,7 @@ type session struct {
 
 	mu         sync.Mutex
 	pc         *webrtc.PeerConnection
-	conn       *dataChannelConn
+	conn       *transport.ChunkConn
 	candidates int
 	pending    []Candidate
 	closed     bool
@@ -688,9 +487,7 @@ type session struct {
 	// local candidates, so a synthesised one lands on the same media section.
 	sdpMid        string
 	sdpMLineIndex uint16
-	// srflxSent are the discovered mappings already trickled to this session,
-	// one per address family; a repeated discovery must not duplicate them.
-	srflxSent []netip.AddrPort
+	srflxSent     netip.AddrPort
 	// localTypes, remoteTypes and the selected pair answer why a session is or
 	// is not direct. Counts only: an address here would leak into /healthz.
 	localTypes     map[string]int
@@ -757,26 +554,16 @@ func (s *session) handleSelectedPair(pair *webrtc.ICECandidatePair) {
 func (s *session) report() SessionReport {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := SessionReport{
-		LocalTypes:     make(map[string]int, len(s.localTypes)),
-		RemoteTypes:    make(map[string]int, len(s.remoteTypes)),
+	return SessionReport{
+		LocalTypes:     maps.Clone(s.localTypes),
+		RemoteTypes:    maps.Clone(s.remoteTypes),
 		SelectedLocal:  s.selectedLocal,
 		SelectedRemote: s.selectedRemote,
 	}
-	for name, count := range s.localTypes {
-		out.LocalTypes[name] = count
-	}
-	for name, count := range s.remoteTypes {
-		out.RemoteTypes[name] = count
-	}
-	return out
 }
 
 // countTypeLocked tallies one candidate type. The caller must hold s.mu.
 func countTypeLocked(counts map[string]int, line string) map[string]int {
-	if counts == nil {
-		counts = make(map[string]int, 4)
-	}
 	counts[candidateType(line)]++
 	return counts
 }
@@ -863,7 +650,7 @@ func (s *session) flushPendingCandidates() {
 	}
 }
 
-func (s *session) connection() *dataChannelConn {
+func (s *session) connection() *transport.ChunkConn {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.conn
@@ -888,20 +675,16 @@ func (s *session) handleLocalCandidate(candidate *webrtc.ICECandidate) {
 	s.manager.onLocal(s.key, local)
 }
 
-// publishSrflx trickles the synthesised reflexive candidate for a discovered
-// mapping whose port the NAT did not preserve. It is emitted at most once per
-// address: the phone only needs the address to probe it, and the resulting
-// connectivity check lands on the shared mux socket like any other.
 func (s *session) publishSrflx(mapped netip.AddrPort) {
 	if !mapped.IsValid() || s.manager.onLocal == nil {
 		return
 	}
 	s.mu.Lock()
-	if s.closed || slices.Contains(s.srflxSent, mapped) {
+	if s.closed || s.srflxSent == mapped {
 		s.mu.Unlock()
 		return
 	}
-	s.srflxSent = append(s.srflxSent, mapped)
+	s.srflxSent = mapped
 	local := Candidate{
 		Candidate:     s.manager.srflxCandidate(mapped),
 		SDPMid:        s.sdpMid,
@@ -930,7 +713,8 @@ func (s *session) handleDataChannel(dc *webrtc.DataChannel) {
 		return
 	}
 
-	conn := newDataChannelConn(dc, func(reason string) { s.close(reason) })
+	pacer := newDataChannelConn(dc, func(reason string) { s.close(reason) })
+	conn := pacer.conn
 
 	s.mu.Lock()
 	if s.closed || s.conn != nil {
@@ -942,8 +726,8 @@ func (s *session) handleDataChannel(dc *webrtc.DataChannel) {
 	s.mu.Unlock()
 
 	dc.SetBufferedAmountLowThreshold(resumeBufferedAmount)
-	dc.OnBufferedAmountLow(conn.signalLowWater)
-	dc.OnMessage(conn.handleMessage)
+	dc.OnBufferedAmountLow(pacer.signalLowWater)
+	dc.OnMessage(pacer.handleMessage)
 	dc.OnClose(func() { go s.close("datachannel closed") })
 	dc.OnError(func(error) { go s.close("datachannel failed") })
 	dc.OnOpen(func() {
@@ -973,7 +757,7 @@ func (s *session) close(reason string) {
 		s.manager.countOutcome(nominated)
 
 		if conn != nil {
-			conn.shutdown()
+			conn.Shutdown()
 		}
 		if pc != nil {
 			if err := pc.Close(); err != nil {

@@ -74,7 +74,8 @@ per-device credentials. The phone updater intentionally refuses this transport
 boundary because neither an app-first nor a relay-first rollout can keep the
 old phone connected.
 
-Upgrade each relay manually, exactly as for a fresh install:
+Installs older than 0.20.0 must be uninstalled before installing this version.
+Use the old installation to uninstall each relay, then install it again:
 
 ```bash
 herdr plugin install 0cv/herdr-mobile-relay

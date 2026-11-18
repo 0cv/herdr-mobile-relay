@@ -9,15 +9,7 @@ fi
 # shellcheck source=common.sh
 . "$SCRIPT_DIR/common.sh"
 
-if [ -z "${HERDR_RELAY_ENV:-}" ]; then
-    SERVICE_ENV="$(installed_service_env_file)"
-    if [ -n "$SERVICE_ENV" ]; then
-        export HERDR_RELAY_ENV="$SERVICE_ENV"
-        echo "Reusing the installed relay configuration:"
-        echo "  $SERVICE_ENV"
-        echo ""
-    fi
-fi
+adopt_installed_service_env announce
 
 # This action is itself the explicit Cloudflare choice. It can be reached
 # directly from the setup menu as well as through the transport chooser, so the

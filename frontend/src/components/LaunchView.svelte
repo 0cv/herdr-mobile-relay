@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte';
+  import { createDirectoryLoader } from '$lib/directory-loader';
   import DirectoryPicker from '$components/DirectoryPicker.svelte';
   import Button from '$components/ui/Button.svelte';
   import Card from '$components/ui/Card.svelte';
@@ -39,9 +40,8 @@
   // when it becomes ready; without this the first-connected relay wins the
   // race and the link's workspace and directory are silently dropped.
   let requestedRelayPending = untrack(() => Boolean(requestedRelayId));
-  let directoryLoadGeneration = 0;
   let directoryRelayId = $state('');
-  let directoryBrowser: HTMLDivElement;
+  let directoryBrowser = $state<HTMLDivElement>();
 
   const connectedRelays = $derived($relays.filter((relay) => {
     const connection = $connections.get(relay.id);
@@ -116,33 +116,27 @@
         directoryRelayId = relayId;
         name = suggestedLaunchName(initialPath, profileId);
       }
-      void loadDirectory(initialPath);
+      void directoryLoader.load(initialPath);
     }
   });
 
-  async function loadDirectory(path: string) {
-    const loadRelayId = relayId;
-    const loadConnection = connection;
-    const generation = ++directoryLoadGeneration;
-    if (!loadRelayId || !loadConnection?.capabilities.includes('directory_browser')) return;
-    try {
-      const listing = await relayStore.listDirectories(loadRelayId, path);
-      if (generation !== directoryLoadGeneration || relayId !== loadRelayId) return;
+  const directoryLoader = createDirectoryLoader(
+    () => ({ relayId, connection }),
+    (listing, loadRelayId) => {
       directoryOpen = false;
       cwd = listing.current.path;
       directoryRelayId = loadRelayId;
       name = suggestedLaunchName(cwd, profileId);
-    } catch {
-      // The store exposes the relay error next to the directory browser.
-    }
-  }
+    },
+    () => {},
+  );
 
   function updateName() {
     name = suggestedLaunchName(cwd, profileId);
   }
 
   function closeDirectoryForOtherField(event: FocusEvent) {
-    if (event.target instanceof Node && !directoryBrowser.contains(event.target)) directoryOpen = false;
+    if (event.target instanceof Node && !directoryBrowser?.contains(event.target)) directoryOpen = false;
   }
 
   function abandonLaunch() {
@@ -166,7 +160,7 @@
   });
 
   onDestroy(() => {
-    ++directoryLoadGeneration;
+    directoryLoader.cancel();
     abandonLaunch();
   });
 
@@ -245,17 +239,17 @@
       {/if}
 
       <span id="launch-cwd-label" class="field-label">Working Directory</span>
-      <div bind:this={directoryBrowser} class:open={directoryOpen} class="directory-browser" aria-labelledby="launch-cwd-label">
-        <DirectoryPicker
-          {connection}
-          {cwd}
-          listId="launch-directory-list"
-          bind:open={directoryOpen}
-          onselect={loadDirectory}
-          notice={!connection?.capabilities.includes('directory_browser') ? 'Update and restart this computer’s relay to browse directories.' : ''}
-          emptyNotice="This folder has no subdirectories. It remains selected."
-        />
-      </div>
+      <DirectoryPicker
+        labelId="launch-cwd-label"
+        bind:element={directoryBrowser}
+        {connection}
+        {cwd}
+        listId="launch-directory-list"
+        bind:open={directoryOpen}
+        onselect={directoryLoader.load}
+        notice={!connection?.capabilities.includes('directory_browser') ? 'Update and restart this computer’s relay to browse directories.' : ''}
+        emptyNotice="This folder has no subdirectories. It remains selected."
+      />
       {#if atHome}
         <p id="launch-cwd-hint" class="hint" role="status">Agents cannot start in the home folder itself. Tap the folder above to pick a project folder.</p>
       {:else}

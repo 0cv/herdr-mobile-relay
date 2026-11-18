@@ -54,11 +54,9 @@ if (cmd === 'dumpsys activity activities') {
 await Bun.write(file, JSON.stringify(state));\n`);
   await chmod(adb, 0o700);
   const savedAdb = process.env.ADB;
-  const realNow = Date.now;
   let offset = 0;
-  Date.now = () => realNow() + offset;
   process.env.ADB = adb;
-  const budget = new PhaseBudget('android-recorded-replay', { timeoutMs: options.budgetMs || 60_000, recoveryLimit: 0 });
+  const budget = new PhaseBudget('android-recorded-replay', { timeoutMs: options.budgetMs || 60_000, recoveryLimit: 0, now: () => Date.now() + offset });
   const requests: Array<{ path: string; body: any; at: number }> = [];
   const elements = new Map<string, any>();
   const chromeControl = (text: string) => text === 'Add' ? options.chromeXML ?? hypotheticalChromeXML : `<hierarchy><android.widget.Button class="android.widget.Button" package="com.android.chrome" text="${text}" content-desc="${text}" clickable="true" enabled="true" displayed="true" bounds="[0,136][400,276]"/></hierarchy>`;
@@ -72,7 +70,7 @@ await Bun.write(file, JSON.stringify(state));\n`);
   const client = new AppiumClient('http://android-replay.invalid', 30_000, async (input, init) => {
     const path = new URL(String(input)).pathname.replace('/session/android-replay', '');
     const payload = init?.body ? JSON.parse(String(init.body)) : undefined;
-    requests.push({ path, body: payload, at: realNow() });
+    requests.push({ path, body: payload, at: Date.now() });
     active++;
     maxActive = Math.max(maxActive, active);
     try {
@@ -154,7 +152,7 @@ await Bun.write(file, JSON.stringify(state));\n`);
   });
   const platform = new AndroidPlatform({
     origin: 'https://fixture.test', appiumUrl: 'http://android-replay.invalid', outputDir: root,
-    certificate: '', setupUrl: '', deviceId: 'emulator-5554', budget,
+    certificate: '', deviceId: 'emulator-5554', budget,
   });
   (platform as any).driver = client;
   const originalForeground = (platform as any).foregroundEvidence.bind(platform);
@@ -177,7 +175,6 @@ await Bun.write(file, JSON.stringify(state));\n`);
     await writeFile(join(root, 'protocol-result.json'), JSON.stringify({ requests, driver: client.snapshot(), active, maxActive, clicks, sourceCount }, null, 2));
     assert.equal(active, 0);
     assert.equal(maxActive, 1);
-    Date.now = realNow;
     if (savedAdb === undefined) delete process.env.ADB;
     else process.env.ADB = savedAdb;
   }
@@ -437,19 +434,3 @@ test('Android native invalid-command lookup does not scroll or try another selec
     assert.equal(requests.some((item: any) => item.path === '/execute/sync'), false);
   });
 });
-
-if (import.meta.main) {
-  let failures = 0;
-  const selected = androidTransitionTests.filter(([name]) => !process.env.ANDROID_TEST_FILTER || name.includes(process.env.ANDROID_TEST_FILTER));
-  for (const [name, body] of selected) {
-    try {
-      await body();
-      console.log(`PASS ${name}`);
-    } catch (error) {
-      failures++;
-      console.error(`FAIL ${name}`, error);
-    }
-  }
-  console.log(`${selected.length - failures} passed; ${failures} failed. Host protocol replays are not native qualification. Picker-ready UI is synthetic, not recorded.`);
-  process.exitCode = failures ? 1 : 0;
-}

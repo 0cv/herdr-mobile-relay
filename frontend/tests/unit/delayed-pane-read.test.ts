@@ -1,10 +1,12 @@
 import { get } from 'svelte/store';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setTerminalHistoryLines } from '$lib/preferences';
-import { CommandError, relayStore } from '$lib/store';
+import { CommandError } from '$lib/command-error';
+import { relayStore } from '$lib/store';
 import { createHybridTransport } from '$lib/transports/path-manager';
 import type { RelayTransport, TransportAuthentication, TransportHandlers, TransportStatus, TransportStatusDetail } from '$lib/transports';
 import type { Agent, CommandResult, QuestionDraft, QuestionInteraction, RelayConfig } from '$lib/types';
+import { MockWebSocket } from '../support/relay';
 
 type Wire = Record<string, any>;
 type TransportFactory = (relay: RelayConfig, handlers: TransportHandlers, authentication?: TransportAuthentication) => RelayTransport;
@@ -26,27 +28,11 @@ interface Peer {
 
 // The legacy tests still traverse the real WebSocket/encrypted-transport
 // implementation's explicitly supported tokenless loopback plaintext path.
-class MockWebSocket implements Peer {
-  static CONNECTING = 0;
-  static OPEN = 1;
-  static CLOSED = 3;
-  static instances: MockWebSocket[] = [];
-  readyState = MockWebSocket.CONNECTING;
-  sent: string[] = [];
-  onopen: (() => void) | null = null;
-  onclose: ((event?: { code: number }) => void) | null = null;
-  onerror: (() => void) | null = null;
-  onmessage: ((event: { data: string }) => void) | null = null;
-  constructor(readonly url: string, readonly protocols?: string | string[]) { MockWebSocket.instances.push(this); }
-  get protocol() { return typeof this.protocols === 'string' ? this.protocols : ''; }
+class StrictWebSocket extends MockWebSocket implements Peer {
   send(payload: string) {
     if (this.readyState !== MockWebSocket.OPEN) throw new Error('Synthetic socket is not open');
-    this.sent.push(payload);
+    super.send(payload);
   }
-  close() { this.readyState = MockWebSocket.CLOSED; }
-  open() { this.readyState = MockWebSocket.OPEN; this.onopen?.(); }
-  messages(): Wire[] { return this.sent.map(payload => JSON.parse(payload)); }
-  message(payload: Wire) { this.onmessage?.({ data: JSON.stringify(payload) }); }
 }
 
 const interaction: QuestionInteraction = {
@@ -91,7 +77,7 @@ function inventory(peer: Peer, producer: Producer): void {
       generation: 1, agent_session_id: 'session-1', agent: 'codex', status: 'blocked', event_id: 'event-1',
       ...(producer.name === 'respond'
         ? { attention_kind: 'approval', options: ['Approve once', 'Deny'], approval_fingerprint: 'approval-1' }
-        : { attention_kind: 'question', interaction, question_layout: true }),
+        : { attention_kind: 'question', interaction }),
     })),
   });
 }
@@ -269,7 +255,7 @@ beforeEach(() => {
   sessionStorage.clear();
   MockWebSocket.instances = [];
   transportHijack.current = null;
-  vi.stubGlobal('WebSocket', MockWebSocket);
+  vi.stubGlobal('WebSocket', StrictWebSocket);
   vi.useFakeTimers();
   setTerminalHistoryLines(10_000);
 });
@@ -483,60 +469,6 @@ describe('delayed pane read current contract', () => {
 });
 
 describe('delayed pane read lifetime', () => {
-  type LifetimeAllocation = {
-    handle: ReturnType<typeof setTimeout>;
-    callback: (...args: any[]) => void;
-    args: any[];
-    allocatedAt: number;
-  };
-
-  // Observe real fake-clock handles, forwarding every argument. Successful
-  // production clears, throwing attempts and manual test cleanup are separate.
-  function lifetimeTimers(delay: number, duringAllocation?: () => void) {
-    const lifetimeNativeSet = globalThis.setTimeout;
-    const lifetimeNativeClear = globalThis.clearTimeout;
-    const lifetimeAllocations: LifetimeAllocation[] = [];
-    const lifetimeAttempts: LifetimeAllocation['handle'][] = [];
-    const lifetimeCanceled: LifetimeAllocation['handle'][] = [];
-    const lifetimeTestCleanup: LifetimeAllocation['handle'][] = [];
-    const lifetimeFault: { current: { handle: LifetimeAllocation['handle']; error: Error } | null } = { current: null };
-    const lifetimeSetHook = vi.spyOn(globalThis, 'setTimeout').mockImplementation((callback, ms, ...args) => {
-      const lifetimeHandle = lifetimeNativeSet(callback, ms, ...args);
-      if (ms === delay && typeof callback === 'function') {
-        lifetimeAllocations.push({ handle: lifetimeHandle, callback, args, allocatedAt: Date.now() });
-        // Allocate first, then reenter public teardown, then return the actual
-        // handle. Never invoke the callback in a candidate const-timer TDZ.
-        duringAllocation?.();
-      }
-      return lifetimeHandle;
-    });
-    const lifetimeClearHook = vi.spyOn(globalThis, 'clearTimeout').mockImplementation((...args) => {
-      const lifetimeMatch = lifetimeAllocations.find(allocation => allocation.handle === args[0]);
-      if (lifetimeMatch) lifetimeAttempts.push(lifetimeMatch.handle);
-      if (lifetimeFault.current && args[0] === lifetimeFault.current.handle) throw lifetimeFault.current.error;
-      const lifetimeReturn = lifetimeNativeClear(...args);
-      if (lifetimeMatch) lifetimeCanceled.push(lifetimeMatch.handle);
-      return lifetimeReturn;
-    });
-    return {
-      allocations: lifetimeAllocations, attempts: lifetimeAttempts, canceled: lifetimeCanceled,
-      testCleanup: lifetimeTestCleanup, fault: lifetimeFault,
-      restore() {
-        lifetimeSetHook.mockRestore();
-        lifetimeClearHook.mockRestore();
-        for (const allocation of lifetimeAllocations) {
-          lifetimeNativeClear(allocation.handle);
-          lifetimeTestCleanup.push(allocation.handle);
-        }
-      },
-    };
-  }
-
-  function lifetimeOne(clock: ReturnType<typeof lifetimeTimers>): LifetimeAllocation {
-    expect(clock.allocations, 'SETUP_REAL_DELAYED_ALLOCATION').toHaveLength(1);
-    return clock.allocations[0];
-  }
-
   function lifetimeReady(relay: RelayConfig, producer: Producer) {
     const lifetimePeer = MockWebSocket.instances.filter(socket => socket.url === relay.url).at(-1)!;
     expect(lifetimePeer, 'SETUP_SOCKET_CREATED').toBeDefined();
@@ -593,308 +525,117 @@ describe('delayed pane read lifetime', () => {
     describe(producer.name, () => {
       it('settled job cannot refresh same-ID replacement', async () => {
         const lifetimeFixture = lifetimeSingle(producer);
-        const lifetimeClock = lifetimeTimers(producer.delay);
-        try {
-          await succeed(producer, lifetimeFixture.peer, start(producer, lifetimeFixture.peer, lifetimeFixture.agent));
-          const lifetimeTimer = lifetimeOne(lifetimeClock);
-          const lifetimeReplacement = lifetimeReplace(lifetimeFixture.relay, producer);
-          expect(lifetimeReplacement.owner, 'SETUP_SAME_ID_NEW_OWNER').not.toBe(lifetimeFixture.owner);
-          expect(target(lifetimeReplacement.agent), 'SETUP_EXACT_SAME_TARGET').toEqual(target(lifetimeFixture.agent));
-          await vi.advanceTimersByTimeAsync(producer.delay - 1);
-          expect(reads(lifetimeReplacement.peer), 'SETUP_BEFORE_OLD_DEADLINE').toHaveLength(0);
-          await vi.advanceTimersByTimeAsync(1);
-          // Primary oracle: actual misdelivery, not disconnected suppression or
-          // a prepopulated pending read. Cancellation is deliberately second.
-          expect(reads(lifetimeReplacement.peer), 'L01_NO_SAME_ID_MISDELIVERY').toHaveLength(0);
-          expect(lifetimeClock.canceled.filter(handle => handle === lifetimeTimer.handle), 'L01_PHYSICAL_CANCEL').toHaveLength(1);
-          relayStore.readPane(lifetimeReplacement.agent);
-          expectRead(lifetimeReplacement.peer, lifetimeReplacement.agent);
-        } finally {
-          lifetimeClock.restore();
-        }
+        await succeed(producer, lifetimeFixture.peer, start(producer, lifetimeFixture.peer, lifetimeFixture.agent));
+        const lifetimeReplacement = lifetimeReplace(lifetimeFixture.relay, producer);
+        expect(lifetimeReplacement.owner, 'SETUP_SAME_ID_NEW_OWNER').not.toBe(lifetimeFixture.owner);
+        expect(target(lifetimeReplacement.agent), 'SETUP_EXACT_SAME_TARGET').toEqual(target(lifetimeFixture.agent));
+        await vi.advanceTimersByTimeAsync(producer.delay - 1);
+        expect(reads(lifetimeReplacement.peer), 'SETUP_BEFORE_OLD_DEADLINE').toHaveLength(0);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(reads(lifetimeReplacement.peer), 'L01_NO_SAME_ID_MISDELIVERY').toHaveLength(0);
+        relayStore.readPane(lifetimeReplacement.agent);
+        expectRead(lifetimeReplacement.peer, lifetimeReplacement.agent);
       });
 
       it('remove and re-add cannot inherit old job', async () => {
         const lifetimeFixture = lifetimeSingle(producer);
-        const lifetimeClock = lifetimeTimers(producer.delay);
-        try {
-          await succeed(producer, lifetimeFixture.peer, start(producer, lifetimeFixture.peer, lifetimeFixture.agent));
-          const lifetimeTimer = lifetimeOne(lifetimeClock);
-          relayStore.removeRelay(lifetimeFixture.relay.id);
-          expect(get(relayStore.relayConfigs), 'SETUP_REMOVED_RELAY').toHaveLength(0);
-          relayStore.addRelay(lifetimeFixture.relay);
-          const lifetimeReplacement = lifetimeReady(lifetimeFixture.relay, producer);
-          expect(lifetimeReplacement.owner, 'SETUP_READD_NEW_OWNER').not.toBe(lifetimeFixture.owner);
-          expect(target(lifetimeReplacement.agent), 'SETUP_READD_SAME_TARGET').toEqual(target(lifetimeFixture.agent));
-          expect(lifetimeClock.canceled.filter(handle => handle === lifetimeTimer.handle), 'L02_PHYSICAL_CANCEL').toHaveLength(1);
-          await lifetimeFreshRead(producer, lifetimeReplacement);
-        } finally {
-          lifetimeClock.restore();
-        }
+        await succeed(producer, lifetimeFixture.peer, start(producer, lifetimeFixture.peer, lifetimeFixture.agent));
+        relayStore.removeRelay(lifetimeFixture.relay.id);
+        expect(get(relayStore.relayConfigs), 'SETUP_REMOVED_RELAY').toHaveLength(0);
+        relayStore.addRelay(lifetimeFixture.relay);
+        const lifetimeReplacement = lifetimeReady(lifetimeFixture.relay, producer);
+        expect(lifetimeReplacement.owner, 'SETUP_READD_NEW_OWNER').not.toBe(lifetimeFixture.owner);
+        expect(target(lifetimeReplacement.agent), 'SETUP_READD_SAME_TARGET').toEqual(target(lifetimeFixture.agent));
+        await lifetimeFreshRead(producer, lifetimeReplacement);
       });
 
       it('destroy and recreate cannot inherit old job', async () => {
         const lifetimeFixture = lifetimeSingle(producer);
-        const lifetimeClock = lifetimeTimers(producer.delay);
-        try {
-          await succeed(producer, lifetimeFixture.peer, start(producer, lifetimeFixture.peer, lifetimeFixture.agent));
-          const lifetimeTimer = lifetimeOne(lifetimeClock);
-          relayStore.destroy();
-          relayStore.addRelay(lifetimeFixture.relay);
-          const lifetimeReplacement = lifetimeReady(lifetimeFixture.relay, producer);
-          expect(lifetimeReplacement.owner, 'SETUP_RECREATE_NEW_OWNER').not.toBe(lifetimeFixture.owner);
-          expect(target(lifetimeReplacement.agent), 'SETUP_RECREATE_SAME_TARGET').toEqual(target(lifetimeFixture.agent));
-          expect(lifetimeClock.canceled.filter(handle => handle === lifetimeTimer.handle), 'L03_PHYSICAL_CANCEL').toHaveLength(1);
-          await lifetimeFreshRead(producer, lifetimeReplacement);
-        } finally {
-          lifetimeClock.restore();
-        }
+        await succeed(producer, lifetimeFixture.peer, start(producer, lifetimeFixture.peer, lifetimeFixture.agent));
+        relayStore.destroy();
+        relayStore.addRelay(lifetimeFixture.relay);
+        const lifetimeReplacement = lifetimeReady(lifetimeFixture.relay, producer);
+        expect(lifetimeReplacement.owner, 'SETUP_RECREATE_NEW_OWNER').not.toBe(lifetimeFixture.owner);
+        expect(target(lifetimeReplacement.agent), 'SETUP_RECREATE_SAME_TARGET').toEqual(target(lifetimeFixture.agent));
+        await lifetimeFreshRead(producer, lifetimeReplacement);
       });
 
       it('terminal close and recovery cannot inherit old job', async () => {
         const lifetimeFixture = lifetimeSingle(producer);
-        const lifetimeClock = lifetimeTimers(producer.delay);
-        try {
-          await succeed(producer, lifetimeFixture.peer, start(producer, lifetimeFixture.peer, lifetimeFixture.agent));
-          const lifetimeTimer = lifetimeOne(lifetimeClock);
-          lifetimeTerminalClose(lifetimeFixture.peer);
-          expect(lifetimeFixture.owner.status, 'SETUP_TERMINAL_STATUS_INGRESS').toBe('disconnected');
-          expect(relayStore.connection(lifetimeFixture.relay.id), 'SETUP_TERMINAL_RECORD_RETAINED').toBe(lifetimeFixture.owner);
-          expect(lifetimeClock.canceled.filter(handle => handle === lifetimeTimer.handle), 'L04_PHYSICAL_CANCEL').toHaveLength(1);
-          relayStore.connectRelay(lifetimeFixture.relay);
-          const lifetimeReplacement = lifetimeReady(lifetimeFixture.relay, producer);
-          expect(lifetimeReplacement.owner, 'SETUP_TERMINAL_RECOVERY_NEW_OWNER').not.toBe(lifetimeFixture.owner);
-          await lifetimeFreshRead(producer, lifetimeReplacement);
-        } finally {
-          lifetimeClock.restore();
-        }
+        await succeed(producer, lifetimeFixture.peer, start(producer, lifetimeFixture.peer, lifetimeFixture.agent));
+        lifetimeTerminalClose(lifetimeFixture.peer);
+        expect(lifetimeFixture.owner.status, 'SETUP_TERMINAL_STATUS_INGRESS').toBe('disconnected');
+        expect(relayStore.connection(lifetimeFixture.relay.id), 'SETUP_TERMINAL_RECORD_RETAINED').toBe(lifetimeFixture.owner);
+        relayStore.connectRelay(lifetimeFixture.relay);
+        const lifetimeReplacement = lifetimeReady(lifetimeFixture.relay, producer);
+        expect(lifetimeReplacement.owner, 'SETUP_TERMINAL_RECOVERY_NEW_OWNER').not.toBe(lifetimeFixture.owner);
+        await lifetimeFreshRead(producer, lifetimeReplacement);
       });
 
       it('disconnect before settlement cannot register late finally', async () => {
         const lifetimeFixture = lifetimeSingle(producer);
-        const lifetimeClock = lifetimeTimers(producer.delay);
-        try {
-          const lifetimeJob = start(producer, lifetimeFixture.peer, lifetimeFixture.agent);
-          const lifetimeOutcome = lifetimeObserve(lifetimeJob);
-          expect(lifetimeClock.allocations, 'SETUP_UNRESOLVED_NO_DELAY').toHaveLength(0);
-          relayStore.disconnectRelay(lifetimeFixture.relay.id);
-          lifetimeRejected(producer, await lifetimeOutcome);
-          expect(lifetimeClock.allocations, 'L05_NO_LATE_ALLOCATION').toHaveLength(0);
-          relayStore.connectRelay(lifetimeFixture.relay);
-          await lifetimeFreshRead(producer, lifetimeReady(lifetimeFixture.relay, producer));
-        } finally {
-          lifetimeClock.restore();
-        }
+        const lifetimeJob = start(producer, lifetimeFixture.peer, lifetimeFixture.agent);
+        const lifetimeOutcome = lifetimeObserve(lifetimeJob);
+        relayStore.disconnectRelay(lifetimeFixture.relay.id);
+        lifetimeRejected(producer, await lifetimeOutcome);
+        relayStore.connectRelay(lifetimeFixture.relay);
+        await lifetimeFreshRead(producer, lifetimeReady(lifetimeFixture.relay, producer));
       });
 
       it('successful settlement followed by replacement before continuation keeps original owner', async () => {
         const lifetimeFixture = lifetimeSingle(producer);
-        const lifetimeClock = lifetimeTimers(producer.delay);
-        try {
-          const lifetimeJob = start(producer, lifetimeFixture.peer, lifetimeFixture.agent);
-          const lifetimeOutcome = lifetimeObserve(lifetimeJob);
-          const lifetimeFinal = result(lifetimeJob.command);
-          lifetimeFixture.peer.message(lifetimeFinal);
-          // NO await/succeed/timer flush between real final ingress and owner
-          // replacement: the producer continuation must still be queued.
-          const lifetimeReplacement = lifetimeReplace(lifetimeFixture.relay, producer);
-          expect(lifetimeReplacement.owner, 'SETUP_SYNC_REPLACED_OWNER').not.toBe(lifetimeFixture.owner);
-          const lifetimeSettled = await lifetimeOutcome;
-          expect(lifetimeSettled, 'SETUP_SYNC_FINAL_RESULT_PRESERVED').toEqual({ value: producer.name === 'respond' ? true : lifetimeFinal });
-          expect(lifetimeClock.allocations, 'L06_NO_REPLACED_CONTINUATION_ALLOCATION').toHaveLength(0);
-          await lifetimeFreshRead(producer, lifetimeReplacement);
-        } finally {
-          lifetimeClock.restore();
-        }
+        const lifetimeJob = start(producer, lifetimeFixture.peer, lifetimeFixture.agent);
+        const lifetimeOutcome = lifetimeObserve(lifetimeJob);
+        const lifetimeFinal = result(lifetimeJob.command);
+        lifetimeFixture.peer.message(lifetimeFinal);
+        // NO await/succeed/timer flush between real final ingress and owner
+        // replacement: the producer continuation must still be queued.
+        const lifetimeReplacement = lifetimeReplace(lifetimeFixture.relay, producer);
+        expect(lifetimeReplacement.owner, 'SETUP_SYNC_REPLACED_OWNER').not.toBe(lifetimeFixture.owner);
+        const lifetimeSettled = await lifetimeOutcome;
+        expect(lifetimeSettled, 'SETUP_SYNC_FINAL_RESULT_PRESERVED').toEqual({ value: producer.name === 'respond' ? true : lifetimeFinal });
+        await lifetimeFreshRead(producer, lifetimeReplacement);
       });
 
       it('hidden health retirement cannot register late finally', async () => {
         const lifetimeFixture = lifetimeSingle(producer);
-        const lifetimeClock = lifetimeTimers(producer.delay);
-        try {
-          const lifetimeConnectedAt = Date.now();
-          relayStore.setHidden(true);
-          await vi.advanceTimersByTimeAsync(119_900);
-          const lifetimeJob = start(producer, lifetimeFixture.peer, lifetimeFixture.agent);
-          const lifetimeOutcome = lifetimeObserve(lifetimeJob);
-          expect(lifetimeClock.allocations, 'SETUP_HEALTH_UNRESOLVED_NO_DELAY').toHaveLength(0);
-          // Withhold ALL ingress, including accepted/final/pong. Any ingress
-          // would clear healthTimer; the responding indicator is unrelated.
-          await vi.advanceTimersByTimeAsync(100);
-          expect(Date.now() - lifetimeConnectedAt, 'SETUP_ACTUAL_KEEPALIVE_TICK').toBe(120_000);
-          expect(lifetimeFixture.peer.messages().filter(message => message.type === 'ping'), 'SETUP_KEEPALIVE_PING_SENT').toHaveLength(1);
-          expect(lifetimeFixture.owner.healthTimer, 'SETUP_HEALTH_TIMER_ARMED').not.toBeNull();
-          await vi.advanceTimersByTimeAsync(9_999);
-          expect(lifetimeFixture.owner.status, 'SETUP_HEALTH_NOT_RETIRED_EARLY').toBe('connected');
-          await vi.advanceTimersByTimeAsync(1);
-          expect(Date.now() - lifetimeConnectedAt, 'SETUP_HEALTH_DEADLINE').toBe(130_000);
-          expect(relayStore.connection(lifetimeFixture.relay.id), 'SETUP_HEALTH_RETAINED_OWNER').toBe(lifetimeFixture.owner);
-          expect(lifetimeFixture.owner, 'SETUP_ACTUAL_HEALTH_RETIREMENT').toMatchObject({ closed: true, status: 'disconnected', healthTimer: null });
-          expect(lifetimeFixture.peer.readyState, 'SETUP_HEALTH_TRANSPORT_CLOSED').toBe(MockWebSocket.CLOSED);
-          lifetimeRejected(producer, await lifetimeOutcome);
-          expect(lifetimeClock.allocations, 'L07_NO_HEALTH_LATE_ALLOCATION').toHaveLength(0);
-          relayStore.setHidden(false);
-          relayStore.revalidateConnections();
-          const lifetimeReplacement = lifetimeReady(lifetimeFixture.relay, producer);
-          expect(lifetimeReplacement.owner, 'SETUP_HEALTH_RECOVERY_NEW_OWNER').not.toBe(lifetimeFixture.owner);
-          expect(Date.now() - lifetimeConnectedAt, 'SETUP_RECOVERY_BEFORE_FINALLY_DELAY').toBe(130_000);
-          await lifetimeFreshRead(producer, lifetimeReplacement);
-        } finally {
-          lifetimeClock.restore();
-        }
-      });
-
-      it('canceled callback replay cannot deliver', async () => {
-        const lifetimeFixture = lifetimeSingle(producer);
-        const lifetimeClock = lifetimeTimers(producer.delay);
-        try {
-          await succeed(producer, lifetimeFixture.peer, start(producer, lifetimeFixture.peer, lifetimeFixture.agent));
-          const lifetimeTimer = lifetimeOne(lifetimeClock);
-          const lifetimeReplacement = lifetimeReplace(lifetimeFixture.relay, producer);
-          expect(lifetimeClock.canceled.filter(handle => handle === lifetimeTimer.handle), 'L08_GENUINE_CANCEL_BEFORE_REPLAY').toHaveLength(1);
-          lifetimeTimer.callback(...lifetimeTimer.args);
-          expect(reads(lifetimeReplacement.peer), 'L08_REPLAY_GUARDED').toHaveLength(0);
-          await lifetimeFreshRead(producer, lifetimeReplacement);
-        } finally {
-          lifetimeClock.restore();
-        }
-      });
-
-      it('teardown during timer allocation prevents registration', async () => {
-        const lifetimeFixture = lifetimeSingle(producer);
-        let lifetimeReplacement: ReturnType<typeof lifetimeReady> | undefined;
-        const lifetimeClock = lifetimeTimers(producer.delay, () => {
-          lifetimeReplacement = lifetimeReplace(lifetimeFixture.relay, producer);
-        });
-        try {
-          await succeed(producer, lifetimeFixture.peer, start(producer, lifetimeFixture.peer, lifetimeFixture.agent));
-          const lifetimeTimer = lifetimeOne(lifetimeClock);
-          expect(lifetimeReplacement, 'SETUP_ALLOCATION_REENTRY_COMPLETED').toBeDefined();
-          expect(lifetimeReplacement!.owner, 'SETUP_ALLOCATION_REENTRY_NEW_OWNER').not.toBe(lifetimeFixture.owner);
-          expect(lifetimeClock.canceled.filter(handle => handle === lifetimeTimer.handle), 'L09_RETURNED_ORPHAN_CANCELED').toHaveLength(1);
-          await lifetimeFreshRead(producer, lifetimeReplacement!);
-        } finally {
-          lifetimeClock.restore();
-        }
-      });
-
-      it('closed retained record cannot deliver', async () => {
-        const lifetimeFixture = lifetimeSingle(producer);
-        const lifetimeClock = lifetimeTimers(producer.delay);
-        const lifetimeOriginalClosed = lifetimeFixture.owner.closed;
-        try {
-          await succeed(producer, lifetimeFixture.peer, start(producer, lifetimeFixture.peer, lifetimeFixture.agent));
-          lifetimeOne(lifetimeClock);
-          lifetimeFixture.owner.closed = true;
-          expect(relayStore.connection(lifetimeFixture.relay.id), 'SETUP_CLOSED_SAME_CURRENT_RECORD').toBe(lifetimeFixture.owner);
-          expect(lifetimeFixture.owner.status, 'SETUP_CLOSED_STILL_CONNECTED').toBe('connected');
-          expect(lifetimeFixture.peer.readyState, 'SETUP_CLOSED_TRANSPORT_STILL_LIVE').toBe(MockWebSocket.OPEN);
-          await vi.advanceTimersByTimeAsync(producer.delay);
-          expect(reads(lifetimeFixture.peer), 'L10_CLOSED_RECORD_NO_DELIVERY').toHaveLength(0);
-          lifetimeFixture.owner.closed = lifetimeOriginalClosed;
-          relayStore.readPane(lifetimeFixture.agent);
-          expectRead(lifetimeFixture.peer, lifetimeFixture.agent);
-        } finally {
-          lifetimeFixture.owner.closed = lifetimeOriginalClosed;
-          lifetimeClock.restore();
-        }
-      });
-
-      it('delivery reentrancy consumes job before read', async () => {
-        const lifetimeFixture = lifetimeSingle(producer);
-        const lifetimeClock = lifetimeTimers(producer.delay);
-        const lifetimeNativeSend = lifetimeFixture.peer.send.bind(lifetimeFixture.peer);
-        let lifetimeReplay: (() => void) | undefined;
-        let lifetimeReentered = false;
-        const lifetimeSendHook = vi.spyOn(lifetimeFixture.peer, 'send').mockImplementation(payload => {
-          lifetimeNativeSend(payload);
-          if (!lifetimeReentered && (JSON.parse(payload) as Wire).type === 'read_pane') {
-            lifetimeReentered = true;
-            // Tokenless send is synchronous. No early ack/forced read: replay
-            // before the FIRST send returns and pendingPaneReads is registered.
-            lifetimeReplay!();
-          }
-        });
-        try {
-          await succeed(producer, lifetimeFixture.peer, start(producer, lifetimeFixture.peer, lifetimeFixture.agent));
-          const lifetimeTimer = lifetimeOne(lifetimeClock);
-          lifetimeReplay = () => lifetimeTimer.callback(...lifetimeTimer.args);
-          await vi.advanceTimersByTimeAsync(producer.delay);
-          expect(lifetimeReentered, 'SETUP_ACTUAL_SEND_REENTRY').toBe(true);
-          expect(reads(lifetimeFixture.peer), 'L11_DELIVERY_CONSUMED_BEFORE_READ').toHaveLength(1);
-          const lifetimeRead = expectRead(lifetimeFixture.peer, lifetimeFixture.agent);
-          acknowledge(lifetimeFixture.peer, lifetimeFixture.agent, lifetimeRead);
-        } finally {
-          lifetimeSendHook.mockRestore();
-          lifetimeClock.restore();
-        }
-      });
-
-      it('clearTimeout exception propagates and surviving delivery remains guarded', async () => {
-        const lifetimeFixture = lifetimeSingle(producer);
-        const lifetimeClock = lifetimeTimers(producer.delay);
-        const lifetimeOriginalClosed = lifetimeFixture.owner.closed;
-        const lifetimeTransport = lifetimeFixture.owner.transport;
-        try {
-          await succeed(producer, lifetimeFixture.peer, start(producer, lifetimeFixture.peer, lifetimeFixture.agent));
-          const lifetimeTimer = lifetimeOne(lifetimeClock);
-          const lifetimeInjected = new Error('T046 targeted genuine delayed clear');
-          lifetimeClock.fault.current = { handle: lifetimeTimer.handle, error: lifetimeInjected };
-          let lifetimeCaught: unknown;
-          try {
-            relayStore.disconnectRelay(lifetimeFixture.relay.id);
-          } catch (lifetimeError) {
-            lifetimeCaught = lifetimeError;
-          }
-          expect(lifetimeCaught, 'L12_EXACT_CLEAR_ERROR_PROPAGATES').toBe(lifetimeInjected);
-          lifetimeClock.fault.current = null;
-          expect(lifetimeClock.attempts.filter(handle => handle === lifetimeTimer.handle), 'L12_TARGETED_CLEAR_ATTEMPT').toHaveLength(1);
-          expect(lifetimeClock.canceled.filter(handle => handle === lifetimeTimer.handle), 'L12_THROW_IS_NOT_CANCEL').toHaveLength(0);
-          // Narrow fault contract, NOT universal exception-safe cleanup. A
-          // thrown cancel can leave a closed owner with live connected transport.
-          expect(relayStore.connection(lifetimeFixture.relay.id), 'SETUP_THROW_RETAINS_CURRENT_OWNER').toBe(lifetimeFixture.owner);
-          expect(lifetimeFixture.owner, 'SETUP_THROW_CLOSED_BUT_CONNECTED').toMatchObject({ closed: true, status: 'connected' });
-          expect(lifetimeFixture.owner.transport, 'SETUP_THROW_RETAINS_TRANSPORT').toBe(lifetimeTransport);
-          expect(lifetimeFixture.peer.readyState, 'SETUP_THROW_TRANSPORT_LIVE').toBe(MockWebSocket.OPEN);
-          lifetimeTimer.callback(...lifetimeTimer.args);
-          expect(reads(lifetimeFixture.peer), 'L12_SURVIVING_CALLBACK_GUARDED_WHILE_LIVE').toHaveLength(0);
-        } finally {
-          lifetimeClock.fault.current = null;
-          lifetimeFixture.owner.closed = lifetimeOriginalClosed;
-          lifetimeClock.restore();
-        }
+        const lifetimeConnectedAt = Date.now();
+        relayStore.setHidden(true);
+        await vi.advanceTimersByTimeAsync(119_900);
+        const lifetimeJob = start(producer, lifetimeFixture.peer, lifetimeFixture.agent);
+        const lifetimeOutcome = lifetimeObserve(lifetimeJob);
+        // Withhold ALL ingress, including accepted/final/pong. Any ingress
+        // would clear healthTimer; the responding indicator is unrelated.
+        await vi.advanceTimersByTimeAsync(100);
+        expect(Date.now() - lifetimeConnectedAt, 'SETUP_ACTUAL_KEEPALIVE_TICK').toBe(120_000);
+        expect(lifetimeFixture.peer.messages().filter(message => message.type === 'ping'), 'SETUP_KEEPALIVE_PING_SENT').toHaveLength(1);
+        expect(lifetimeFixture.owner.healthTimer, 'SETUP_HEALTH_TIMER_ARMED').not.toBeNull();
+        await vi.advanceTimersByTimeAsync(9_999);
+        expect(lifetimeFixture.owner.status, 'SETUP_HEALTH_NOT_RETIRED_EARLY').toBe('connected');
+        await vi.advanceTimersByTimeAsync(1);
+        expect(Date.now() - lifetimeConnectedAt, 'SETUP_HEALTH_DEADLINE').toBe(130_000);
+        expect(relayStore.connection(lifetimeFixture.relay.id), 'SETUP_HEALTH_RETAINED_OWNER').toBe(lifetimeFixture.owner);
+        expect(lifetimeFixture.owner, 'SETUP_ACTUAL_HEALTH_RETIREMENT').toMatchObject({ closed: true, status: 'disconnected', healthTimer: null });
+        expect(lifetimeFixture.peer.readyState, 'SETUP_HEALTH_TRANSPORT_CLOSED').toBe(MockWebSocket.CLOSED);
+        lifetimeRejected(producer, await lifetimeOutcome);
+        relayStore.setHidden(false);
+        relayStore.revalidateConnections(2_000);
+        const lifetimeReplacement = lifetimeReady(lifetimeFixture.relay, producer);
+        expect(lifetimeReplacement.owner, 'SETUP_HEALTH_RECOVERY_NEW_OWNER').not.toBe(lifetimeFixture.owner);
+        expect(Date.now() - lifetimeConnectedAt, 'SETUP_RECOVERY_BEFORE_FINALLY_DELAY').toBe(130_000);
+        await lifetimeFreshRead(producer, lifetimeReplacement);
       });
 
       it('retiring relay A preserves relay B job', async () => {
-        // The existing two-relay setup finishes ALL configuration before work.
         const [lifetimeA, lifetimeB] = legacyPeers(producer);
-        const lifetimeBOwner = relayStore.connection(lifetimeB.relay.id);
-        const lifetimeClock = lifetimeTimers(producer.delay);
-        try {
-          await succeed(producer, lifetimeA.peer, start(producer, lifetimeA.peer, lifetimeA.agent));
-          expect(lifetimeClock.allocations, 'SETUP_ISOLATION_A_ALLOCATION').toHaveLength(1);
-          await vi.advanceTimersByTimeAsync(100);
-          await succeed(producer, lifetimeB.peer, start(producer, lifetimeB.peer, lifetimeB.agent));
-          expect(lifetimeClock.allocations, 'SETUP_ISOLATION_B_ALLOCATION').toHaveLength(2);
-          const lifetimeBTimer = lifetimeClock.allocations[1];
-          relayStore.disconnectRelay(lifetimeA.relay.id);
-          expect(relayStore.connection(lifetimeB.relay.id), 'G01_B_OWNER_UNCHANGED').toBe(lifetimeBOwner);
-          expect(lifetimeClock.canceled.filter(handle => handle === lifetimeBTimer.handle), 'G01_B_NOT_CANCELED').toHaveLength(0);
-          await vi.advanceTimersByTimeAsync(producer.delay - 101);
-          expect(reads(lifetimeB.peer), 'G01_B_NOT_AT_A_DEADLINE').toHaveLength(0);
-          await vi.advanceTimersByTimeAsync(1);
-          expect(reads(lifetimeB.peer), 'G01_B_NOT_AT_A_DEADLINE_EXACT').toHaveLength(0);
-          await vi.advanceTimersByTimeAsync(99);
-          expect(reads(lifetimeB.peer), 'G01_B_NOT_BEFORE_OWN_DEADLINE').toHaveLength(0);
-          await vi.advanceTimersByTimeAsync(1);
-          expect(Date.now(), 'G01_B_EXACT_DEADLINE').toBe(lifetimeBTimer.allocatedAt + producer.delay);
-          expectRead(lifetimeB.peer, lifetimeB.agent);
-          expect(lifetimeClock.canceled.filter(handle => handle === lifetimeBTimer.handle), 'G01_B_NEVER_CANCELED').toHaveLength(0);
-          // Deliberately no assertion that A was canceled: that missing cancel
-          // is a RED contract above, never an extra requirement of this green.
-        } finally {
-          lifetimeClock.restore();
-        }
+        await succeed(producer, lifetimeA.peer, start(producer, lifetimeA.peer, lifetimeA.agent));
+        await vi.advanceTimersByTimeAsync(100);
+        await succeed(producer, lifetimeB.peer, start(producer, lifetimeB.peer, lifetimeB.agent));
+        relayStore.disconnectRelay(lifetimeA.relay.id);
+        await vi.advanceTimersByTimeAsync(producer.delay - 1);
+        expect(reads(lifetimeB.peer), 'G01_B_NOT_BEFORE_OWN_DEADLINE').toHaveLength(0);
+        await vi.advanceTimersByTimeAsync(1);
+        expectRead(lifetimeB.peer, lifetimeB.agent);
       });
     });
   }

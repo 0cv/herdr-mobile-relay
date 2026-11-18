@@ -31,7 +31,7 @@ func TestRetryAgentStartCancellationBoundaries(t *testing.T) {
 				}
 				cancel()
 				if boundary == "backoff" {
-					return waitForAgentRetry(waitCtx, time.Hour)
+					return contextDelay(waitCtx, time.Hour) == nil
 				}
 				return true
 			})

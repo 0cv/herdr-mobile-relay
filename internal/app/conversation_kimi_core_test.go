@@ -71,9 +71,9 @@ func TestKimiCoreInference(t *testing.T) {
 	if a.Session != "core_session" || !a.ConversationInferred || a.ForegroundCwd != "/fixture" || a.ConversationReason != "" {
 		t.Fatalf("core inference=%+v", a)
 	}
-	page, err := s.conversationM.ReadFor(a.Agent, a.ForegroundCwd, a.Session, "", 80)
-	if err != nil || len(page.Entries) != 2 {
-		t.Fatalf("page=%+v err=%v", page, err)
+	entries, err := s.conversationM.ReadLatest(a.Agent, conversation.ProjectContext{CWD: a.ForegroundCwd}, a.Session, 80)
+	if err != nil || len(entries) != 2 {
+		t.Fatalf("entries=%+v err=%v", entries, err)
 	}
 	a.Session = ""
 	peer := &coordinator.AgentState{Agent: "kimi-code", PaneID: "t12", Cwd: "/fixture"}

@@ -44,17 +44,6 @@ func newSendBuffer(maxItems, maxBytes int) *sendBuffer {
 	return buffer
 }
 
-func (b *sendBuffer) Push(data []byte) bool {
-	if len(data) > b.maxBytes {
-		return false
-	}
-	return b.PushTyped(data, messageType(data), false)
-}
-
-func (b *sendBuffer) PushTyped(data []byte, kind string, replaceable bool) bool {
-	return b.pushTyped(data, kind, replaceable) != pushRejected
-}
-
 func (b *sendBuffer) pushTyped(data []byte, kind string, replaceable bool) pushResult {
 	b.mu.Lock()
 	defer b.mu.Unlock()

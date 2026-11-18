@@ -5,25 +5,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/0cv/herdr-mobile-relay/internal/textutil"
 )
 
-const (
-	// The standalone walkers and Hermes use the same per-request custom-file
-	// budget as the other providers. maxWalkFiles remains named separately for
-	// callers that specifically reason about recursive filesystem traversal.
-	maxWalkFiles    = maxCustomFiles
-	maxGitWalkDepth = 32
-)
-
-func walkCommandDir(root, source string) []Command {
-	reader := newCatalogReader()
-	budget := maxWalkFiles
-	var suppressed []string
-	var commands []Command
-	truncated := false
-	reader.walkDirBudget(root, "", source, &commands, &suppressed, &budget, &truncated)
-	return commands
-}
+const maxGitWalkDepth = 32
 
 func (reader *catalogReader) walkCommandDirBudget(root, source string, budget *int) ([]Command, []string, bool) {
 	var commands []Command
@@ -115,7 +101,7 @@ func (reader *catalogReader) walkDirBudget(dir, namespace, source string, out *[
 			Command:      fullName,
 			Description:  descriptionFrom(fm, data),
 			Source:       source,
-			ArgumentHint: compact(fm["argument-hint"], 120),
+			ArgumentHint: textutil.Compact(fm["argument-hint"], 120),
 		})
 	}
 }
@@ -143,16 +129,28 @@ func parseSkillMetadata(metadata map[string]string, dirName, namespace, source s
 	if !userInvocable(metadata) {
 		return nil, fullName
 	}
-	description := metadata["description"]
-	if description == "" {
-		description = strings.ToUpper(name[:1]) + name[1:] + " skill"
+	command := skillCommand(fullName, skillDescription(metadata, name), source, metadata)
+	return &command, ""
+}
+
+func skillDescription(metadata map[string]string, name string) string {
+	if description := metadata["description"]; description != "" {
+		return description
 	}
-	return &Command{
-		Command:      fullName,
-		Description:  compact(description, 240),
+	return strings.ToUpper(name[:1]) + name[1:] + " skill"
+}
+
+func skillCommand(command, description, source string, metadata map[string]string) Command {
+	return Command{
+		Command:      command,
+		Description:  textutil.Compact(description, 240),
 		Source:       source,
-		ArgumentHint: compact(metadata["argument-hint"], 120),
-	}, ""
+		ArgumentHint: textutil.Compact(metadata["argument-hint"], 120),
+	}
+}
+
+func formattedCommand(format, name string) string {
+	return "/" + strings.TrimPrefix(strings.Replace(format, "{name}", name, 1), "/")
 }
 
 func findGitRoot(dir string) string {
@@ -169,13 +167,6 @@ func findGitRoot(dir string) string {
 		current = parent
 	}
 	return ""
-}
-
-func scanSkillDir(dir, source string) []Command {
-	reader := newCatalogReader()
-	budget := maxWalkFiles
-	cmds, _, _ := reader.scanSkillDirBudget(dir, source, &budget)
-	return cmds
 }
 
 // entryIsDir classifies a directory entry by what it points at, not by its own
@@ -296,15 +287,8 @@ func (reader *catalogReader) scanSkillDirBudget(dir, source string, budget *int)
 }
 
 type skillScanOptions struct {
-	boundary           string
-	requireDescription bool
-	respectEnabled     bool
-}
-
-// scanSkillDirFormat scans dir for <entry>/SKILL.md and renders each skill
-// through format, which must contain exactly one "{name}".
-func (reader *catalogReader) scanSkillDirFormat(dir, source, format string, budget *int) ([]Command, bool) {
-	return reader.scanSkillDirFormatOptions(dir, source, format, budget, skillScanOptions{requireDescription: true})
+	boundary       string
+	respectEnabled bool
 }
 
 func (reader *catalogReader) scanSkillDirFormatOptions(dir, source, format string, budget *int, options skillScanOptions) ([]Command, bool) {
@@ -354,17 +338,9 @@ func (reader *catalogReader) scanSkillDirFormatOptions(dir, source, format strin
 		}
 		description := metadata["description"]
 		if description == "" {
-			if options.requireDescription {
-				continue
-			}
-			description = strings.ToUpper(name[:1]) + name[1:] + " skill"
+			continue
 		}
-		commands = append(commands, Command{
-			Command:      "/" + strings.TrimPrefix(strings.Replace(format, "{name}", name, 1), "/"),
-			Description:  compact(description, 240),
-			Source:       source,
-			ArgumentHint: compact(metadata["argument-hint"], 120),
-		})
+		commands = append(commands, skillCommand(formattedCommand(format, name), description, source, metadata))
 	}
 	return commands, truncated
 }
@@ -432,22 +408,15 @@ func (reader *catalogReader) skillCommandFromFile(path, fallbackName, source, fo
 	}
 	description := metadata["description"]
 	if description == "" {
-		if options.requireDescription {
-			return nil
-		}
-		description = strings.ToUpper(name[:1]) + name[1:] + " skill"
+		return nil
 	}
-	return &Command{
-		Command:      "/" + strings.TrimPrefix(strings.Replace(format, "{name}", name, 1), "/"),
-		Description:  compact(description, 240),
-		Source:       source,
-		ArgumentHint: compact(metadata["argument-hint"], 120),
-	}
+	command := skillCommand(formattedCommand(format, name), description, source, metadata)
+	return &command
 }
 
 func descriptionFrom(fm map[string]string, data []byte) string {
 	if desc := fm["description"]; desc != "" {
-		return compact(desc, 120)
+		return textutil.Compact(desc, 120)
 	}
 	return extractFirstLineBytes(data)
 }
@@ -468,7 +437,7 @@ func extractFirstLineBytes(data []byte) string {
 		if trimmed == "" || strings.HasPrefix(trimmed, "---") || strings.HasPrefix(trimmed, "#") {
 			continue
 		}
-		return compact(trimmed, 120)
+		return textutil.Compact(trimmed, 120)
 	}
 	return ""
 }

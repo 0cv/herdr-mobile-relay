@@ -2,6 +2,7 @@ package herdr
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 )
@@ -24,4 +25,14 @@ func TestPaneProcessInfoDecodesForegroundProcess(t *testing.T) {
 	if process.PID != 202 || process.Name != "codex" || process.Cwd != "/work" || len(process.Argv) != 2 {
 		t.Fatalf("foreground process = %#v", process)
 	}
+}
+
+func (c *Client) PaneProcessInfo(ctx context.Context, paneID string) (*PaneProcessInfo, error) {
+	var result struct {
+		ProcessInfo PaneProcessInfo `json:"process_info"`
+	}
+	if err := c.runResult(ctx, &result, "pane", "process-info", "--pane", paneID); err != nil {
+		return nil, fmt.Errorf("herdr pane process info: %w", err)
+	}
+	return &result.ProcessInfo, nil
 }

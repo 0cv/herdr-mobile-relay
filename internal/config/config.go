@@ -8,7 +8,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 )
@@ -39,12 +38,7 @@ type Config struct {
 	LogFormat      string
 	LogLevel       slog.Level
 	ReleaseRoot    string
-	ServiceName    string
 
-	// GatewayURL is the configured tie-break leader, kept equal to
-	// GatewayURLs[0] so readers that only know one gateway keep working. The
-	// transport may select another healthy entry at runtime.
-	GatewayURL  string
 	GatewayURLs []string
 	// GatewayRegistrationToken is the optional self-hosted registration secret.
 	GatewayRegistrationToken string
@@ -63,7 +57,6 @@ type Config struct {
 
 	CacheDir   string
 	ConfigHome string
-	DataHome   string
 }
 
 func Load() (*Config, error) {
@@ -79,7 +72,6 @@ func Load() (*Config, error) {
 		SocketPath:   os.Getenv("HERDR_SOCKET_PATH"),
 		PollInterval: envFloatOr("HERDR_RELAY_POLL_INTERVAL", 2.0),
 		LogFormat:    envOr("HERDR_RELAY_LOG_FORMAT", "text"),
-		ServiceName:  envOr("HERDR_RELAY_SERVICE_NAME", defaultServiceName()),
 
 		WebRTCUDPPort:       envIntOr("HERDR_WEBRTC_UDP_PORT", 0),
 		ForceRelayTransport: envBoolOr("HERDR_TRANSPORT_FORCE_RELAY", false),
@@ -106,20 +98,17 @@ func Load() (*Config, error) {
 	// means. A single value is one entry and behaves exactly as it always did.
 	cfg.GatewayURLs = parseGatewayURLs(os.Getenv("HERDR_GATEWAY_URL"))
 	cfg.GatewayRegistrationToken = os.Getenv("HERDR_GATEWAY_REGISTRATION_TOKEN")
-	if len(cfg.GatewayURLs) > 0 {
-		cfg.GatewayURL = cfg.GatewayURLs[0]
-	}
 	cfg.GatewaySelection = parseGatewaySelection(os.Getenv("HERDR_GATEWAY_SELECTION"))
 
 	cfg.ConfigHome = envOr("XDG_CONFIG_HOME", filepath.Join(homeDir(), ".config"))
 	cacheHome := envOr("XDG_CACHE_HOME", filepath.Join(homeDir(), ".cache"))
-	cfg.DataHome = envOr("XDG_DATA_HOME", filepath.Join(homeDir(), ".local", "share"))
+	dataHome := envOr("XDG_DATA_HOME", filepath.Join(homeDir(), ".local", "share"))
 	cfg.ReleaseRoot = os.Getenv("HERDR_RELEASE_ROOT")
 	if cfg.ReleaseRoot == "" {
 		cfg.ReleaseRoot = InstalledReleaseRoot()
 	}
 	if cfg.ReleaseRoot == "" {
-		cfg.ReleaseRoot = filepath.Join(cfg.DataHome, "herdr-mobile-relay")
+		cfg.ReleaseRoot = filepath.Join(dataHome, "herdr-mobile-relay")
 	}
 
 	if cfg.SocketPath == "" {
@@ -132,7 +121,6 @@ func Load() (*Config, error) {
 		cfg.SocketPath = coreSocketPath(filepath.Join("/run/user", strconv.Itoa(os.Getuid())))
 		cfg.Port = envIntOr("HERDR_RELAY_PORT", 8377)
 		cfg.PluginPort = envIntOr("HERDR_RELAY_PLUGIN_PORT", 8378)
-		cfg.ServiceName = envOr("HERDR_RELAY_SERVICE_NAME", strings.TrimSuffix(defaultServiceName(), ".service")+"-hc.service")
 		cfg.RuntimeDir = filepath.Join(cfg.ConfigHome, "herdr-mobile-relay-hc")
 		if env := os.Getenv("HERDR_RELAY_ENV"); env != "" {
 			cfg.RuntimeDir = filepath.Dir(env)
@@ -245,13 +233,6 @@ func InstalledReleaseRoot() string {
 		return ""
 	}
 	return root
-}
-
-func defaultServiceName() string {
-	if runtime.GOOS == "darwin" {
-		return "com.herdr-mobile-relay.service"
-	}
-	return "herdr-mobile-relay.service"
 }
 
 func findHerdrBin() string {

@@ -15,7 +15,7 @@ type grokCaptureMutationContext struct {
 
 func (ctx *grokCaptureMutationContext) Err() error {
 	ctx.checks++
-	if ctx.checks == 2 {
+	if ctx.checks == 1024 {
 		ctx.mutate()
 	}
 	return ctx.Context.Err()
@@ -35,11 +35,7 @@ func TestGrokAppendDuringCapture(t *testing.T) {
 				reader, home := testReader(t)
 				path := grokUpdatesPath(home, grokCWD, testSessionID)
 				grokTurns(600).write(t, path)
-				browser, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer browser.Close()
+				browser := newTestBrowser(t, reader, DefaultBrowserOptions())
 				scope := normalizeBrowseScope(BrowseScope{Provider: "grok", CWD: grokCWD, SessionID: testSessionID})
 				initial, err := browser.ReadPage(t.Context(), BrowseRequest{Scope: scope, Limit: 2})
 				if err != nil || initial.NextCursor == "" {
@@ -54,7 +50,7 @@ func TestGrokAppendDuringCapture(t *testing.T) {
 				}
 				mutated := false
 				ctx := &grokCaptureMutationContext{Context: t.Context(), mutate: func() {
-					// The second parser cancellation checkpoint follows 1,024 records.
+					// Cancellation checks happen while records are read, so this fires mid-capture.
 					mutated = true
 					if rewrite {
 						file, err := os.OpenFile(path, os.O_RDWR, 0)

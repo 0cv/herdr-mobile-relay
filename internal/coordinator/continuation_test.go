@@ -7,7 +7,7 @@ import (
 )
 
 func TestContinuationReleasesCapacityAndKeepsLedgerPending(t *testing.T) {
-	s := NewScheduler(2, testLogger())
+	s := NewScheduler(2)
 	release := make(chan struct{})
 	t.Cleanup(func() {
 		select {
@@ -20,7 +20,7 @@ func TestContinuationReleasesCapacityAndKeepsLedgerPending(t *testing.T) {
 	entered := make(chan struct{})
 	blockerDone := make(chan struct{})
 	options := func(id string, pane string) ScheduleOptions {
-		return ScheduleOptions{Command: Command{RequestID: id, Kind: CommandPrompt, PaneID: pane, Deadline: time.Now().Add(5 * time.Second)}}
+		return ScheduleOptions{Command: Command{RequestID: id, Action: "submit_prompt", PaneID: pane, Deadline: time.Now().Add(5 * time.Second)}}
 	}
 	go func() {
 		defer close(blockerDone)
@@ -73,7 +73,7 @@ func TestContinuationReleasesCapacityAndKeepsLedgerPending(t *testing.T) {
 func TestContinuationInvalidationIsCachedWarning(t *testing.T) {
 	for _, mode := range []string{"expired", "replaced", "shutdown"} {
 		t.Run(mode, func(t *testing.T) {
-			s := NewScheduler(2, testLogger())
+			s := NewScheduler(2)
 			release := make(chan struct{})
 			t.Cleanup(func() {
 				select {
@@ -94,7 +94,7 @@ func TestContinuationInvalidationIsCachedWarning(t *testing.T) {
 			}()
 			<-entered
 			ready := make(chan struct{})
-			options := ScheduleOptions{Command: Command{RequestID: "launch", Kind: CommandStart, Deadline: deadline}, RelayLevel: true, LedgerKey: "launch", PayloadHash: "payload"}
+			options := ScheduleOptions{Command: Command{RequestID: "launch", Action: "agent_start", Deadline: deadline}, RelayLevel: true, LedgerKey: "launch", PayloadHash: "payload"}
 			results := make(chan *CommandResult, 1)
 			go func() {
 				result, _ := s.Execute(context.Background(), options, EffectFunc(func(context.Context, WorkerToken) EffectResult {
@@ -114,7 +114,7 @@ func TestContinuationInvalidationIsCachedWarning(t *testing.T) {
 			}()
 			<-ready
 			if mode == "replaced" {
-				s.ApplyTopology(map[string]bool{"pane": true}, map[string]uint64{"pane": 1})
+				s.ApplyTopology(map[string]bool{"pane": true}, map[string]int64{"pane": 1})
 			}
 			if mode == "shutdown" {
 				s.CancelInflight()

@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AttachmentBatchController } from '$lib/attachments';
 import { dailyActivitySummary, formatWorkingDuration } from '$lib/daily-activity';
-import { fencedCodeText, linkifyPlainText, safeExternalUrl, safeMarkdownHtml, speakableText } from '$lib/markdown';
+import { fencedCodeText, safeMarkdownHtml, speakableText } from '$lib/markdown';
+import { safeExternalUrl } from '$lib/rich-output';
 import { detectTerminalMenu, terminalTextInputMode } from '$lib/terminal-menu';
 import { escapeHtml, linkifyTerminalText, renderTerminalContent } from '$lib/terminal';
 import type { Activity, Agent, RelayWorkspace } from '$lib/types';
-import { homeRelativePath, informativePath, relayWorkspaceTrees, workspaceGroups, workspaceProvenance, workspaceStateTone } from '$lib/workspaces';
+import { homeRelativePath, informativePath, relayWorkspaceTrees, workspaceGroups, workspaceRecordsFor, workspaceProvenance, workspaceStateTone } from '$lib/workspaces';
 
 function agent(overrides: Partial<Agent>): Agent {
   return {
@@ -126,6 +127,37 @@ describe('workspace navigation', () => {
       workspaceIds: ['work-1', 'work-2'],
     });
     expect(trees[1].workspace.workspace_id).toBe('work-3');
+  });
+
+  it('selects workspaces with their repository and unoccupied children across relays', () => {
+    const repo = { repo_key: 'repo-key', repo_name: 'mobile', repo_root: '/home/user/mobile' };
+    const parent = workspace({ worktree: { ...repo, checkout_path: '/home/user/mobile', is_linked_worktree: false } });
+    const child = workspace({ workspace_id: 'child', worktree: { ...repo, checkout_path: '/worktrees/child', is_linked_worktree: true } });
+    const emptyChild = workspace({ workspace_id: 'empty-child', worktree: { ...child.worktree! } });
+    const orphan = workspace({ relay_id: 'relay-b', workspace_id: 'orphan', worktree: { ...child.worktree! } });
+    const unkeyed = workspace({ workspace_id: 'unkeyed', worktree: { ...child.worktree!, repo_key: '' } });
+    const shell = workspace({ workspace_id: 'shell' });
+    const records = [parent, child, emptyChild, orphan, unkeyed, shell];
+    const parentAgent = agent({ workspace_id: parent.workspace_id });
+    const childAgent = agent({ workspace_id: child.workspace_id, pane_id: 'relay-a::child' });
+
+    expect(workspaceRecordsFor([childAgent], [parentAgent, childAgent], records, false)).toEqual([parent, child]);
+    expect(workspaceRecordsFor([parentAgent], [parentAgent, childAgent], records, false)).toEqual([parent, emptyChild]);
+    expect(workspaceRecordsFor([], [parentAgent, childAgent], records, true)).toEqual([orphan, unkeyed, shell]);
+    expect(workspaceRecordsFor([], [], records, false)).toEqual([]);
+    expect(workspaceRecordsFor([], [], records, true)).toEqual(records);
+  });
+
+  it('keeps repository selection and nesting stable when a repository is open twice', () => {
+    const repo = { repo_key: 'repo-key', repo_name: 'mobile', repo_root: '/home/user/mobile' };
+    const first = workspace({ worktree: { ...repo, checkout_path: '/home/user/mobile', is_linked_worktree: false } });
+    const second = workspace({ ...first, workspace_id: 'second' });
+    const child = workspace({ workspace_id: 'child', worktree: { ...repo, checkout_path: '/worktrees/child', is_linked_worktree: true } });
+    const childAgent = agent({ workspace_id: child.workspace_id });
+    const records = [first, second, child];
+
+    expect(workspaceRecordsFor([childAgent], [childAgent], records, false)).toEqual([first, child]);
+    expect(relayWorkspaceTrees(records).map(tree => tree.workspaceIds)).toEqual([[first.workspace_id], [second.workspace_id, child.workspace_id]]);
   });
 
   it('shows workspace provenance and worktree paths only when informative', () => {
@@ -286,14 +318,14 @@ describe('rendering without Intl.Segmenter', () => {
     const intl = Intl as unknown as { Segmenter?: typeof Intl.Segmenter };
     const segmenter = intl.Segmenter;
     const grid = '┌───┬──┐\n│ ab │漢 │';
-    const expected = renderTerminalContent(grid, 'ansi', true).rows;
+    const expected = renderTerminalContent(grid, 'ansi', { preserveLayout: true }).rows;
     delete intl.Segmenter;
     try {
       vi.resetModules();
       // Static import cannot work: the module must be evaluated again with
       // Intl.Segmenter absent to exercise the feature-detected fallback.
       const terminal = await import('$lib/terminal');
-      const rows = terminal.renderTerminalContent(grid, 'ansi', true).rows;
+      const rows = terminal.renderTerminalContent(grid, 'ansi', { preserveLayout: true }).rows;
 
       expect(rows.map((row) => [row.text, row.columns, row.fixedGrid]))
         .toEqual(expected.map((row) => [row.text, row.columns, row.fixedGrid]));
@@ -383,9 +415,9 @@ describe('daily activity summary', () => {
 });
 
 describe('attachment batches', () => {
-  it('uses one monotonically increasing sequence across every file', async () => {
+  it('uses one increasing sequence and returns files in selection order', async () => {
     const sequences: number[] = [];
-    const names = ['first.txt', 'second.txt'];
+    const names = ['zebra.txt', 'apple.txt'];
     const controller = new AttachmentBatchController({
       server_session_id: 'server-session',
       pane_id: 'pane',
@@ -429,111 +461,9 @@ describe('attachment batches', () => {
       new File(['cd'], names[1], { type: 'text/plain' }),
     ]);
 
-    await expect(controller.upload()).resolves.toHaveLength(2);
+    const attachments = await controller.upload();
+    expect(attachments.map((attachment) => attachment.name)).toEqual(names);
     expect(sequences).toEqual([0, 1]);
-  });
-
-  it('falls back to incremental hashing when the worker fails after construction', async () => {
-    const terminate = vi.fn();
-    class FailingWorker {
-      private errorListener?: EventListenerOrEventListenerObject;
-      addEventListener(type: string, listener: EventListenerOrEventListenerObject) {
-        if (type === 'error') this.errorListener = listener;
-      }
-      postMessage() {
-        queueMicrotask(() => {
-          if (typeof this.errorListener === 'function') this.errorListener(new Event('error'));
-          else this.errorListener?.handleEvent(new Event('error'));
-        });
-      }
-      terminate() { terminate(); }
-    }
-    vi.stubGlobal('Worker', FailingWorker);
-    const finish = vi.fn(async (request) => ({
-      attachments: [{
-        ref: 'ref-fallback',
-        name: 'note.txt',
-        media_type: 'text/plain',
-        bytes: 4,
-        sha256: request.files[0].sha256,
-        expires_at: new Date(Date.now() + 60_000).toISOString(),
-      }],
-    }));
-    const controller = new AttachmentBatchController({
-      server_session_id: 'server-session', pane_id: 'pane', terminal_id: 'terminal', generation: 1,
-    }, {
-      begin: async () => ({
-        upload_id: 'upload-fallback',
-        chunk_bytes: 2,
-        expires_at: new Date(Date.now() + 60_000).toISOString(),
-        limits: { max_files: 1, max_file_bytes: 1024, max_batch_bytes: 1024 },
-      }),
-      chunk: async (request) => ({
-        file_index: request.file_index,
-        next_sequence: request.sequence + 1,
-        received_bytes: (request.sequence + 1) * request.data.byteLength,
-      }),
-      finish,
-      cancel: async () => undefined,
-    }, {
-      maxFiles: 1, maxFileBytes: 1024, maxBatchBytes: 1024, maxChunkBytes: 2,
-    });
-    controller.select([new File(['note'], 'note.txt', { type: 'text/plain' })]);
-    try {
-      await expect(controller.upload()).resolves.toHaveLength(1);
-      expect(finish).toHaveBeenCalledOnce();
-      expect(finish.mock.calls[0][0].files[0].sha256).toMatch(/^[0-9a-f]{64}$/);
-      expect(terminate).toHaveBeenCalledOnce();
-    } finally {
-      vi.unstubAllGlobals();
-    }
-  });
-
-  it('terminates and settles every queued worker hash when cancelled', async () => {
-    const terminate = vi.fn();
-    let posted = 0;
-    class WaitingWorker {
-      addEventListener() {}
-      postMessage() { posted += 1; }
-      terminate() { terminate(); }
-    }
-    vi.stubGlobal('Worker', WaitingWorker);
-    const cancel = vi.fn(async () => undefined);
-    const finish = vi.fn(async () => ({ attachments: [] }));
-    const controller = new AttachmentBatchController({
-      server_session_id: 'server-session', pane_id: 'pane', terminal_id: 'terminal', generation: 1,
-    }, {
-      begin: async () => ({
-        upload_id: 'upload-cancel-hash',
-        chunk_bytes: 4,
-        expires_at: new Date(Date.now() + 60_000).toISOString(),
-        limits: { max_files: 2, max_file_bytes: 1024, max_batch_bytes: 2048 },
-      }),
-      chunk: async (request) => ({
-        file_index: request.file_index,
-        next_sequence: request.sequence + 1,
-        received_bytes: request.data.byteLength,
-      }),
-      finish,
-      cancel,
-    }, {
-      maxFiles: 2, maxFileBytes: 1024, maxBatchBytes: 2048, maxChunkBytes: 4,
-    });
-    controller.select([
-      new File(['one'], 'one.txt', { type: 'text/plain' }),
-      new File(['two'], 'two.txt', { type: 'text/plain' }),
-    ]);
-    const upload = controller.upload();
-    try {
-      await vi.waitFor(() => expect(posted).toBe(2));
-      await expect(controller.cancel()).resolves.toBeUndefined();
-      await expect(upload).resolves.toEqual([]);
-      expect(terminate).toHaveBeenCalledOnce();
-      expect(cancel).toHaveBeenCalledWith(expect.objectContaining({ upload_id: 'upload-cancel-hash' }));
-      expect(finish).not.toHaveBeenCalled();
-    } finally {
-      vi.unstubAllGlobals();
-    }
   });
 
   it('shows overflow files and accepts iOS photo MIME types', () => {
@@ -660,7 +590,7 @@ describe('attachment batches', () => {
 describe('rich output public-consumer characterization', () => {
   it('preserves all five entities and double escaping through public consumers', () => {
     expect(escapeHtml('&<>"\' &amp;')).toBe('&amp;&lt;&gt;&quot;&#39; &amp;amp;');
-    expect(linkifyPlainText('&<>"\' &amp;')).toBe('&amp;&lt;&gt;&quot;&#39; &amp;amp;');
+    expect(linkifyTerminalText('&<>"\' &amp;')).toBe('&amp;&lt;&gt;&quot;&#39; &amp;amp;');
     expect(safeMarkdownHtml('&<>"\' &amp;')).toBe('<p>&amp;&lt;&gt;&quot;&#39; &amp;amp;</p>');
   });
 
@@ -691,7 +621,6 @@ describe('rich output public-consumer characterization', () => {
   });
 
   it('does not extend link recognition to every native URL-accepted form', () => {
-    expect(linkifyPlainText('https:example.com/a')).toBe('https:example.com/a');
     expect(linkifyTerminalText('https:example.com/a')).toBe('https:example.com/a');
     expect(safeMarkdownHtml('https:example.com/a')).toBe('<p>https:example.com/a</p>');
   });
@@ -703,14 +632,12 @@ describe('rich output public-consumer characterization', () => {
     ['https://example.com/a([)]', '<a href="https://example.com/a([)]" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">https://example.com/a([)]</a>', '<a class="terminal-link" href="https://example.com/a([)]" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">https://example.com/a([)]</a>'],
     ['https://example.com/a(b))].,;:!?', '<a href="https://example.com/a(b)" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">https://example.com/a(b)</a>)].,;:!?', '<a class="terminal-link" href="https://example.com/a(b)" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">https://example.com/a(b)</a>)].,;:!?'],
   ])('preserves punctuation bytes for %s across consumers', (value, markdown, terminal) => {
-    expect(linkifyPlainText(value)).toBe(markdown);
     expect(safeMarkdownHtml(value)).toBe(`<p>${markdown}</p>`);
     expect(linkifyTerminalText(value)).toBe(terminal);
   });
 
   it('separates canonical encoded hrefs from escaped original display text', () => {
     const value = 'HTTPS://ExAmPlE.COM:443/café/%2F?q=é&x=%20#été';
-    expect(linkifyPlainText(value)).toBe('<a href="https://example.com/caf%C3%A9/%2F?q=%C3%A9&amp;x=%20#%C3%A9t%C3%A9" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">HTTPS://ExAmPlE.COM:443/café/%2F?q=é&amp;x=%20#été</a>');
     expect(safeMarkdownHtml(value)).toBe('<p><a href="https://example.com/caf%C3%A9/%2F?q=%C3%A9&amp;x=%20#%C3%A9t%C3%A9" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">HTTPS://ExAmPlE.COM:443/café/%2F?q=é&amp;x=%20#été</a></p>');
     expect(linkifyTerminalText(value)).toBe('<a class="terminal-link" href="https://example.com/caf%C3%A9/%2F?q=%C3%A9&amp;x=%20#%C3%A9t%C3%A9" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">HTTPS://ExAmPlE.COM:443/café/%2F?q=é&amp;x=%20#été</a>');
   });

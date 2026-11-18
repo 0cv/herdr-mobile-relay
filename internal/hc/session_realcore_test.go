@@ -93,7 +93,7 @@ func TestRealCoreAgentSession(t *testing.T) {
 		}
 		for _, p := range panes {
 			if p.ID == result.Address {
-				return p.Session == want && p.SessionRaw.Value == want
+				return p.Session.Value == want
 			}
 		}
 		return false

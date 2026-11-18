@@ -17,13 +17,13 @@ func TestTopologyCacheCannotRevertPolledNativeSession(t *testing.T) {
 			session.Store("current-session")
 			var active atomic.Bool
 			active.Store(true)
-			socket := startPollerTestSocket(t, func(method string) (any, string) {
+			socket := startSocketFixture(t, func(method string) (any, string) {
 				if method == "agent.list" {
 					if !active.Load() {
 						return map[string]any{"type": "agent_list", "agents": []herdr.Pane{}}, ""
 					}
 					current := pane
-					current.SessionRaw.Value = session.Load().(string)
+					current.Session.Value = session.Load().(string)
 					return map[string]any{"type": "agent_list", "agents": []herdr.Pane{current}}, ""
 				}
 				return pollerSuccessResult(method), ""
@@ -42,8 +42,7 @@ func TestTopologyCacheCannotRevertPolledNativeSession(t *testing.T) {
 			poller.poll(context.Background())
 			before, _ := state.Agent("pane")
 			cached := pane
-			cached.Session = cachedSession
-			cached.SessionRaw.Value = cachedSession
+			cached.Session.Value = cachedSession
 			for range 3 {
 				poller.commitEventTopology(context.Background(), herdr.TopologySnapshot{Panes: []herdr.Pane{cached}}, state.RevisionCounter())
 				after, ok := state.Agent("pane")
@@ -71,7 +70,7 @@ func TestTopologyCacheCannotRevertPolledNativeSession(t *testing.T) {
 }
 
 func TestEventInventoryFailureDoesNotPublishCachedSession(t *testing.T) {
-	socket := startPollerTestSocket(t, func(string) (any, string) {
+	socket := startSocketFixture(t, func(string) (any, string) {
 		return nil, "internal_error"
 	})
 	client := herdr.NewClient("unused", socket)

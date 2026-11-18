@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/agentkind"
 	"github.com/0cv/herdr-mobile-relay/internal/sqliteexec"
 )
 
@@ -52,7 +53,7 @@ type databaseLiveRow struct {
 }
 
 func (b *Browser) NewDatabaseWatch(scope BrowseScope) *DatabaseWatch {
-	if normalizedAgent(scope.Provider) != "opencode" && !isHermesAgent(scope.Provider) {
+	if kind := agentkind.Of(scope.Provider); kind != agentkind.OpenCode && kind != agentkind.Hermes {
 		return nil
 	}
 	return &DatabaseWatch{browser: b, scope: scope, loaded: make(map[string][32]byte), completed: make(map[string][32]byte)}
@@ -129,9 +130,9 @@ func (w *DatabaseWatch) observe(page BrowsePage, replace bool) {
 
 func (w *DatabaseWatch) executor() sqliteexec.Executor {
 	if w.format == "hermes" {
-		return w.browser.reader.hermes.queryExec()
+		return w.browser.reader.hermes.executor
 	}
-	return w.browser.reader.openCode.queryExec()
+	return w.browser.reader.openCode.executor
 }
 
 func (w *DatabaseWatch) query(ctx context.Context, query string, result any) string {
@@ -191,7 +192,7 @@ func (w *DatabaseWatch) highwater(ctx context.Context) (int64, string) {
 func (w *DatabaseWatch) source(ctx context.Context) string {
 	var databases []string
 	var code string
-	hermes := isHermesAgent(w.scope.Provider)
+	hermes := agentkind.Of(w.scope.Provider) == agentkind.Hermes
 	if hermes {
 		if !safeSessionID(w.scope.SessionID) {
 			return "invalid_session"
@@ -483,6 +484,8 @@ func (w *DatabaseWatch) hermesSessionRangeIndexed(ctx context.Context, query str
 	return found
 }
 
+const hermesLiveColumns = "id AS message_id,session_id AS session,role,hex(COALESCE(content,'')) AS content_hex,COALESCE(tool_call_id,'') AS tool_call_id,COALESCE(tool_calls,'') AS tool_calls,COALESCE(tool_name,'') AS tool_name,COALESCE(display_kind,'') AS display_kind,COALESCE(timestamp,0) AS timestamp,active,compacted"
+
 func (w *DatabaseWatch) hermesEntries(ctx context.Context) ([]Entry, string) {
 	if len(w.loaded) == 0 {
 		return nil, ""
@@ -503,10 +506,10 @@ func (w *DatabaseWatch) hermesEntries(ctx context.Context) ([]Entry, string) {
 		Active    int    `json:"active"`
 		Compacted int    `json:"compacted"`
 	}
-	selection := fmt.Sprintf("SELECT id AS message_id,session_id AS session,role,hex(COALESCE(content,'')) AS content_hex,COALESCE(tool_call_id,'') AS tool_call_id,COALESCE(tool_calls,'') AS tool_calls,COALESCE(tool_name,'') AS tool_name,COALESCE(display_kind,'') AS display_kind,COALESCE(timestamp,0) AS timestamp,active,compacted FROM messages WHERE session_id=%s AND rowid>=%d ORDER BY rowid LIMIT %d", databaseSQLText(w.scope.SessionID), minimum, databaseLiveRows+1)
+	selection := fmt.Sprintf("SELECT "+hermesLiveColumns+" FROM messages WHERE session_id=%s AND rowid>=%d ORDER BY rowid LIMIT %d", databaseSQLText(w.scope.SessionID), minimum, databaseLiveRows+1)
 	query := selection
 	if !w.hermesSessionRangeIndexed(ctx, selection) {
-		query = fmt.Sprintf("SELECT id AS message_id,session_id AS session,role,hex(COALESCE(content,'')) AS content_hex,COALESCE(tool_call_id,'') AS tool_call_id,COALESCE(tool_calls,'') AS tool_calls,COALESCE(tool_name,'') AS tool_name,COALESCE(display_kind,'') AS display_kind,COALESCE(timestamp,0) AS timestamp,active,compacted FROM messages NOT INDEXED WHERE rowid>=%d ORDER BY rowid LIMIT %d", minimum, databaseLiveRows+1)
+		query = fmt.Sprintf("SELECT "+hermesLiveColumns+" FROM messages NOT INDEXED WHERE rowid>=%d ORDER BY rowid LIMIT %d", minimum, databaseLiveRows+1)
 	}
 	if code := w.query(ctx, query, &rows); code != "" {
 		return nil, code
@@ -518,15 +521,12 @@ func (w *DatabaseWatch) hermesEntries(ctx context.Context) ([]Entry, string) {
 		row    hermesRow
 		active int
 	}
-	logical := make(map[[32]byte]logicalRow)
+	logical := make(map[hermesLogicalKey]logicalRow)
 	for _, row := range rows {
 		if row.Session != w.scope.SessionID || row.Active != 1 && row.Compacted != 1 || row.DisplayKind == "hidden" {
 			continue
 		}
-		keyRow := row.hermesRow
-		keyRow.MessageID, keyRow.DisplayKind = 0, ""
-		raw, _ := json.Marshal(keyRow)
-		key := sha256.Sum256(raw)
+		key := row.logicalKey()
 		prior, exists := logical[key]
 		if !exists {
 			logical[key] = logicalRow{row.hermesRow, row.Active}

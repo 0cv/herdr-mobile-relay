@@ -50,7 +50,9 @@ func TestTUIBackendCapabilities(t *testing.T) {
 		}
 	}
 	assertCapabilities("construction")
-	client.RefreshCapabilities(context.Background())
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	client.RunCapabilityRefresh(ctx, 0)
 	assertCapabilities("failed refresh")
 	client.InvalidateLiveCapabilities()
 	assertCapabilities("invalidation")

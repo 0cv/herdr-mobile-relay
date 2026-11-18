@@ -2,6 +2,7 @@ package conversation
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,11 +20,7 @@ func TestKimiInferredDuplicateRootArchiveCursor(t *testing.T) {
 	path := kimiFixture(t, first, kimiWorkspaceKey(cwd), id, cwd, "First", 1, wire)
 	kimiFixture(t, second, kimiWorkspaceKey(cwd), id, cwd, "Second", 2, []byte(strings.ReplaceAll(string(wire), "ROOT_A", "ROOT_B")))
 	reader := NewReader(home)
-	browser, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
 	project := ProjectContext{CWD: cwd}
 	selected, location, code := reader.SelectKimiSession(project, "")
 	scope := BrowseScope{Provider: "kimi", CWD: cwd, SessionID: selected, InferredSession: true, SelectionSource: KimiSourceIdentity(location)}
@@ -61,17 +58,17 @@ func TestKimiInferredDuplicateRootArchiveCursor(t *testing.T) {
 	if err != nil || len(stale.Entries) != 0 || stale.ReasonCode != "invalid_cursor" {
 		t.Fatalf("cross-root cursor=%+v %v", stale, err)
 	}
-	bound, err := reader.ReadKimiSource(t.Context(), next, "", 1)
-	if err != nil || !bound.Available || len(bound.Entries) != 1 || !strings.Contains(bound.Entries[0].Text, "ROOT_B") {
+	bound, err := reader.ReadKimiSource(t.Context(), next, 1)
+	if err != nil || len(bound) != 1 || !strings.Contains(bound[0].Text, "ROOT_B") {
 		t.Fatalf("source-bound read=%+v %v", bound, err)
 	}
-	obsolete, err := reader.ReadKimiSource(t.Context(), scope, "", 1)
-	if err != nil || obsolete.Available || len(obsolete.Entries) != 0 {
+	obsolete, err := reader.ReadKimiSource(t.Context(), scope, 1)
+	if !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("obsolete source read=%+v %v", obsolete, err)
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	if page, err := reader.ReadKimiSource(ctx, next, "", 1); err == nil || len(page.Entries) != 0 {
+	if entries, err := reader.ReadKimiSource(ctx, next, 1); err == nil || len(entries) != 0 {
 		t.Fatal("canceled source read exported entries")
 	}
 	reported := scope
@@ -80,15 +77,15 @@ func TestKimiInferredDuplicateRootArchiveCursor(t *testing.T) {
 	if err != nil || !old.Available || !strings.Contains(old.Entries[0].Text, "ROOT_A") {
 		t.Fatalf("reported-ID policy changed=%+v %v", old, err)
 	}
-	legacy, err := reader.ReadWithProject("kimi", project, id, "", 1)
-	if err != nil || !legacy.Available || !strings.Contains(legacy.Entries[0].Text, "ROOT_A") {
+	latest, err := reader.ReadLatest("kimi", project, id, 1)
+	if err != nil || len(latest) == 0 || !strings.Contains(latest[0].Text, "ROOT_A") {
 		t.Fatal("reported-ID reader policy changed")
 	}
 	if err := os.Remove(location.Path); err != nil {
 		t.Fatal(err)
 	}
-	missing, err := reader.ReadKimiSource(t.Context(), next, "", 1)
-	if err != nil || missing.Available || len(missing.Entries) != 0 {
+	_, err = reader.ReadKimiSource(t.Context(), next, 1)
+	if !errors.Is(err, ErrUnavailable) {
 		t.Fatal("missing selected source fell back to archived duplicate")
 	}
 }

@@ -6,15 +6,15 @@ Control agents from the [Herdr](https://herdr.dev) TUI, herdr-app or herdr-core
 from your phone. Each Linux or macOS computer runs its own relay; the phone
 connects to them and merges every agent into one installable web app.
 
-**Current version:** [`0.25.1`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.25.1) · [Changelog](CHANGELOG.md)
+**Current version:** [`0.26.0`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.26.0) · [Changelog](CHANGELOG.md)
 
 > [!IMPORTANT]
 > Native Windows is not supported. WSL2 may work but is not tested.
 
 > [!WARNING]
-> 0.20.0 replaces the shared relay key with per-device credentials and a new
-> encrypted transport. It cannot be installed through the phone updater:
-> [upgrade the relay manually and pair every phone again](docs/updates.md#upgrading-from-v0191).
+> Installs older than 0.20.0 must be uninstalled before installing this version.
+> Install the relay again using the steps below, then pair every phone again;
+> the phone updater cannot cross this encrypted-transport boundary.
 
 ## Get started in two minutes
 
@@ -90,7 +90,7 @@ Control herdr-app and herdr-core (`hc`) agents from your phone through a second
 relay, shown as `<hostname> (core)` beside the Herdr TUI relay.
 Tested with herdr-core **0.1.18** and herdr-app **0.1.13** (also **0.1.12**).
 
-- Available: agents, status, screens, prompts, keys, secrets, start/stop/clear/restart,
+- Available: agents, status, screens, prompts, keys, secrets, start/stop/clear,
   tab and workspace rename and reorder, and **Resize Session**.
 - **Conversation** supports Pi, Claude Code, Codex, Cursor, Omp, OpenCode, Hermes,
   Qoder, agy, Grok and Kimi, with the session setup described in the guide.
@@ -100,8 +100,8 @@ Tested with herdr-core **0.1.18** and herdr-app **0.1.13** (also **0.1.12**).
 
 If you use the Herdr TUI, the setup menu above sets up the TUI relay, the core
 relay, or both, and each QR says which computer it adds. Without the TUI,
-download `install.sh` from this repository at tag `v0.25.1` and run
-`sh install.sh 0.25.1`; it downloads and verifies the release bundle and prints
+download `install.sh` from this repository at tag `v0.26.0` and run
+`sh install.sh 0.26.0`; it downloads and verifies the release bundle and prints
 the command that opens the same menu. Core pairs over Tailscale or Cloudflare;
 see the [core guide](docs/herdr-core.md).
 

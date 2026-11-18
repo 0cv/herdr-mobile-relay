@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
@@ -14,6 +13,9 @@ import (
 func TestGrokCachedDirectoryReplacementIsContained(t *testing.T) {
 	for _, paginated := range []bool{false, true} {
 		for _, browserPath := range []bool{false, true} {
+			if paginated && !browserPath {
+				continue
+			}
 			name := "reader"
 			if browserPath {
 				name = "browser"
@@ -25,11 +27,7 @@ func TestGrokCachedDirectoryReplacementIsContained(t *testing.T) {
 				reader, home := testReader(t)
 				path := grokUpdatesPath(home, grokCWD, testSessionID)
 				grokTurns(3).write(t, path)
-				browser, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer browser.Close()
+				browser := newTestBrowser(t, reader, DefaultBrowserOptions())
 				scope := BrowseScope{Provider: "grok", CWD: grokCWD, SessionID: testSessionID}
 				cursor := ""
 				if browserPath {
@@ -41,12 +39,9 @@ func TestGrokCachedDirectoryReplacementIsContained(t *testing.T) {
 						cursor = page.NextCursor
 					}
 				} else {
-					page := readGrok(t, reader, "", 2)
-					if len(page.Entries) != 2 {
+					page := readGrok(t, reader, 2)
+					if len(page) != 2 {
 						t.Fatalf("initial page = %#v", page)
-					}
-					if paginated {
-						cursor = page.Entries[0].ID
 					}
 				}
 				outside := t.TempDir()
@@ -69,8 +64,8 @@ func TestGrokCachedDirectoryReplacementIsContained(t *testing.T) {
 					}
 					payload = page
 				} else {
-					page, err := reader.ReadFor("grok", grokCWD, testSessionID, cursor, 2)
-					if err == nil && page.Available {
+					page, err := reader.ReadLatest("grok", ProjectContext{CWD: grokCWD}, testSessionID, 2)
+					if err == nil {
 						t.Fatalf("outside source accepted: %#v", page)
 					}
 					payload = page
@@ -98,7 +93,7 @@ func TestGrokUntaggedInterjectionsRemainSeparate(t *testing.T) {
 		})
 	}
 	f.write(t, grokUpdatesPath(home, grokCWD, testSessionID))
-	assertGrokTexts(t, readGrok(t, reader, "", 80).Entries, "user:first", "user:second")
+	assertGrokTexts(t, readGrok(t, reader, 80), "user:first", "user:second")
 }
 
 func TestGrokHiddenEventsCloseUntaggedTurns(t *testing.T) {
@@ -113,9 +108,9 @@ func TestGrokHiddenEventsCloseUntaggedTurns(t *testing.T) {
 			f.other(kind)
 			f.rewind(1)
 			f.write(t, grokUpdatesPath(home, grokCWD, testSessionID))
-			page := readGrok(t, reader, "", 80)
-			assertGrokTexts(t, page.Entries, "user:first\ncontinued")
-			if page.SourceCorrupt {
+			page := readGrok(t, reader, 80)
+			assertGrokTexts(t, page, "user:first\ncontinued")
+			if grokBrowserCorrupt(t, reader) {
 				t.Fatal("valid rewind reported as corrupt")
 			}
 		})
@@ -126,11 +121,7 @@ func TestGrokAppendPaginationAndChangeTokens(t *testing.T) {
 	reader, home := testReader(t)
 	path := grokUpdatesPath(home, grokCWD, testSessionID)
 	grokTurns(3).write(t, path)
-	browser, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
 	scope := BrowseScope{Provider: "grok", CWD: grokCWD, SessionID: testSessionID}
 	token := func() string {
 		t.Helper()
@@ -172,11 +163,7 @@ func TestGrokEqualLengthRewriteRejectsCursor(t *testing.T) {
 	reader, home := testReader(t)
 	path := grokUpdatesPath(home, grokCWD, testSessionID)
 	grokTurns(3).write(t, path)
-	browser, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
 	scope := BrowseScope{Provider: "grok", CWD: grokCWD, SessionID: testSessionID}
 	latest, err := browser.ReadPage(t.Context(), BrowseRequest{Scope: scope, Limit: 2})
 	if err != nil || latest.NextCursor == "" {
@@ -213,7 +200,7 @@ func TestGrokRepresentativeFullFileProjection(t *testing.T) {
 		}
 	}
 	start := time.Now()
-	projection, err := projectGrokUpdates(context.Background(), strings.NewReader(data.String()))
+	projection, err := projectGrokUpdates(newJSONLBytesReader(context.Background(), data.Bytes(), 0, false, maxGrokRecordBytes))
 	if err != nil || len(projection.Entries) != 4000 {
 		t.Fatalf("projection entries = %d, %v", len(projection.Entries), err)
 	}

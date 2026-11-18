@@ -80,10 +80,9 @@ func TestNativePiActivityBrowserFixture(t *testing.T) {
 		server.hub.Send(client, map[string]any{"type": "agents", "agents": []*coordinator.AgentState{agent}})
 	})
 	server.hub.SetOnDisconnect(func(client *transport.ClientConn) { server.stopConversationFeed(client.ID(), "") })
-	server.hub.SetHandler(func(client *transport.ClientConn, message map[string]any, admitted func()) {
+	server.hub.SetHandler(func(client *transport.ClientConn, inbound protocol.Inbound, admitted func()) {
 		defer admitted()
-		inbound, err := protocol.DecodeMap(message)
-		if err != nil {
+		if inbound.Invalid {
 			return
 		}
 		counter, _ := received.LoadOrStore(inbound.Type, &atomic.Int64{})
@@ -101,7 +100,7 @@ func TestNativePiActivityBrowserFixture(t *testing.T) {
 				server.handleConversationUpdates(client, inbound)
 			case "unwatch_conversation":
 				server.stopConversationFeed(client.ID(), inbound.SubscriptionID)
-				server.sendCommandResult(client, inbound.RequestID, inbound.Type, true, "completed", "", inbound.PaneID, nil)
+				server.reply(client, inbound.RequestID, inbound.Type, inbound.PaneID).complete(nil)
 			}
 		case "send_input", "send_keys", "lease_pane_size", "submit_prompt":
 			mutations.Add(1)

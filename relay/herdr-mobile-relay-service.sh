@@ -53,28 +53,14 @@ TUNNEL_PID=""
 cleanup() {
     if [ -n "$TUNNEL_PID" ] && kill -0 "$TUNNEL_PID" 2>/dev/null; then
         kill "$TUNNEL_PID" 2>/dev/null || true
-        stop_child "$TUNNEL_PID"
+        wait_for_exit "$TUNNEL_PID" 5
     fi
     if [ -n "$RELAY_PID" ] && kill -0 "$RELAY_PID" 2>/dev/null; then
         kill "$RELAY_PID" 2>/dev/null || true
-        stop_child "$RELAY_PID"
+        wait_for_exit "$RELAY_PID" 5
     fi
 }
 trap cleanup EXIT INT TERM
-
-stop_child() {
-    local pid="$1"
-    local attempt
-    for attempt in 1 2 3 4 5; do
-        if ! kill -0 "$pid" 2>/dev/null; then
-            wait "$pid" 2>/dev/null || true
-            return
-        fi
-        sleep 1
-    done
-    kill -KILL "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
-}
 
 echo "Starting herdr relay on $HERDR_RELAY_HOST:$HERDR_RELAY_PORT"
 HERDR_GITHUB_TOKEN_FILE="$RELAY_UPDATER_TOKEN_FILE" "$RELAY_BIN" serve &

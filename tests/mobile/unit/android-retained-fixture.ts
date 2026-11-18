@@ -11,8 +11,7 @@ export function kernelFixture(mode: 'enabled' | 'disabled' = 'enabled', time = 1
     bootId: '11111111-1111-1111-1111-111111111111', acquiredStartedAt: time, acquiredFinishedAt: time};
 }
 
-export function retainedFixture(handles: string[], selectedHandle: string, installed: string, startedAt: number): RetainedInspectionResult {
-  const now = Date.now();
+export function retainedFixture(handles: string[], selectedHandle: string, installed: string, startedAt: number, now = Date.now()): RetainedInspectionResult {
   const identity = { pid: '123', startTime: '456', bootId: '11111111-1111-1111-1111-111111111111', namespace: nativeNamespace, kernelCapability: kernelFixture('enabled', startedAt) };
   const observations = handles.map((targetId, index) => ({ targetId, document: {
     href: 'https://fixture.test/', origin: 'https://fixture.test',

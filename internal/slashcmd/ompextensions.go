@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
 )
 
 type ompExtensionDir struct {
@@ -24,7 +26,7 @@ func (reader *catalogReader) ompExtensionSkillDirs(ctx DiscoverContext, settings
 		configuredSource = "personal"
 	}
 	for _, extension := range settings.extensionDirectories {
-		extension = expandTilde(strings.TrimSpace(extension), ctx.Home)
+		extension = agentroots.ExpandTilde(strings.TrimSpace(extension), ctx.Home)
 		if extension == "" || strings.HasPrefix(extension, "~") {
 			continue
 		}
@@ -128,7 +130,7 @@ func (reader *catalogReader) claudeMarketplaceExtensions(ctx DiscoverContext, re
 			if install.Enabled != nil && !*install.Enabled {
 				continue
 			}
-			root := expandTilde(strings.TrimSpace(install.InstallPath), ctx.Home)
+			root := agentroots.ExpandTilde(strings.TrimSpace(install.InstallPath), ctx.Home)
 			if root == "" || !filepath.IsAbs(root) {
 				continue
 			}
@@ -137,7 +139,7 @@ func (reader *catalogReader) claudeMarketplaceExtensions(ctx DiscoverContext, re
 					if source != "project" {
 						continue
 					}
-				} else if !pathWithin(ctx.Cwd, expandTilde(install.ProjectPath, ctx.Home)) {
+				} else if !pathWithin(ctx.Cwd, agentroots.ExpandTilde(install.ProjectPath, ctx.Home)) {
 					continue
 				}
 			}

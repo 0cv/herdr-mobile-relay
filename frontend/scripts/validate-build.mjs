@@ -5,11 +5,11 @@ import { brotliDecompressSync } from 'node:zlib';
 import versions from '../build-versions.json' with { type: 'json' };
 import { releaseCompressedAssets } from './compressed-assets.mjs';
 import { validatePagesHeaders, validatePagesRedirects } from './pages-policy.ts';
+import { appScriptPattern, appStylePattern, appScriptPathPattern, appStylePathPattern, lazyScriptPattern, productVersionFromManifest, releaseEntryPath } from './release-rules.ts';
 
 const root = resolve(process.argv[2] || 'dist');
 const pluginManifest = await readFile(new URL('../../herdr-plugin.toml', import.meta.url), 'utf8');
-const productVersion = pluginManifest.match(/^version = "([0-9]+\.[0-9]+\.[0-9]+)"$/m)?.[1];
-if (!productVersion) throw new Error('herdr-plugin.toml must declare a MAJOR.MINOR.PATCH version');
+const productVersion = productVersionFromManifest(pluginManifest);
 const required = [
   '_headers',
   '_redirects',
@@ -47,7 +47,7 @@ if (versions.withdrawnScripts.includes(descriptor.files?.javascript?.path)) {
   throw new Error(`Release uses withdrawn application script: ${descriptor.files.javascript.path}`);
 }
 
-const compressedAssets = await releaseCompressedAssets(root);
+const compressedAssets = await releaseCompressedAssets(root, releaseEntryPath(descriptor));
 for (const relative of compressedAssets) {
   const source = await readFile(join(root, relative));
   const compressed = await readFile(join(root, `${relative}.br`));
@@ -59,18 +59,16 @@ for (const relative of compressedAssets) {
 
 const assets = await readdir(join(root, 'assets'));
 const scripts = assets.filter((name) => name.endsWith('.js'));
-const workerScripts = scripts.filter((name) => /^attachment-hash\.worker-[A-Za-z0-9_-]+\.js$/.test(name));
-const applicationScripts = scripts.filter((name) => /^app-[a-f0-9]{64}\.js$/.test(name));
-const lazyScripts = scripts.filter((name) => /^[A-Za-z0-9_.-]+-[0-9]+\.js$/.test(name));
+const applicationScripts = scripts.filter((name) => appScriptPattern.test(name));
+const lazyScripts = scripts.filter((name) => lazyScriptPattern.test(name));
 if (lazyScripts.some((name) => !name.endsWith(`-${versions.assets}.js`))) {
   throw new Error(`Lazy chunk names must use the current asset version ${versions.assets}`);
 }
 const styles = assets.filter((name) => name.endsWith('.css'));
-const applicationStyles = styles.filter((name) => /^app-[a-f0-9]{64}\.css$/.test(name));
-const unexpectedScripts = scripts.filter((name) => !workerScripts.includes(name)
-  && !applicationScripts.includes(name) && !lazyScripts.includes(name));
-if (applicationScripts.length !== 1 || workerScripts.length !== 1 || unexpectedScripts.length !== 0) {
-  throw new Error(`Expected one content-addressed app script and one attachment hash worker; found ${scripts.join(', ')}`);
+const applicationStyles = styles.filter((name) => appStylePattern.test(name));
+const unexpectedScripts = scripts.filter((name) => !applicationScripts.includes(name) && !lazyScripts.includes(name));
+if (applicationScripts.length !== 1 || unexpectedScripts.length !== 0) {
+  throw new Error(`Expected one content-addressed app script; found ${scripts.join(', ')}`);
 }
 if (versions.withdrawnScripts.includes(`assets/${applicationScripts[0]}`)) {
   throw new Error(`Release uses withdrawn application script: assets/${applicationScripts[0]}`);
@@ -132,8 +130,8 @@ const scriptPath = descriptorFiles.javascript?.path;
 const stylePath = descriptorFiles.stylesheet?.path;
 if (entryPath !== descriptor.entry.slice(1)
   || !/^builds\/.+\/index\.html$/.test(entryPath || '')
-  || !/^assets\/app-[a-f0-9]{64}\.js$/.test(scriptPath || '')
-  || !/^assets\/app-[a-f0-9]{64}\.css$/.test(stylePath || '')) {
+  || !appScriptPathPattern.test(scriptPath || '')
+  || !appStylePathPattern.test(stylePath || '')) {
   throw new Error('release.json file paths are not content-addressed');
 }
 for (const kind of descriptorKinds) {

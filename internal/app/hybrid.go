@@ -3,10 +3,10 @@ package app
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net"
 	"net/netip"
 	"net/url"
-	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -61,7 +61,7 @@ type hybridTransport struct {
 	webrtc  *webrtclink.Manager
 	mapper  *portmap.Mapper
 	forced  bool
-	logger  signalLogger
+	logger  *slog.Logger
 	// newProber builds a reachability prober for one gateway origin, and is nil
 	// when the direct path cannot use one. The prober is built per self-test
 	// because it is pinned to a single origin: after a failover, probing the
@@ -77,16 +77,8 @@ type hybridTransport struct {
 // operator can tell "no STUN offered" apart from "STUN offered but silent".
 type stunStatus struct {
 	configured bool
-	mapped     []netip.AddrPort
+	mapped     netip.AddrPort
 	checkedAt  time.Time
-}
-
-// signalLogger is the subset of slog the hybrid transport needs, kept narrow so
-// tests can assert that no SDP ever reaches a log sink.
-type signalLogger interface {
-	Debug(msg string, args ...any)
-	Info(msg string, args ...any)
-	Warn(msg string, args ...any)
 }
 
 type signalBudget struct {
@@ -189,7 +181,7 @@ func (h *hybridTransport) reachabilityLoop(ctx context.Context) {
 		}
 		if h.mapper != nil {
 			if mapping, ok := h.mapper.Current(); ok {
-				h.webrtc.SetNAT1To1IPs([]string{mapping.External.Addr().String()})
+				h.webrtc.SetNAT1To1IP(mapping.External.Addr().String())
 			}
 		}
 		discovered := h.discoverMappedAddress(ctx)
@@ -251,24 +243,24 @@ func (h *hybridTransport) runSelfTest(ctx context.Context) {
 func (h *hybridTransport) discoverMappedAddress(ctx context.Context) bool {
 	server := stunURL(h.gateway.CurrentURL(), h.gateway.STUNPort())
 	if server == "" {
-		h.webrtc.SetSTUNServers(nil)
+		h.webrtc.SetSTUNServer("")
 		h.mu.Lock()
 		h.stun.configured = false
 		h.mu.Unlock()
 		return false
 	}
-	h.webrtc.SetSTUNServers([]string{server})
+	h.webrtc.SetSTUNServer(server)
 	h.mu.Lock()
 	h.stun.configured = true
 	h.mu.Unlock()
 
-	mapped, err := h.webrtc.DiscoverMappedAddresses(ctx)
+	mapped, err := h.webrtc.DiscoverMappedAddress(ctx)
 	if err != nil {
 		h.logger.Warn("stun address discovery failed", "error", err)
 		return false
 	}
 	h.mu.Lock()
-	changed := !slices.Equal(h.stun.mapped, mapped)
+	changed := h.stun.mapped != mapped
 	h.stun.mapped = mapped
 	h.stun.checkedAt = time.Now().UTC()
 	h.mu.Unlock()
@@ -278,10 +270,8 @@ func (h *hybridTransport) discoverMappedAddress(ctx context.Context) bool {
 	if !changed {
 		return true
 	}
-	h.webrtc.PublishMappedAddresses(mapped)
-	// The addresses themselves are the relay's public endpoints; only the shape
-	// of the result is logged.
-	h.logger.Info("stun address discovery", "families", len(mapped))
+	h.webrtc.PublishMappedAddress(mapped)
+	h.logger.Info("stun address discovery")
 	return true
 }
 
@@ -380,13 +370,11 @@ func (h *hybridTransport) status() map[string]any {
 		// gateway offers no address discovery" from "it does and we heard
 		// nothing back".
 		discovery := map[string]any{"configured": stun.configured}
-		// An array because a dual-stack relay discovers one mapping per family,
-		// and the IPv6 one is usually the address that makes a direct path easy.
-		addresses := make([]string, 0, len(stun.mapped))
-		for _, mapped := range stun.mapped {
-			addresses = append(addresses, mapped.String())
+		mapped := ""
+		if stun.mapped.IsValid() {
+			mapped = stun.mapped.String()
 		}
-		discovery["mapped"] = addresses
+		discovery["mapped"] = mapped
 		if !stun.checkedAt.IsZero() {
 			discovery["checked_at"] = stun.checkedAt
 		}
@@ -430,24 +418,23 @@ var errSignalUnavailable = errors.New("direct connections are not available on t
 func (s *Server) handleWebRTCSignal(
 	ctx context.Context,
 	client *transport.ClientConn,
-	action string,
-	requestID string,
-	msg map[string]any,
+	inbound protocol.Inbound,
 ) {
+	action, requestID := inbound.Type, inbound.RequestID
 	h := s.hybrid
+	reply := s.reply(client, requestID, action, "")
 	if !h.directEnabled() {
-		s.sendCommandResult(client, requestID, action, false, "failed", errSignalUnavailable.Error(), "", nil)
+		reply.fail(errSignalUnavailable.Error())
 		return
 	}
 	// A DataChannel client is already direct; renegotiating from there would
 	// stack a second peer connection on top of the first.
 	if client.Transport() == transport.TransportWebRTC {
-		s.sendCommandResult(client, requestID, action, false, "failed",
-			"already connected over a direct channel", "", nil)
+		reply.fail("already connected over a direct channel")
 		return
 	}
 	if requestID == "" {
-		s.sendCommandResult(client, requestID, action, false, "failed", "request_id is required", "", nil)
+		reply.fail("request_id is required")
 		return
 	}
 	key := webrtclink.SessionKey{ClientID: client.ID(), RequestID: requestID}
@@ -455,19 +442,18 @@ func (s *Server) handleWebRTCSignal(
 	switch action {
 	case "webrtc_offer":
 		if !h.allowSignal(client.ID(), time.Now()) {
-			s.sendCommandResult(client, requestID, action, false, "failed",
-				"too many direct-connection attempts; retry shortly", "", nil)
+			reply.fail("too many direct-connection attempts; retry shortly")
 			return
 		}
-		offer := stringField(msg, "sdp")
+		offer := inbound.SDP
 		if offer == "" {
-			s.sendCommandResult(client, requestID, action, false, "failed", "sdp is required", "", nil)
+			reply.fail("sdp is required")
 			return
 		}
 		answer, err := h.webrtc.HandleOffer(ctx, key, offer)
 		if err != nil {
 			s.logger.Debug("webrtc offer rejected", "client_id", client.ID(), "error", err)
-			s.sendCommandResult(client, requestID, action, false, "failed", err.Error(), "", nil)
+			reply.fail(err.Error())
 			return
 		}
 		s.hub.Send(client, map[string]any{
@@ -477,9 +463,9 @@ func (s *Server) handleWebRTCSignal(
 		})
 	case "webrtc_ice":
 		candidate := webrtclink.Candidate{
-			Candidate:     stringField(msg, "candidate"),
-			SDPMid:        stringField(msg, "sdp_mid"),
-			SDPMLineIndex: uint16(intField(msg, "sdp_mline_index")),
+			Candidate:     inbound.Candidate,
+			SDPMid:        inbound.SDPMid,
+			SDPMLineIndex: uint16(inbound.SDPMLineIndex),
 		}
 		if candidate.Candidate == "" {
 			return
@@ -495,24 +481,6 @@ func (s *Server) handleWebRTCSignal(
 			"reason":     "closed by client",
 		})
 	}
-}
-
-// stringField reads a signaling field verbatim. SDP and ICE candidate bodies
-// are line-oriented and their trailing terminator is significant: trimming an
-// offer's final newline makes every SDP parser fail at EOF.
-func stringField(msg map[string]any, key string) string {
-	value, _ := msg[key].(string)
-	return value
-}
-
-func intField(msg map[string]any, key string) int {
-	switch value := msg[key].(type) {
-	case float64:
-		return int(value)
-	case int:
-		return value
-	}
-	return 0
 }
 
 // gatewayAvailableVersion is the newest gateway source this relay knows how to

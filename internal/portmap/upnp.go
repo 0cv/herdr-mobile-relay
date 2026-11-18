@@ -535,16 +535,15 @@ func (c *client) addUPnPMapping(ctx context.Context, target upnpTarget, internal
 	}
 
 	return &Mapping{
-		External:  netip.AddrPortFrom(external, externalPort),
-		Internal:  internalPort,
-		Method:    MethodUPnP,
-		Lifetime:  granted,
-		ExpiresAt: time.Now().Add(granted),
-		owner:     c,
-		gateway:   target.gateway,
-		local:     local,
-		control:   target.control.String(),
-		service:   target.service,
+		External: netip.AddrPortFrom(external, externalPort),
+		Internal: internalPort,
+		Method:   MethodUPnP,
+		Lifetime: granted,
+		owner:    c,
+		gateway:  target.gateway,
+		local:    local,
+		control:  target.control.String(),
+		service:  target.service,
 	}, nil
 }
 

@@ -1,6 +1,7 @@
 package eventhook
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -9,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/0cv/herdr-mobile-relay/internal/relayenv"
 )
 
 type Event struct {
@@ -44,8 +47,12 @@ type Payload struct {
 	Host        string `json:"host"`
 }
 
+var relayEnvironmentKeys = []string{"HERDR_SOCKET_PATH", "HERDR_RELAY_PLUGIN_PORT", "XDG_CONFIG_HOME"}
+
 func Run() error {
-	loadEnvironment()
+	if err := loadEnvironment(); err != nil {
+		return err
+	}
 	raw := os.Getenv("HERDR_PLUGIN_EVENT_JSON")
 	if raw == "" {
 		raw = "{}"
@@ -99,8 +106,8 @@ func Build(data EventData) (Payload, error) {
 	if err != nil {
 		return Payload{}, fmt.Errorf("resolve Herdr socket path: %w", err)
 	}
-	tabLabel := first(data.TabLabel, data.TabName, data.Label)
-	agent := first(data.Agent, data.DisplayAgent)
+	tabLabel := cmp.Or(data.TabLabel, data.TabName, data.Label)
+	agent := cmp.Or(data.Agent, data.DisplayAgent)
 	hostname, _ := os.Hostname()
 	if short, _, found := strings.Cut(hostname, "."); found {
 		hostname = short
@@ -121,45 +128,15 @@ func Build(data EventData) (Payload, error) {
 	}, nil
 }
 
-func loadEnvironment() {
-	filename := os.Getenv("HERDR_RELAY_ENV")
-	if filename == "" {
-		if directory := os.Getenv("HERDR_PLUGIN_CONFIG_DIR"); directory != "" {
-			filename = filepath.Join(directory, "relay.env")
-		}
-	}
-	if filename == "" {
-		return
-	}
-	data, err := os.ReadFile(filename)
+func loadEnvironment() error {
+	values, err := relayenv.Read(relayEnvironmentKeys...)
 	if err != nil {
-		return
+		return err
 	}
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		key, value, ok := strings.Cut(line, "=")
-		if !ok {
-			continue
-		}
-		key = strings.TrimSpace(key)
-		value = strings.Trim(strings.TrimSpace(value), `"'`)
-		if key == "" {
-			continue
-		}
+	for key, value := range values {
 		if _, exists := os.LookupEnv(key); !exists {
 			_ = os.Setenv(key, value)
 		}
 	}
-}
-
-func first(values ...string) string {
-	for _, value := range values {
-		if value != "" {
-			return value
-		}
-	}
-	return ""
+	return nil
 }

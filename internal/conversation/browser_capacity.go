@@ -237,12 +237,7 @@ func (b *Browser) ensureCapacity(request *browseJob, index *snapshotIndex, stage
 }
 
 func (b *Browser) observeCapacityOperation(stage string, job *browseJob, locked bool) {
-	b.mu.Lock()
-	observer := b.capacityOperationObserver
-	b.mu.Unlock()
-	if observer != nil {
-		observer(stage, job, locked)
-	}
+	b.observe(browserObservation{kind: "capacity_operation", stage: stage, job: job, locked: locked})
 }
 
 func (b *Browser) writeWithCapacity(job *browseJob, stage, failureMessage string, write func() error) string {
@@ -275,6 +270,6 @@ func capacityFailurePage(code string) *BrowsePage {
 	if code == "index_storage_unavailable" {
 		message = "Older history cannot be prepared on this computer right now."
 	}
-	page := browseFailure(true, code, message, browseErrorFor(code, message, true))
+	page := failPage(code, message, true)
 	return &page
 }

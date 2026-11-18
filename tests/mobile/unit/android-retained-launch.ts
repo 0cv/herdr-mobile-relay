@@ -14,6 +14,7 @@ import { AppiumClient } from '../support/webdriver';
 import { retainedFixture, kernelFixture } from './android-retained-fixture';
 import { gzipSync } from 'node:zlib';
 import { kernelReaderFixture } from './android-kernel-reader-fixture';
+import { fakeGmsCommandsIO } from './android-measurement-doubles';
 
 export async function runAndroidRetainedLaunchRegressions(scenarios?: string[]): Promise<void> {
   for (const scenario of scenarios ?? ['boot', 'kernel-boot-acquisition', 'kernel-disabled', 'kernel-unreadable', 'kernel-missing', 'kernel-malformed', 'kernel-duplicate', 'kernel-conflicting', 'kernel-enabled-absent', 'kernel-disabled-fields', 'kernel-pid-duplicate', 'kernel-nspid-duplicate', 'kernel-nested', 'kernel-same-number-nested', 'healthy', 'pid-before', 'start-before', 'selected-window-loss', 'pid', 'start-time', 'missing-process', 'dead-process', 'missing-owner', 'replaced-session', 'missing-current', 'missing-handles', 'missing-context', 'refusal', 'timeout', 'malformed', 'wrong-id', 'wrong-component', 'wrong-scope', 'wrong-mac', 'ambiguous-shortcut', 'uncertain-launch', 'wrong-origin', 'stale-browser', 'wrong-provider', 'ambiguous-document', 'late-document', 'zero-candidate', 'still-browser-confirmation', 'recorded-two-page']) {
@@ -178,7 +179,7 @@ console.log(output);
         return response(null);
       } finally { active--; }
     });
-    const platform = new AndroidPlatform({ origin: 'https://fixture.test', appiumUrl: 'http://retained.invalid', outputDir: root, certificate: '', setupUrl: '', deviceId: 'emulator-5554', budget });
+    const platform = new AndroidPlatform({ origin: 'https://fixture.test', appiumUrl: 'http://retained.invalid', outputDir: root, certificate: '', deviceId: 'emulator-5554', budget });
     Object.assign(platform, { driver: client });
     try {
       const captureStartedAt = Date.now();
@@ -191,7 +192,6 @@ console.log(output);
         await assert.rejects(() => (platform as any).readChromeProcess(), error => error === first);
         await assert.rejects(() => platform.launchInstalledApp(), error => error === first);
         assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), state);
-        console.log(`PASS retained kernel acquisition ${scenario}`);
         continue;
       }
       await (platform as any).createChromeSession(false);
@@ -275,7 +275,6 @@ console.log(output);
       assert.equal(calls.some(call => call.path === '/url' && call.method === 'POST'), false);
       assert.equal(calls.some(call => call.body.name === 'WEBVIEW_other'), false);
       assert.equal(maxActive, 1);
-      console.log(`PASS retained signed launch ${scenario}`);
     } finally {
       await Promise.all(pending);
       assert.equal(active, 0);
@@ -414,7 +413,7 @@ else if (request === 'shell pm list packages') {
 `);
   await chmod(adb, 0o700);
   const budget = new PhaseBudget('retained-lifecycle', { timeoutMs: 600_000, recoveryLimit: 0, now: () => Date.now() + JSON.parse(readFileSync(file, 'utf8')).timeOffset });
-  const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), { plannedTerminationExitMs: 300 }, budget);
+  const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), fakeGmsCommandsIO(fixture.fixtureDirectory, { plannedTerminationExitMs: 300 }), budget);
   const kernel = await kernelReaderFixture(async command => {
     const s = await state();
     const pid = s.fault === 'changed-native-pid' ? '6539' : s.pid;
@@ -517,7 +516,7 @@ else if (request === 'shell pm list packages') {
       return response(null);
     } finally { active--; }
   });
-  const platform = new AndroidPlatform({ origin: 'https://fixture.test', appiumUrl: 'http://retained.invalid', outputDir: fixture.root, certificate, setupUrl: '', deviceId: 'emulator-5554', budget });
+  const platform = new AndroidPlatform({ origin: 'https://fixture.test', appiumUrl: 'http://retained.invalid', outputDir: fixture.root, certificate, deviceId: 'emulator-5554', budget });
   Object.assign(platform, { driver: client });
   if (fixture.realCertificate) {
     assert.equal((platform as any).installCertificate, (AndroidPlatform.prototype as any).installCertificate);
@@ -541,7 +540,10 @@ else if (request === 'shell pm list packages') {
         else process.env.ADB_SERVER_SOCKET = endpoint;
       }
     };
+    await measurement.observeGmsStage('after-device-start', budget);
+    await measurement.observeGmsStage('before-measurement-begin', budget);
     await measurement.begin();
+    for (const stage of ['after-setup-url', 'after-browser-install', 'after-initial-installed-app-launch'] as const) await measurement.observeGmsStage(stage, budget);
     platform.environmentMeasurement = measurement;
     if (!fixture.freshSetup) {
       await (platform as any).createChromeSession(false);
@@ -697,7 +699,6 @@ async function runAndroidCertificateTeardownControls(fixture: LifecycleFixtureIn
       await assert.rejects(() => platform.startFreshDevice(), error => error === first);
       assert.equal(calls.filter(call => call.method === 'DELETE').length, 1);
     });
-    console.log(`PASS SM56 certificate admission ${variant}`);
   }
 }
 
@@ -826,7 +827,6 @@ async function runAndroidTeardownControls(fixture: LifecycleFixtureInput): Promi
     if (variant.startsWith('setup-') || variant === 'cold-replacement-post') {
       await runAndroidCreationTeardownControl(isolated, variant);
       if (variant === 'setup-settings-post') await runAndroidCertificateTeardownControls(isolated);
-      console.log(`PASS SM56 lifecycle concurrent-cold-consumers/${variant}`);
       continue;
     }
     await withAndroidRetainedLifecycleFixture(isolated, async ({ platform, client, calls, state, change, hold, assertTerminal, operations }) => {
@@ -910,7 +910,6 @@ async function runAndroidTeardownControls(fixture: LifecycleFixtureInput): Promi
       assert.throws(owner);
       assert.equal((await operations()).length, variant === 'warm-inspection' ? 0 : 1);
     });
-    console.log(`PASS SM56 lifecycle concurrent-cold-consumers/${variant}`);
   }
 }
 
@@ -992,7 +991,7 @@ export async function runAndroidLifecycleCase(fixture: LifecycleFixtureInput, gr
     let first: unknown;
     if (group === 'warmOwner') {
       if (name === 'missing-owner') {
-        const unowned = new AndroidPlatform({ origin: 'https://fixture.test', appiumUrl: 'http://retained.invalid', outputDir: fixture.root, certificate: '', setupUrl: '', deviceId: 'emulator-5554' });
+        const unowned = new AndroidPlatform({ origin: 'https://fixture.test', appiumUrl: 'http://retained.invalid', outputDir: fixture.root, certificate: '', deviceId: 'emulator-5554' });
         first = await capture(() => unowned.relaunchInstalledApp());
         await assert.rejects(() => unowned.readRunningIdentity(), error => error === first);
         assert.equal(deletes(), 0);
@@ -1170,5 +1169,3 @@ export async function runAndroidLifecycleCase(fixture: LifecycleFixtureInput, gr
     }
   });
 }
-
-if (import.meta.main) await runAndroidRetainedLaunchRegressions(process.argv.includes('--recorded-two-page') ? ['recorded-two-page'] : undefined);

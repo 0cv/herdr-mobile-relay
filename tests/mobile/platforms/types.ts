@@ -17,7 +17,6 @@ export interface PlatformOptions {
   appiumUrl: string;
   outputDir: string;
   certificate: string;
-  setupUrl: string;
   deviceId?: string;
   budget?: PhaseBudget;
   diagnostics?: DiagnosticRecorder;

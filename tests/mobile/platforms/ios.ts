@@ -15,11 +15,8 @@ import { collectIOSLaunchReceipt, IOSLaunchObservation, iosReceiptWriteStatus, o
 import { requireOwnedDevice } from '../support/device';
 import {
   accessibility,
-  ariaLabel,
-  ariaLabelPrefix,
   AppiumClient,
   isCommandAdmissionError,
-  buttonText,
   css,
   delay,
   driverRequestAllowanceMs,
@@ -33,6 +30,7 @@ import {
   type WebDriverRequestPolicy,
   WebDriverError,
 } from '../support/webdriver';
+import { isExpectedOrigin, preferenceValueScript, promptDraftScript, setPreference, clickDialogText, clickWebText, type WebContext } from './web-context';
 import { runtimeScript, updateCompletionScript, type MobilePlatform, type PlatformOptions, type UpdateCompletionEvidence } from './types';
 
 const IOS_INSTALLED_BUNDLE_ID = 'com.apple.webapp';
@@ -63,6 +61,8 @@ const IOS_FINAL_ADD_ACKNOWLEDGEMENT_MS = 12_000;
 const IOS_ADD_TO_HOME_SCREEN_ACKNOWLEDGEMENT_MS = 12_000;
 const IOS_CONFIRMATION_ROUND_MS = 4 * IOS_NATIVE_LOOKUP_ROUND_MS + IOS_CONFIRMATION_LOOKUP_MS + 2 * IOS_CONFIRMATION_IDENTITY_MS + IOS_FINAL_ADD_ACKNOWLEDGEMENT_MS;
 const IOS_CONFIRMATION_COMPLETION_MS = 2 * IOS_NATIVE_LOOKUP_ROUND_MS + IOS_CONFIRMATION_IDENTITY_MS + IOS_FINAL_ADD_ACKNOWLEDGEMENT_MS;
+// A passing hosted run found Add enabled on its second poll, so a third disabled poll is unusual enough to save the sheet once.
+const IOS_CONFIRMATION_DISABLED_CAPTURE_POLLS = 3;
 // iOS 27 shows the confirmation button labelled "Add" without guaranteeing that its accessibility name is also "Add".
 export const IOS_CONFIRMATION_ADD_XPATH = "//XCUIElementTypeNavigationBar[(@name='Add to Home Screen' or @label='Add to Home Screen' or .//XCUIElementTypeStaticText[@name='Add to Home Screen' or @label='Add to Home Screen' or @value='Add to Home Screen']) and @visible='true' and not(ancestor::*[@visible='false'])]//XCUIElementTypeButton[@name='Add' or @label='Add']";
 const IOS_NATIVE_SCROLL_COMMAND_MS = 5_000;
@@ -461,6 +461,14 @@ function nativeBoundsOverlap(left: NativeBounds, right: NativeBounds): boolean {
     && right.y < left.y + left.height;
 }
 
+export interface IOSPlatformIO {
+  navigationCommand: typeof command;
+  launchCollector: typeof collectIOSLaunchReceipt;
+  launchWrite: (path: string, text: string, options: { flag: string; mode: number }) => Promise<void>;
+  launchMkdir: (path: string, options: { recursive: true }) => Promise<unknown>;
+  diagnosticCommand: typeof commandOutput;
+}
+
 export class IOSPlatform implements MobilePlatform {
   readonly name = 'ios' as const;
   readonly driver: AppiumClient;
@@ -491,12 +499,8 @@ export class IOSPlatform implements MobilePlatform {
   private safariReserveExhaustion?: SafariReserveEvidence;
   private safariFirstFailure?: SafariNavigationFailureEvidence;
   private attachmentFirstRefusal?: Readonly<WebDriverRequestTiming>;
-  private navigationCommand = command;
   private launchObservation = new IOSLaunchObservation();
-  private launchCollector = collectIOSLaunchReceipt;
-  private launchWrite = writeFile;
-  private launchMkdir = mkdir;
-  private diagnosticCommand = commandOutput;
+  private readonly io: IOSPlatformIO;
   private failureCapture?: Promise<void>;
   private launchReceipt?: IOSLaunchReceipt;
   private nativeDiagnosticsBlocked = false;
@@ -508,7 +512,9 @@ export class IOSPlatform implements MobilePlatform {
     directory: iosReceiptWriteStatus('directory'), events: iosReceiptWriteStatus('events'), receipt: iosReceiptWriteStatus('receipt'),
   };
 
-  constructor(private readonly options: PlatformOptions) {
+  constructor(private readonly options: PlatformOptions, io: Partial<IOSPlatformIO> = {}) {
+    this.io = { navigationCommand: command, launchCollector: collectIOSLaunchReceipt, launchWrite: writeFile,
+      launchMkdir: mkdir, diagnosticCommand: commandOutput, ...io };
     this.udid = options.deviceId || process.env.IOS_SIMULATOR_UDID || '';
     this.origin = options.origin.replace(/\/$/, '');
     this.outputDir = options.outputDir;
@@ -577,7 +583,7 @@ export class IOSPlatform implements MobilePlatform {
     const startedAt = new Date().toISOString();
     this.diagnostics.record({ phase: 'ios-navigation', operation: 'simctl openurl started', timeoutMs, detail: { attempt: 1, startedAt } });
     try {
-      const result = await this.navigationCommand('xcrun', ['simctl', 'openurl', this.udid, url], timeoutMs, {
+      const result = await this.io.navigationCommand('xcrun', ['simctl', 'openurl', this.udid, url], timeoutMs, {
         budget: phase,
         label: 'simctl openurl setup URL',
       });
@@ -625,17 +631,17 @@ export class IOSPlatform implements MobilePlatform {
       this.diagnostics.record({ phase: 'ios-navigation', operation, timeoutMs, detail: { outcome: 'skipped', reason: 'insufficient diagnostic budget', remainingMs: phase.remainingMs } });
       return;
     }
-    const startedAt = Date.now();
+    const startedAt = this.budget.now();
     try {
       const result = await collect();
-      this.diagnostics.record({ phase: 'ios-navigation', operation, timeoutMs, durationMs: Date.now() - startedAt, detail: { outcome: 'collected', result } });
+      this.diagnostics.record({ phase: 'ios-navigation', operation, timeoutMs, durationMs: this.budget.now() - startedAt, detail: { outcome: 'collected', result } });
     } catch (error) {
       const fatal = isFatalDriverError(error);
       this.diagnostics.record({
         phase: 'ios-navigation',
         operation,
         timeoutMs,
-        durationMs: Date.now() - startedAt,
+        durationMs: this.budget.now() - startedAt,
         detail: { outcome: fatal ? 'failed' : 'unavailable', process: iosOpenURLProcessEvidence(error) },
       });
       if (fatal) throw error;
@@ -652,7 +658,7 @@ export class IOSPlatform implements MobilePlatform {
       return;
     }
     await this.navigationDiagnostic(phase, `${stage}-openurl-boot-state`, 3_000, async () => {
-      const result = await this.navigationCommand('xcrun', ['simctl', 'list', 'devices', 'available', '--json'], 3_000, { budget: phase });
+      const result = await this.io.navigationCommand('xcrun', ['simctl', 'list', 'devices', 'available', '--json'], 3_000, { budget: phase });
       const listing = JSON.parse(result.stdout) as { devices: Record<string, Array<{ udid: string; state: string; isAvailable: boolean }>> };
       const device = Object.values(listing.devices).flat().find((device) => device.udid === this.udid);
       if (!device) throw new Error('IOS_NAVIGATION_DIAGNOSTIC: owned simulator is absent from the available device listing');
@@ -682,7 +688,7 @@ export class IOSPlatform implements MobilePlatform {
     const start = `${startedAt.slice(0, 19).replace('T', ' ')}+0000`;
     const end = `${new Date(Date.parse(settledAt) + 1_000).toISOString().slice(0, 19).replace('T', ' ')}+0000`;
     await this.navigationDiagnostic(phase, 'openurl-host-log', 5_000, async () => {
-      const result = await this.navigationCommand('/usr/bin/log', [
+      const result = await this.io.navigationCommand('/usr/bin/log', [
         'show', '--style', 'compact', '--start', start, '--end', end,
         '--predicate', 'process == "simctl" OR process CONTAINS[c] "Simulator" OR process CONTAINS[c] "Safari" OR process CONTAINS[c] "WebKit" OR process == "lsd"',
       ], 5_000, { budget: phase });
@@ -717,7 +723,7 @@ export class IOSPlatform implements MobilePlatform {
       }
       if (candidate.url !== undefined) {
         if (candidate.url.length > IOS_SAFARI_DIAGNOSTIC_STRING_LIMIT) stringInspectionTruncated = true;
-        else if (this.isExpectedOrigin(candidate.url)) expectedOriginContextCount += 1;
+        else if (isExpectedOrigin(candidate.url, this.origin)) expectedOriginContextCount += 1;
       }
     }
     let result: SafariDiscoveryResult;
@@ -815,7 +821,7 @@ export class IOSPlatform implements MobilePlatform {
         const metadata = await this.driver.contextMetadata(IOS_SAFARI_DISCOVERY_COMMAND_MS);
         this.safariLastDiscovery = this.safariDiscoveryEvidence(metadata, phase, timeoutMs);
         const context = metadata.find((candidate) => isIOSSafariBrowserBundle(candidate.bundleId)
-          || (candidate.url !== undefined && this.isExpectedOrigin(candidate.url)));
+          || (candidate.url !== undefined && isExpectedOrigin(candidate.url, this.origin)));
         if (!context) {
           lastError = 'Safari did not publish a web context';
           firstFailure ||= this.safariFailureEvidence(phase, timeoutMs, 'discovery', this.safariLastDiscovery.cause);
@@ -829,7 +835,7 @@ export class IOSPlatform implements MobilePlatform {
           await this.driver.switchContext(context.id, IOS_SAFARI_ATTACH_COMMAND_MS);
           if (phase.remainingMs < 2_000) break;
           const currentUrl = await this.driver.currentUrl(1_000);
-          if (this.isExpectedOrigin(currentUrl)) {
+          if (isExpectedOrigin(currentUrl, this.origin)) {
             this.safariLastObservation = this.safariObservationEvidence('expected-origin', 'Safari page reported the fixture origin', phase, timeoutMs);
             this.lastUrl = currentUrl;
             if (phase.remainingMs < 1_000) break;
@@ -885,7 +891,7 @@ export class IOSPlatform implements MobilePlatform {
   async openSetupURLInInstalledApp(url: string): Promise<void> {
     await this.attachToInstalledView();
     await this.driver.navigate(url);
-    await delay(1_000);
+    await this.budget.sleep(1_000);
   }
 
   async installFromBrowser(): Promise<void> {
@@ -1005,6 +1011,7 @@ export class IOSPlatform implements MobilePlatform {
       throw this.installationAddFailure;
     }
     let lastState = 'missing';
+    let disabledPolls = 0;
     while (phase.remainingMs >= IOS_NATIVE_LOOKUP_ROUND_MS) {
       try {
         if (this.driver.snapshot().selectedContext !== 'NATIVE_APP') throw new Error('IOS_SHARE: Add: confirmation is not in the native context');
@@ -1025,6 +1032,8 @@ export class IOSPlatform implements MobilePlatform {
           const enabled = await this.readNativeControlAttribute(element, 'enabled', IOS_NATIVE_LOOKUP_ROUND_MS, true, policy);
           if (enabled === 'false') {
             lastState = 'disabled';
+            disabledPolls += 1;
+            if (disabledPolls === IOS_CONFIRMATION_DISABLED_CAPTURE_POLLS) await this.captureDisabledConfirmation(phase, policy);
           } else if (enabled !== 'true') {
             lastState = 'indeterminate';
           } else if (phase.remainingMs < IOS_CONFIRMATION_COMPLETION_MS) {
@@ -1066,6 +1075,25 @@ export class IOSPlatform implements MobilePlatform {
     throw new Error(`IOS_SHARE: Add: confirmation control was not ready within the complete native lookup/read allowance (${lastState})`);
   }
 
+  private async captureDisabledConfirmation(phase: PhaseBudget, policy: WebDriverRequestPolicy): Promise<void> {
+    const record = (outcome: string, extra: Record<string, unknown> = {}) => this.diagnostics.record({
+      phase: 'ios-install-confirmation', operation: 'disabled-confirmation-hierarchy', detail: { outcome, remainingMs: phase.remainingMs, ...extra },
+    });
+    if (phase.remainingMs < IOS_NATIVE_HIERARCHY_COMMAND_MS + IOS_CONFIRMATION_ROUND_MS) {
+      record('skipped-budget');
+      return;
+    }
+    try {
+      const source = await this.driver.command<unknown>('/source', 'GET', undefined, IOS_NATIVE_HIERARCHY_COMMAND_MS, policy);
+      if (typeof source !== 'string') throw new Error('IOS_SHARE: Add: malformed confirmation hierarchy response');
+      await writeBoundedText(join(this.outputDir, 'ios-confirmation-disabled-hierarchy.xml'), source);
+      record('captured');
+    } catch (error) {
+      if (isFatalDriverError(error)) throw error;
+      record('unavailable', { error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
   private installConfirmationElementId(response: unknown): string {
     const id = response && typeof response === 'object' && 'element-6066-11e4-a52e-4f735466cecf' in response
       ? response['element-6066-11e4-a52e-4f735466cecf'] : undefined;
@@ -1089,7 +1117,7 @@ export class IOSPlatform implements MobilePlatform {
     try {
       await this.launchInstalledAppObserved();
     } catch (error) {
-      this.launchObservation.freeze(error, this.driver.snapshot());
+      this.launchObservation.freeze(this.driver.snapshot());
       throw error;
     }
   }
@@ -1116,7 +1144,7 @@ export class IOSPlatform implements MobilePlatform {
     }
     const currentPageReady = observation.state === 'ready';
     if (observation.state === 'missing') {
-      for (let page = 0; page < 8; page += 1) {
+      for (let page = 1; page < (observation.page?.current ?? 1); page += 1) {
         phase.assertAvailable('show first SpringBoard page');
         await this.driver.mobile('swipe', { direction: 'right' }, Math.max(2, phase.remainingMs));
       }
@@ -1201,7 +1229,7 @@ export class IOSPlatform implements MobilePlatform {
             await this.driver.switchContext(this.selectedInstalledContext, Math.max(1, phase.remainingMs));
             const url = await this.driver.currentUrl(Math.max(1, phase.remainingMs));
             this.lastUrl = url;
-            if (!this.isExpectedOrigin(url)) this.failOwnership('IOS_CONTEXT_OWNERSHIP', `cached document origin ${url} is not ${this.origin}`);
+            if (!isExpectedOrigin(url, this.origin)) this.failOwnership('IOS_CONTEXT_OWNERSHIP', `cached document origin ${url} is not ${this.origin}`);
             await this.validateInstalledDocument(Math.max(1, phase.remainingMs));
             return;
           } catch (error) {
@@ -1280,7 +1308,7 @@ export class IOSPlatform implements MobilePlatform {
               if (this.installedBindingState !== 'bound') this.installedBindingState = 'inspecting';
               const url = await this.driver.currentUrl(Math.max(1, phase.remainingMs));
               this.lastUrl = url;
-              if (!this.isExpectedOrigin(url)) this.failOwnership('IOS_CONTEXT_OWNERSHIP', `document origin ${url} is not ${this.origin}`);
+              if (!isExpectedOrigin(url, this.origin)) this.failOwnership('IOS_CONTEXT_OWNERSHIP', `document origin ${url} is not ${this.origin}`);
               await this.validateInstalledDocument(Math.max(1, phase.remainingMs));
               this.selectedInstalledContext = context.id;
               this.installedBindingState = 'bound';
@@ -1344,10 +1372,10 @@ export class IOSPlatform implements MobilePlatform {
       return '';
     });
     if (currentUrl.includes('#settings')) await this.clickWebText('Back');
-    const deadline = Date.now() + 30_000;
+    const deadline = this.budget.now() + 30_000;
     const selector = `button.agent-open[aria-label="Open mobile-ci on ${relayName}"]`;
     let lastError = '';
-    while (Date.now() < deadline) {
+    while (this.budget.now() < deadline) {
       try {
         await this.attachToInstalledView();
         // Several idle workspaces start as collapsed cards whose agent buttons cannot be clicked until opened.
@@ -1362,7 +1390,7 @@ export class IOSPlatform implements MobilePlatform {
             await this.driver.execute('document.querySelector(arguments[0])?.click();', [summarySelector]);
           }
           lastError = `agent ${relayName} was inside a collapsed workspace card`;
-          await delay(250);
+          await this.budget.sleep(250);
           continue;
         }
         const agent = await this.driver.find(css(selector), 2_000);
@@ -1397,14 +1425,14 @@ export class IOSPlatform implements MobilePlatform {
             );
             if (!result.clicked) throw error;
           }
-          await delay(1_000);
+          await this.budget.sleep(1_000);
           return;
         }
       } catch (error) {
         if (isFatalDriverError(error) || isQualificationFatal(error)) throw error;
         lastError = error instanceof Error ? error.message : String(error);
       }
-      await delay(250);
+      await this.budget.sleep(250);
     }
     throw new Error(`APPIUM_AGENT: ${relayName}: ${lastError}`);
   }
@@ -1546,116 +1574,30 @@ export class IOSPlatform implements MobilePlatform {
     await this.attachToInstalledView();
     if (this.keyboardShownByPage) await this.waitForPageKeyboardHidden();
     if (this.keyboardDraft) {
-      const value = await this.driver.execute<string>("return document.querySelector('textarea[aria-label=\\\"Prompt\\\"]')?.value || ''");
+      const value = await this.driver.execute<string>(promptDraftScript);
       if (value !== this.keyboardDraft) throw new Error('IOS_KEYBOARD: draft was not preserved after dismissal');
     }
   }
 
-  async clickWebText(text: string): Promise<void> {
-    const deadline = Date.now() + Math.min(30_000, this.budget.remainingMs);
-    let lastError = '';
-    while (Date.now() < deadline) {
-      const remaining = deadline - Date.now();
-      if (remaining < minimumDriverRequestMs) break;
-      try {
-        await this.attachToInstalledView(remaining);
-        const findTimeout = deadline - Date.now();
-        if (findTimeout < minimumDriverRequestMs) break;
-        const locators = [buttonText(text), ariaLabel(text), ariaLabelPrefix(text), textLocator(text)];
-        for (const locator of locators) {
-          const locatorTimeout = deadline - Date.now();
-          if (locatorTimeout < minimumDriverRequestMs) break;
-          try {
-            const element = await this.driver.findAnyOnce([locator], locatorTimeout);
-            const controlTimeout = deadline - Date.now();
-            if (controlTimeout < minimumDriverRequestMs) break;
-            if (await this.webControlReady(element, deadline)) {
-              const clickTimeout = deadline - Date.now();
-              if (clickTimeout < minimumDriverRequestMs) break;
-              await this.driver.click(element, clickTimeout);
-              return;
-            }
-            lastError = `${text} is disabled, hidden, or empty`;
-          } catch (error) {
-            if (isFatalDriverError(error) || isQualificationFatal(error)) throw error;
-            if (error instanceof WebDriverError && !isRetryableElementLookupError(error)) throw error;
-            lastError = error instanceof Error ? error.message : String(error);
-          }
-        }
-      } catch (error) {
-        if (isFatalDriverError(error) || isQualificationFatal(error)) throw error;
-        if (error instanceof WebDriverError && !isRetryableElementLookupError(error)) throw error;
-        lastError = error instanceof Error ? error.message : String(error);
-      }
-      const waitMs = Math.min(250, Math.max(0, deadline - Date.now() - minimumDriverRequestMs));
-      if (waitMs > 0) await delay(waitMs);
-    }
-    throw new Error(`APPIUM_BUTTON: ${text}: ${lastError || 'control was not usable before the deadline'}`);
+  private get webContext(): WebContext {
+    return { driver: this.driver, budget: this.budget, attachToInstalledView: (timeoutMs) => this.attachToInstalledView(timeoutMs) };
   }
 
-  private async webControlReady(element: string, deadline: number): Promise<boolean> {
-    const disabledTimeout = deadline - Date.now();
-    if (disabledTimeout < minimumDriverRequestMs) return false;
-    const disabled = await this.driver.attribute(element, 'disabled', disabledTimeout);
-    if (disabled !== null && disabled !== 'false') return false;
-    const ariaDisabledTimeout = deadline - Date.now();
-    if (ariaDisabledTimeout < minimumDriverRequestMs) return false;
-    const ariaDisabled = await this.driver.attribute(element, 'aria-disabled', ariaDisabledTimeout);
-    if (ariaDisabled === 'true') return false;
-    const hiddenTimeout = deadline - Date.now();
-    if (hiddenTimeout < minimumDriverRequestMs) return false;
-    const hidden = await this.driver.attribute(element, 'hidden', hiddenTimeout);
-    if (hidden !== null && hidden !== 'false') return false;
-    const ariaHiddenTimeout = deadline - Date.now();
-    if (ariaHiddenTimeout < minimumDriverRequestMs) return false;
-    const ariaHidden = await this.driver.attribute(element, 'aria-hidden', ariaHiddenTimeout);
-    if (ariaHidden === 'true') return false;
-    const rectTimeout = deadline - Date.now();
-    if (rectTimeout < minimumDriverRequestMs) return false;
-    const rect = await this.driver.elementRect(element, rectTimeout);
-    return rect.width > 0 && rect.height > 0;
+  async clickWebText(text: string): Promise<void> {
+    await clickWebText(this.webContext, text);
   }
 
   async clickDialogText(dialogId: string, text: string): Promise<void> {
-    const deadline = Date.now() + Math.min(30_000, this.budget.remainingMs);
-    let lastError = '';
-    while (Date.now() < deadline) {
-      const remaining = deadline - Date.now();
-      if (remaining < minimumDriverRequestMs) break;
-      try {
-        await this.attachToInstalledView(remaining);
-        const findTimeout = deadline - Date.now();
-        if (findTimeout < minimumDriverRequestMs) break;
-        const buttons = await this.driver.findAll(css(`#${dialogId} button`), findTimeout);
-        for (const button of buttons) {
-          const textTimeout = deadline - Date.now();
-          if (textTimeout < minimumDriverRequestMs) break;
-          if ((await this.driver.text(button, textTimeout)).trim() === text) {
-            const clickTimeout = deadline - Date.now();
-            if (clickTimeout < minimumDriverRequestMs) break;
-            await this.driver.click(button, clickTimeout);
-            return;
-          }
-        }
-        lastError = `${text} is not visible in ${dialogId}`;
-      } catch (error) {
-        if (isFatalDriverError(error) || isQualificationFatal(error)) throw error;
-        lastError = error instanceof Error ? error.message : String(error);
-      }
-      const waitMs = Math.min(250, Math.max(0, deadline - Date.now() - minimumDriverRequestMs));
-      if (waitMs > 0) await delay(waitMs);
-    }
-    throw new Error(`APPIUM_DIALOG_BUTTON: ${dialogId}/${text}: ${lastError}`);
+    await clickDialogText(this.webContext, dialogId, text);
   }
 
   async setPreference(preference: string): Promise<void> {
-    await this.clickWebText('Settings');
-    await this.clickWebText(preference === 'state' ? 'By State' : 'Mixed');
+    await setPreference((text) => this.clickWebText(text), preference);
   }
 
   async preferenceValue(): Promise<string> {
     await this.attachToInstalledView();
-    return this.driver.execute<string>("return localStorage.getItem('herdr_home_workspace_layout') || ''");
+    return this.driver.execute<string>(preferenceValueScript);
   }
 
   captureSanitizedEvidence(name: string): Promise<void> {
@@ -1679,7 +1621,7 @@ export class IOSPlatform implements MobilePlatform {
     if (!failure) return true;
     this.omitLaunchLogs = true;
     try {
-      this.launchReceipt = await this.launchCollector(this.udid, failure, this.origin, {
+      this.launchReceipt = await this.io.launchCollector(this.udid, failure, this.origin, {
         clock: this.launchObservation.clock, queryEligible: !blocked && this.launchObservation.queryEligible,
       });
     } catch {
@@ -1690,12 +1632,12 @@ export class IOSPlatform implements MobilePlatform {
     this.refreshNativeDiagnosticsBlock();
     this.nativeDiagnosticsBlocked ||= this.launchReceipt.blockNativeDiagnostics;
     const clock = this.launchObservation.clock;
-    if (!await observeIOSReceiptWrite(this.launchPersistence.directory, clock, 0, () => this.launchMkdir(this.outputDir, { recursive: true }))) return false;
+    if (!await observeIOSReceiptWrite(this.launchPersistence.directory, clock, 0, () => this.io.launchMkdir(this.outputDir, { recursive: true }))) return false;
     const { eventsText, receiptText } = this.launchReceipt;
     if (!await observeIOSReceiptWrite(this.launchPersistence.events, clock, Buffer.byteLength(eventsText),
-      () => this.launchWrite(join(this.outputDir, 'ios-launch-owner-events.jsonl'), eventsText, { flag: 'wx', mode: 0o600 }))) return false;
+      () => this.io.launchWrite(join(this.outputDir, 'ios-launch-owner-events.jsonl'), eventsText, { flag: 'wx', mode: 0o600 }))) return false;
     return observeIOSReceiptWrite(this.launchPersistence.receipt, clock, Buffer.byteLength(receiptText),
-      () => this.launchWrite(join(this.outputDir, 'ios-launch-receipt.json'), receiptText, { flag: 'wx', mode: 0o600 }));
+      () => this.io.launchWrite(join(this.outputDir, 'ios-launch-receipt.json'), receiptText, { flag: 'wx', mode: 0o600 }));
   }
 
   private async captureEvidence(name: string): Promise<void> {
@@ -1735,7 +1677,7 @@ export class IOSPlatform implements MobilePlatform {
     for (const [suffix, args] of captures) {
       if (this.refreshNativeDiagnosticsBlock()) break;
       if (this.omitLaunchLogs && (suffix === 'simulator-log' || suffix === 'webkit-safari' || suffix === 'springboard')) continue;
-      const output = await this.diagnosticCommand('xcrun', args, 20_000).catch((error) => error instanceof Error ? error.message : String(error));
+      const output = await this.io.diagnosticCommand('xcrun', args, 20_000).catch((error) => error instanceof Error ? error.message : String(error));
       await writeBoundedText(join(this.outputDir, `${name}-ios-${suffix}.log`), output);
     }
   }
@@ -1787,11 +1729,11 @@ export class IOSPlatform implements MobilePlatform {
 
   private async captureNativeReadiness(name: string, timeoutMs: number): Promise<string> {
     await mkdir(this.outputDir, { recursive: true });
-    const deadline = Date.now() + Math.min(timeoutMs, this.budget.remainingMs);
+    const deadline = this.budget.now() + Math.min(timeoutMs, this.budget.remainingMs);
     const phase = this.budget.phaseView('ios-native-readiness', timeoutMs);
     const source = await this.captureNativeHierarchy(name, phase);
     try {
-      const screenshotTimeout = deadline - Date.now();
+      const screenshotTimeout = deadline - this.budget.now();
       if (screenshotTimeout >= minimumDriverRequestMs) {
         const screenshot = Buffer.from(await this.driver.screenshot(screenshotTimeout), 'base64');
         if (screenshot.byteLength <= 20 * 1024 * 1024) await writeFile(join(this.outputDir, `${name}.png`), screenshot, { mode: 0o600 });
@@ -1813,7 +1755,7 @@ export class IOSPlatform implements MobilePlatform {
 
   private async nativeControlState(element: string, deadline: number | PhaseBudget): Promise<'ready' | 'hidden' | 'disabled' | 'not-hittable' | 'indeterminate'> {
     const read = async (name: string): Promise<string | null> => {
-      const timeout = typeof deadline === 'number' ? deadline - Date.now()
+      const timeout = typeof deadline === 'number' ? deadline - this.budget.now()
         : deadline.remainingMs >= IOS_NATIVE_LOOKUP_ROUND_MS ? IOS_NATIVE_LOOKUP_ROUND_MS : 0;
       if (timeout < minimumDriverRequestMs) return null;
       return this.readNativeControlAttribute(element, name, timeout, deadline instanceof PhaseBudget);
@@ -1828,7 +1770,7 @@ export class IOSPlatform implements MobilePlatform {
   }
 
   private async assertNativeControl(element: string, description: string, phase: PhaseBudget): Promise<void> {
-    const state = await this.nativeControlState(element, Date.now() + phase.remainingMs);
+    const state = await this.nativeControlState(element, this.budget.now() + phase.remainingMs);
     if (state === 'ready') return;
     if (state === 'disabled') throw new Error(`IOS_SHARE: ${description}: control is disabled`);
     if (state === 'hidden') throw new Error(`IOS_SHARE: ${description}: control is not visible`);
@@ -1838,7 +1780,7 @@ export class IOSPlatform implements MobilePlatform {
   }
 
   private async nativeElementBelongsToRows(element: string, rows: NativeActionRow[], deadline: number): Promise<boolean> {
-    const timeout = Math.min(IOS_NATIVE_LOOKUP_ROUND_MS, deadline - Date.now());
+    const timeout = Math.min(IOS_NATIVE_LOOKUP_ROUND_MS, deadline - this.budget.now());
     if (timeout < minimumDriverRequestMs) return false;
     const bounds = await this.driver.elementRect(element, timeout).catch((error: unknown) => {
       if (isFatalDriverError(error)) throw error;
@@ -1870,14 +1812,14 @@ export class IOSPlatform implements MobilePlatform {
   ): Promise<NativeScrollContainer | undefined> {
     const actionList = nativeActionListEvidence(source, target);
     if (!actionList) return undefined;
-    const timeout = Math.min(IOS_NATIVE_LOOKUP_ROUND_MS, deadline - Date.now());
+    const timeout = Math.min(IOS_NATIVE_LOOKUP_ROUND_MS, deadline - this.budget.now());
     if (timeout < minimumDriverRequestMs) return undefined;
     const elements = await this.driver.findAll(iosActionCollectionLocator(), timeout).catch((error: unknown) => {
       if (isFatalDriverError(error)) throw error;
       return [];
     });
     for (const element of elements) {
-      const rectTimeout = Math.min(IOS_NATIVE_LOOKUP_ROUND_MS, deadline - Date.now());
+      const rectTimeout = Math.min(IOS_NATIVE_LOOKUP_ROUND_MS, deadline - this.budget.now());
       if (rectTimeout < minimumDriverRequestMs) break;
       const bounds = await this.driver.elementRect(element, rectTimeout).catch((error: unknown) => {
         if (isFatalDriverError(error)) throw error;
@@ -1888,14 +1830,14 @@ export class IOSPlatform implements MobilePlatform {
         || Math.abs(actionList.collection.bounds.y - bounds.y) > 2
         || Math.abs(actionList.collection.bounds.width - bounds.width) > 2
         || Math.abs(actionList.collection.bounds.height - bounds.height) > 2) continue;
-      const enabledTimeout = Math.min(IOS_NATIVE_LOOKUP_ROUND_MS, deadline - Date.now());
+      const enabledTimeout = Math.min(IOS_NATIVE_LOOKUP_ROUND_MS, deadline - this.budget.now());
       if (enabledTimeout < minimumDriverRequestMs) break;
       const enabled = await this.driver.attribute(element, 'enabled', enabledTimeout).catch((error: unknown) => {
         if (isFatalDriverError(error)) throw error;
         return null;
       });
       if (enabled !== 'true' && enabled !== null) continue;
-      const visibleTimeout = Math.min(IOS_NATIVE_LOOKUP_ROUND_MS, deadline - Date.now());
+      const visibleTimeout = Math.min(IOS_NATIVE_LOOKUP_ROUND_MS, deadline - this.budget.now());
       if (visibleTimeout < minimumDriverRequestMs) break;
       const visible = await this.driver.attribute(element, 'visible', visibleTimeout).catch((error: unknown) => {
         if (isFatalDriverError(error)) throw error;
@@ -1907,22 +1849,11 @@ export class IOSPlatform implements MobilePlatform {
     return undefined;
   }
 
-  private async clickNativeScrollable(locators: Locator[], description: string, timeoutMs: number): Promise<void> {
-    if (timeoutMs < minimumDriverRequestMs) throw new Error(`IOS_SHARE: ${description}: insufficient time to find control`);
-    const deadline = Date.now() + Math.min(timeoutMs, this.budget.remainingMs);
-    const findTimeout = deadline - Date.now();
-    if (findTimeout < minimumDriverRequestMs) throw new Error(`IOS_SHARE: ${description}: insufficient time to find control`);
-    const element = await this.findNativeScrollable(locators, description, findTimeout);
-    const clickTimeout = deadline - Date.now();
-    if (clickTimeout < minimumDriverRequestMs) throw new Error(`IOS_SHARE: ${description}: insufficient time to click control`);
-    await this.driver.click(element, clickTimeout);
-  }
-
   private async findNativeMatches(locators: Locator[], timeoutMs: number): Promise<string[]> {
-    const deadline = Date.now() + timeoutMs;
+    const deadline = this.budget.now() + timeoutMs;
     const matches: string[] = [];
     for (const locator of locators) {
-      const remaining = deadline - Date.now();
+      const remaining = deadline - this.budget.now();
       if (remaining < minimumDriverRequestMs) break;
       try {
         matches.push(...await this.driver.findAll(locator, Math.min(IOS_NATIVE_LOOKUP_ROUND_MS, remaining)));
@@ -1965,7 +1896,7 @@ export class IOSPlatform implements MobilePlatform {
 
   private async findNativeScrollable(locators: Locator[], description: string, timeoutMs: number): Promise<string> {
     if (timeoutMs < minimumDriverRequestMs) throw new Error(`IOS_SHARE: ${description}: insufficient time to find control`);
-    const deadline = Date.now() + Math.min(timeoutMs, this.budget.remainingMs);
+    const deadline = this.budget.now() + Math.min(timeoutMs, this.budget.remainingMs);
     const phase = this.budget.phaseView('ios-share-search', timeoutMs);
     let readiness = phase.phaseView('ios-share-publication', IOS_SHARE_SHEET_READINESS_MS);
     let expanded = false;
@@ -2003,7 +1934,7 @@ export class IOSPlatform implements MobilePlatform {
         lastError = `${description}: native action list was dismissed or replaced`;
         break;
       }
-      const candidates = await this.findNativeMatches(locators, Math.min(remaining, deadline - Date.now()));
+      const candidates = await this.findNativeMatches(locators, Math.min(remaining, deadline - this.budget.now()));
       const states: Array<Awaited<ReturnType<IOSPlatform['nativeControlState']>>> = [];
       let readyElement = '';
       for (const candidate of candidates) {
@@ -2114,7 +2045,7 @@ export class IOSPlatform implements MobilePlatform {
         } });
         break;
       }
-      const afterMatches = await this.findNativeMatches(locators, Math.min(deadline - Date.now(), 5_000));
+      const afterMatches = await this.findNativeMatches(locators, Math.min(deadline - this.budget.now(), 5_000));
       const afterTargetReady = afterActionList.targetRows.some((row) => row.visible && row.enabled);
       let afterReady = false;
       if (afterTargetReady) {
@@ -2482,14 +2413,6 @@ export class IOSPlatform implements MobilePlatform {
     }
   }
 
-  private isExpectedOrigin(value: string): boolean {
-    try {
-      return new URL(value).origin === new URL(this.origin).origin;
-    } catch {
-      return false;
-    }
-  }
-
   private async waitForKeyboard(expected: boolean, pageEvidence?: () => Promise<string | true>): Promise<void> {
     const phase = this.budget.phaseView('ios-keyboard', IOS_KEYBOARD_PHASE_MS);
     let last = '';
@@ -2547,10 +2470,5 @@ export class IOSPlatform implements MobilePlatform {
   private failOwnership(code: string, detail: string): never {
     this.ownershipFailure ||= qualificationFatal(code, detail, 'ownership');
     throw this.ownershipFailure;
-  }
-
-  private async currentForegroundPackage(): Promise<string> {
-    const info = await this.driver.activeAppInfo();
-    return String(info?.bundleId || info?.bundleID || '');
   }
 }

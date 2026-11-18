@@ -4,8 +4,9 @@ import { environmentStatus, validateMeasurementIdentity, type EnvironmentStatus,
 import { createHash } from 'node:crypto';
 import { join, posix } from 'node:path';
 import { requireOwnedDevice } from './support/device';
-import { androidEventDetails, androidLogEvents, measuredAndroidEvents } from './android-events';
+import { androidEventDetails, androidHelperDeaths, androidLogEvents, measuredAndroidEvents } from './android-events';
 import { CommandError, command, type CommandResult } from './support/process';
+import { option, required } from './support/cli';
 import { redactText, writeSanitizedJson } from './support/diagnostics';
 
 const ANDROID_PACKAGES = ['com.google.android.gms', 'com.google.android.trichromelibrary', 'com.android.chrome'] as const;
@@ -13,7 +14,7 @@ const PLAY_STORE_PACKAGE = 'com.android.vending';
 const PACKAGE_DUMP_LIMIT = 2_000_000;
 const PACKAGE_DUMP_LINE_LIMIT = 65_536;
 export const ANDROID_LOG_LIMIT = 104_857_600;
-const ANDROID_GMS_OBSERVATION_FILE = 'android-environment-gms-observations.json';
+export const ANDROID_GMS_OBSERVATION_FILE = 'android-environment-gms-observations.json';
 const ACQUISITION_COMMAND_LIMIT = 64;
 const ACQUISITION_PREVIEW_LIMIT = 4_000;
 const DEFAULT_ADB_TIMEOUT_MS = 30_000;
@@ -147,9 +148,9 @@ export interface AndroidEnvironmentCheck {
   issues: string[];
   forcedRestartEvents: string[];
   nativeEvents: ReturnType<typeof androidEventDetails>[];
-  normalRetirements: ReturnType<typeof measuredAndroidEvents>['normalRetirements'];
+  helperDeaths: string[];
   boundaryDiscordances: ReturnType<typeof measuredAndroidEvents>['boundaryDiscordances'];
-  eventCounts: { rawEvents: number; distinctDeathPids: number; fatalEvents: number; normalRetirementPids: number };
+  eventCounts: { rawEvents: number; distinctDeathPids: number; fatalEvents: number };
   passed: boolean;
   observability: string;
 }
@@ -262,17 +263,6 @@ class AcquisitionDiagnostics {
       detail: redactText(detail).slice(0, ACQUISITION_PREVIEW_LIMIT) || undefined,
     };
   }
-}
-
-function option(name: string): string | undefined {
-  const index = process.argv.indexOf(name);
-  return index >= 0 ? process.argv[index + 1] : undefined;
-}
-
-function required(name: string): string {
-  const value = option(name);
-  if (!value) throw new Error(`ANDROID_ENVIRONMENT: missing ${name}`);
-  return value;
 }
 
 function sha256(value: string): string {
@@ -1287,7 +1277,6 @@ export function assessAndroidEnvironment(input: EnvironmentInputBytes, identity:
   const issues: string[] = [];
   const collectionIssues: string[] = [];
   let events: string[], fatalEvents: string[];
-  let normalRetirements: AndroidEnvironmentCheck['normalRetirements'] = [];
   let boundaryDiscordances: AndroidEnvironmentCheck['boundaryDiscordances'] = [];
   const componentDeltas: AndroidEnvironmentCheck['componentDeltas'] = [];
   const project = (values: string[]) => {
@@ -1332,7 +1321,7 @@ export function assessAndroidEnvironment(input: EnvironmentInputBytes, identity:
   try {
     if (before && after) {
       const measured = measuredAndroidEvents(input.log, before, after, operations);
-      events = measured.events; fatalEvents = measured.fatalEvents; normalRetirements = measured.normalRetirements; boundaryDiscordances = measured.boundaryDiscordances;
+      events = measured.events; fatalEvents = measured.fatalEvents; boundaryDiscordances = measured.boundaryDiscordances;
       collectionIssues.push(...measured.issues);
       if (measured.issues.length && !events.length) events = fatalEvents = androidLogEvents(input.log, before.measurement!.processes);
     } else events = fatalEvents = androidLogEvents(input.log, before?.measurement?.processes);
@@ -1340,6 +1329,8 @@ export function assessAndroidEnvironment(input: EnvironmentInputBytes, identity:
     collectionIssues.push('event evaluation incomplete');
     events = fatalEvents = androidLogEvents(input.log || '', before?.measurement?.processes);
   }
+  const helperDeaths = androidHelperDeaths(input.log || '', before?.measurement?.processes || {}, events);
+  fatalEvents = fatalEvents.filter(line => !helperDeaths.includes(line));
   for (const line of fatalEvents) {
       const event = androidEventDetails(line);
       const category = event.kind === 'module-config' ? 'MODULE_CHANGE' : event.kind === 'package-replacement' ? 'PACKAGE_REPLACEMENT'
@@ -1362,8 +1353,8 @@ export function assessAndroidEnvironment(input: EnvironmentInputBytes, identity:
     checkedAt: new Date().toISOString(), before: environmentLeaves.before, after: environmentLeaves.after, log: environmentLeaves.log,
     status, collection: { status: collectionIssues.length ? 'UNKNOWN' : 'PASS', issues: collectionIssues }, findings, coverage: 'bounded-operations', plannedOperations: structuredClone(operations), componentDeltas,
     processBoundaryProof: collectionIssues.length ? undefined : processBoundaryProof(input.log, before, after, operations, events),
-    issues, forcedRestartEvents: fatalEvents, nativeEvents: events.map(androidEventDetails), normalRetirements, boundaryDiscordances,
-    eventCounts: { rawEvents: events.length, distinctDeathPids: new Set(events.map(line => androidEventDetails(line).pid).filter(Boolean)).size, fatalEvents: fatalEvents.length, normalRetirementPids: normalRetirements.length },
+    issues, forcedRestartEvents: fatalEvents, nativeEvents: events.map(androidEventDetails), helperDeaths, boundaryDiscordances,
+    eventCounts: { rawEvents: events.length, distinctDeathPids: new Set(events.map(line => androidEventDetails(line).pid).filter(Boolean)).size, fatalEvents: fatalEvents.length },
     passed: status === 'PASS', observability: 'Receive-bounded main/system evidence and bounded operations; not continuous child-to-target coverage or initiating actor attribution.',
   };
 }
@@ -1386,8 +1377,8 @@ async function runCheck(): Promise<void> {
   const identity = await readCheckJson(required('--identity'), 64_000) as MeasurementIdentity;
   const bundles = await readCheckJson(required('--bundle-set'), 8_000_000);
   const session = await readCheckJson(join(directory, 'android-environment-session.json'), 64_000);
-  const expected = { runId: required('--run-id'), attempt: required('--attempt'), suite: required('--suite'), platform: 'android', baseline: required('--baseline'),
-    scenario: required('--scenario'), sourceCommit: bundles.candidate.provenance.sourceCommit, sourceRunHeadSha: required('--source-run-head-sha'),
+  const expected = { runId: required('--run-id'), attempt: required('--attempt'), platform: 'android', baseline: required('--baseline'),
+    sourceCommit: bundles.candidate.provenance.sourceCommit, sourceRunHeadSha: required('--source-run-head-sha'),
     candidateWebHash: bundles.candidate.identity.webHash, candidateBuild: bundles.candidate.identity.build, measurementId: session.id };
   if (!isDeepStrictEqual(identity, expected)) throw new Error('ANDROID_ENVIRONMENT: independent workflow identity mismatch');
   const result = assessAndroidEnvironment(await readEnvironmentInputs(directory), identity);

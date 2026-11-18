@@ -24,16 +24,13 @@ for (const kind of ['catalog', 'activity']) {
   let errors = '';
   child.stderr.on('data', data => { errors += data.toString(); });
   const ended = new Promise(resolve => child.once('exit', (code, signal) => resolve({ code, signal })));
-  let readyTimer;
   try {
     await new Promise((resolve, reject) => {
       child.once('error', reject);
       child.once('exit', () => reject(new Error(`Private listener exited before readiness: ${errors}`)));
       child.stdout.once('data', resolve);
-      readyTimer = setTimeout(() => reject(new Error('Private listener readiness timed out')), 2000);
     });
   } catch (error) { child.kill('SIGKILL'); throw error; }
-  finally { clearTimeout(readyTimer); }
   child.kill('SIGKILL');
   assert.equal((await ended).signal, 'SIGKILL', errors);
   assert((await lstat(path)).isSocket());
@@ -41,7 +38,6 @@ for (const kind of ['catalog', 'activity']) {
   try {
   const frame = await new Promise((resolve, reject) => {
     const socket = createConnection(path); let pending = ''; let received = false;
-    socket.setTimeout(1000, () => socket.destroy(new Error('Recovered socket did not respond')));
     socket.once('error', reject);
     socket.once('close', () => { if (!received) reject(new Error('Recovered socket closed before responding')); });
     socket.once('connect', () => socket.write(JSON.stringify({ ...identity, challenge: 'b'.repeat(32), operation: kind === 'catalog' ? 'catalog' : 'page' }) + '\n'));

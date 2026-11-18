@@ -22,11 +22,7 @@ func TestPiNoticeRecentToSnapshotPagingWithoutGapsOrDuplicates(t *testing.T) {
 	prior, _ := json.Marshal(rows[len(rows)-2])
 	options := DefaultBrowserOptions()
 	options.RecentBytes = int64(len(last) + len(prior) + 3)
-	browser, err := NewBrowser(reader, t.TempDir(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, options)
 	scope := BrowseScope{Provider: "pi", CWD: "/work", SessionID: path}
 	recent, err := browser.ReadPage(t.Context(), BrowseRequest{Scope: scope, Limit: 2})
 	if err != nil || !recent.Available || recent.Mode != BrowseRecent || len(recent.Entries) != 1 || recent.Entries[0].Kind != "notice" || recent.NextCursor == "" {

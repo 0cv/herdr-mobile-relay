@@ -26,7 +26,7 @@ func TestJSONLProjectionMemoryIndexCharacterization(t *testing.T) {
 	t.Run("cursor-timestamp-precedence", pmTimestamps)
 	t.Run("framed-record-diagnostics", pmDiagnostics)
 	t.Run("owned-file-crlf-boundaries-and-unterminated-json", pmFraming)
-	t.Run("revision-offset-raw-and-legacy-occurrence-identity", pmIdentity)
+	t.Run("revision-offset-and-raw-identity", pmIdentity)
 	t.Run("omo-observations-and-accumulation-without-writes", pmPlans)
 	t.Run("result-before-call-latest-registration-and-no-buffering", pmOrdering)
 	t.Run("exact-supplied-agent-association-separation", pmAgentKeys)
@@ -281,6 +281,11 @@ func pmDispatch(t *testing.T) {
 		{"cursor-envelope", "cursor", `{"role":"user","message":{"content":"<system_reminder>PRIVATE</system_reminder>"}}`},
 		{"pi-metadata", "pi", `{"type":"session","message":{"role":"assistant","content":"PRIVATE"}}`},
 		{"unknown", "unknown", `{"type":"assistant","message":{"content":"PRIVATE"}}`},
+		{"empty-agent", "", `{"type":"assistant","message":{"content":"ordinary visible Claude TEXT"}}`},
+		// A real tab: normalizing the agent twice would make this one visible.
+		{"tab-agent", "-\tclaude-", `{"type":"assistant","message":{"content":"ordinary visible Claude TEXT"}}`},
+		{"claude-envelope-string", "claude", `{"type":"user","message":{"content":"<system-reminder>PRIVATE</system-reminder>"}}`},
+		{"claude-blank", "claude", `{"type":"assistant","message":{"content":" \u0000 "}}`},
 	} {
 		t.Run(row.name, func(t *testing.T) { pmSingle(t, row.agent, pmRecord(7, row.raw), projectionResult{}) })
 	}
@@ -291,6 +296,10 @@ func pmDispatch(t *testing.T) {
 		{"codex", `{"type":"response_item","payload":{"type":"function_call","call_id":"c","name":"Read","arguments":"{}"}}`},
 		{"pi", `{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","id":"c","name":"Read","arguments":"{}"}]}}`},
 		{"cursor", `{"role":"system","message":{"content":[{"type":"tool_use","id":"c","name":"Read","input":"{}"}]}}`},
+		{"claude", `{"type":"user","isMeta":true,"message":{"content":[{"type":"text","text":"PRIVATE"},{"type":"tool_use","id":"c","name":"Read","input":"{}"}]}}`},
+		{"claude", `{"type":"user","message":{"content":[{"type":"text","text":"<system-reminder>PRIVATE</system-reminder>"},{"type":"tool_use","id":"c","name":"Read","input":"{}"}]}}`},
+		{"cursor", `{"role":"system","message":{"content":[{"type":"text","text":"PRIVATE"},{"type":"tool_use","id":"c","name":"Read","input":"{}"}]}}`},
+		{"pi", `{"type":"message","message":{"role":"system","content":[{"type":"text","text":"PRIVATE"},{"type":"toolCall","id":"c","name":"Read","arguments":"{}"}]}}`},
 	} {
 		record := pmRecord(31, row.raw)
 		pmSingle(t, row.agent, record, pmExpected(record, "assistant", "", pmTool("c", "Read", "{}")))
@@ -300,6 +309,7 @@ func pmDispatch(t *testing.T) {
 func pmNotices(t *testing.T) {
 	rows := piNoticeRows()
 	rows = append(rows, map[string]any{"type": "custom_message", "display": true, "content": []any{map[string]any{"type": "image", "data": "PRIVATE_IMAGE"}}, "details": "PRIVATE_DETAILS"})
+	rows = append(rows, map[string]any{"type": "custom_message", "display": true, "content": " \u0000 \u001b[31m\u001b[0m "})
 	for i, row := range rows {
 		record := pmRecord(int64(i*1000), pmJSON(t, row))
 		want := projectionResult{}
@@ -314,7 +324,7 @@ func pmNotices(t *testing.T) {
 		case 7:
 			want = pmExpected(record, "assistant", "First\nSecond")
 			want.Entry.Entry.Kind = "notice"
-		case 8:
+		case 8, 9:
 			want = pmExpected(record, "assistant", "Extension message has no displayable text.")
 			want.Entry.Entry.Kind = "notice"
 		}
@@ -429,6 +439,47 @@ func pmFraming(t *testing.T) {
 		t.Fatalf("partial framing=%+v err=%v", partial, err)
 	}
 	pmSingle(t, "claude", partial, projectionResult{})
+	t.Run("padded-cr-and-unterminated-records", pmPaddedRecords)
+}
+
+func pmPaddedRecords(t *testing.T) {
+	raw := `{"type":"user","message":{"content":"repeat"}}`
+	lines := []string{raw, " " + raw + " ", raw + "\r", raw}
+	data := strings.Join(lines, "\n")
+	path := filepath.Join(pmRoot(t), "padded.jsonl")
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { file.Close() })
+	reader, err := NewJSONLRecordReader(context.Background(), file, 0, int64(len(data)), 1024, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var records []JSONLRecord
+	var prepared []projectionResult
+	var final []projectedEntry
+	offset := int64(0)
+	for i, line := range lines {
+		end := offset + int64(len(line)) + 1
+		if i == len(lines)-1 {
+			end--
+		}
+		want := JSONLRecord{Start: offset, End: end, Raw: []byte(strings.TrimSuffix(line, "\r")), Complete: true, Trailing: i == len(lines)-1}
+		got, err := reader.Next()
+		if err != nil || !reflect.DeepEqual(got, want) {
+			t.Fatalf("record %d got=%+v err=%v want=%+v", i, got, err, want)
+		}
+		records = append(records, got)
+		expected := pmExpected(got, "user", "repeat")
+		prepared = append(prepared, expected)
+		final = append(final, *expected.Entry)
+		offset = end
+	}
+	pmSequence(t, "claude", records, prepared, final)
 }
 
 func pmIdentity(t *testing.T) {
@@ -447,11 +498,8 @@ func pmIdentity(t *testing.T) {
 			pmCheck(t, got, want)
 		}
 	}
-	legacy := parseTranscript("claude", raw+"\n"+raw)
-	digest := sha256.Sum256([]byte(raw))
-	base := hex.EncodeToString(digest[:12])
-	if len(legacy) != 2 || legacy[0].ID != base || legacy[1].ID != base+"-1" || pmID("revision", a) == pmID("revision", b) || pmID("revision", a) == pmID("other-revision", a) {
-		t.Fatal("raw/revision/offset IDs or legacy occurrence IDs changed")
+	if pmID("revision", a) == pmID("revision", b) || pmID("revision", a) == pmID("other-revision", a) {
+		t.Fatal("raw/revision/offset IDs changed")
 	}
 }
 
@@ -485,6 +533,34 @@ func pmPlans(t *testing.T) {
 		}
 	}
 	pmSingle(t, "pi", valid, projectionResult{})
+	t.Run("observations-mixed-with-visible-rows", pmPlansWithVisibleRows)
+}
+
+func pmPlansWithVisibleRows(t *testing.T) {
+	valid := `{"type":"custom","customType":"senpi.todo-state","timestamp":"source-time","data":{"schema":"v2","phases":[{"name":" phase ","tasks":[{"id":"t","content":" task ","status":"pending"}]}]}}`
+	visible := `{"type":"message","message":{"role":"assistant","content":"visible"}}`
+	for _, agent := range []string{"omo", "ohmyopencode"} {
+		for _, invalid := range []string{
+			`{"type":"custom","customType":"senpi.todo-state"}`,
+			`{"type":"custom","customType":"senpi.todo-state","data":null}`,
+			`{"type":"custom","customType":"senpi.todo-state","data":{"schema":"v1","phases":[]}}`,
+		} {
+			t.Run(agent+"/"+invalid, func(t *testing.T) {
+				records := []JSONLRecord{pmRecord(0, invalid), pmRecord(1000, visible), pmRecord(2000, valid), pmRecord(3000, invalid), pmRecord(4000, visible)}
+				plan := &OMOTodoState{Version: 2, UpdatedAt: "source-time", Phases: []OMOTodoPhase{{Name: "phase", Tasks: []OMOTodoTask{{ID: "t", Content: "task", Status: "pending"}}}}}
+				bad := projectionResult{TodoSeen: true, TodoInvalid: true, Diagnostics: projectionDiagnostics{PlanCorrupt: true}}
+				one, two := pmExpected(records[1], "assistant", "visible"), pmExpected(records[4], "assistant", "visible")
+				pmSequence(t, agent, records, []projectionResult{bad, one, {Plan: plan, TodoSeen: true}, bad, two}, []projectedEntry{*one.Entry, *two.Entry})
+				memory := newMemoryProjector(agent, "revision")
+				for _, record := range records {
+					memory.apply(record)
+				}
+				if !memory.todoSeen || !memory.todoValid || !reflect.DeepEqual(memory.plan, plan) {
+					t.Fatal("invalid observation erased accumulated valid plan")
+				}
+			})
+		}
+	}
 }
 
 func pmCall(id, name string) map[string]any {
@@ -613,6 +689,108 @@ func pmBounds(t *testing.T) {
 	noticeWant := pmExpected(notice, "assistant", strings.Repeat("界", 43690))
 	noticeWant.Entry.Entry.Kind, noticeWant.Entry.Entry.Truncated = "notice", true
 	pmSingle(t, "pi", notice, noticeWant)
+	t.Run("original-call-shadowing", pmShadowing)
+	t.Run("sanitized-bounds-and-later-result-timing", pmResultBounds)
+}
+
+func pmShadowing(t *testing.T) {
+	for _, mode := range []string{"same-row-omitted", "later-row-omitted", "retained-duplicate", "exactly-128"} {
+		t.Run(mode, func(t *testing.T) {
+			var blocks []any
+			var retained []ToolActivity
+			for i := 0; i < 128; i++ {
+				id := fmt.Sprint(i)
+				if mode == "retained-duplicate" && i == 1 {
+					id = "0"
+				}
+				blocks = append(blocks, pmCall(id, "Read"))
+				retained = append(retained, pmTool(id, "Read", "{}"))
+			}
+			if mode == "same-row-omitted" {
+				blocks = append(blocks, pmCall("0", "omitted"))
+			}
+			records := []JSONLRecord{pmBlocks(t, 0, blocks...)}
+			prepared := []projectionResult{pmExpected(records[0], "assistant", "", append([]ToolActivity(nil), retained...)...)}
+			prepared[0].Entry.Entry.Truncated = mode == "same-row-omitted"
+			if mode == "same-row-omitted" {
+				prepared[0].Diagnostics.OmittedTools = 1
+			}
+			if mode == "later-row-omitted" {
+				later := make([]any, 0, 129)
+				var tools []ToolActivity
+				for i := 0; i < 128; i++ {
+					id := fmt.Sprintf("later-%d", i)
+					later = append(later, pmCall(id, "Read"))
+					tools = append(tools, pmTool(id, "Read", "{}"))
+				}
+				records = append(records, pmBlocks(t, 100000, append(later, pmCall("0", "omitted"))...))
+				want := pmExpected(records[1], "assistant", "", tools...)
+				want.Entry.Entry.Truncated, want.Diagnostics.OmittedTools = true, 1
+				prepared = append(prepared, want)
+			}
+			records = append(records, pmBlocks(t, 200000, pmResult("0", "resolved", false), pmResult("0", "duplicate-ignored", true)))
+			prepared = append(prepared, projectionResult{})
+			var final []projectedEntry
+			for _, want := range prepared[:len(prepared)-1] {
+				entry := *want.Entry
+				entry.Entry.Tools = append([]ToolActivity(nil), entry.Entry.Tools...)
+				final = append(final, entry)
+			}
+			target := 0
+			if mode == "retained-duplicate" {
+				target = 1
+			}
+			final[0].Entry.Tools[target].Output = "resolved"
+			pmSequence(t, "claude", records, prepared, final)
+		})
+	}
+}
+
+func pmResultBounds(t *testing.T) {
+	for _, prior := range []bool{false, true} {
+		for _, output := range []struct {
+			name, raw, want string
+			truncated       bool
+		}{
+			{"empty", "", "", false},
+			{"sanitized", " \x1b[31mshort\x1b[0m\x00 \r\n", "short", false},
+			{"inclusive", " \x1b[31m\x00" + strings.Repeat("b", 131072) + "\x1b[0m\x00 ", strings.Repeat("b", 131072), false},
+			{"utf8-overflow", "x" + strings.Repeat("界", 43691), "x" + strings.Repeat("界", 43690), true},
+		} {
+			for _, failed := range []bool{false, true} {
+				t.Run(fmt.Sprintf("prior-truncated=%t/%s/error=%t", prior, output.name, failed), func(t *testing.T) {
+					name, wantName := "Read", "Read"
+					if prior {
+						name, wantName = strings.Repeat("界", 54), strings.Repeat("界", 53)
+					}
+					call := pmBlocks(t, 0, map[string]any{"type": "text", "text": "retained"}, pmCall("c", name))
+					end := pmBlocks(t, 1000000, pmResult("c", output.raw, failed), pmResult("c", "ignored", !failed))
+					prepared := pmExpected(call, "assistant", "retained", pmTool("c", wantName, "{}"))
+					prepared.Entry.Entry.Truncated, prepared.Entry.Entry.Tools[0].Truncated = prior, prior
+					if prior {
+						prepared.Diagnostics.OmittedPayloads = 1
+					}
+					final := *pmExpected(call, "assistant", "retained", ToolActivity{ID: "c", Name: wantName, Input: "{}", Output: output.want, Error: failed, Truncated: prior || output.truncated, associationID: "c"}).Entry
+					final.Entry.Truncated = prior
+					pmSequence(t, "claude", []JSONLRecord{call, end}, []projectionResult{prepared, {}}, []projectedEntry{final})
+				})
+			}
+		}
+	}
+	for _, body := range []struct {
+		name, raw, want string
+		truncated       bool
+	}{
+		{"inclusive-sanitized", " \x1b[31m\x00" + strings.Repeat("b", 131072) + "\x1b[0m\x00 \r", strings.Repeat("b", 131072), false},
+		{"utf8-body", "x" + strings.Repeat("界", 43691), "x" + strings.Repeat("界", 43690), true},
+	} {
+		t.Run(body.name, func(t *testing.T) {
+			record := pmRecord(0, pmJSON(t, map[string]any{"type": "assistant", "message": map[string]any{"content": body.raw}}))
+			want := pmExpected(record, "assistant", body.want)
+			want.Entry.Entry.Truncated = body.truncated
+			pmSingle(t, "claude", record, want)
+		})
+	}
 }
 
 func pmReturnOwnership(t *testing.T) {
@@ -775,4 +953,12 @@ func pmClosed(t *testing.T) {
 			t.Fatalf("closed guard result=%+v err=%v", got, err)
 		}
 	}
+}
+
+func (s *snapshotIndex) applyRecord(agent, revision string, record JSONLRecord) (projectionResult, error) {
+	results, err := s.applyRecords(agent, revision, []JSONLRecord{record})
+	if len(results) == 0 {
+		return projectionResult{}, err
+	}
+	return results[0], err
 }

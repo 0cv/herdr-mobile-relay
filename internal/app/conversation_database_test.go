@@ -116,11 +116,7 @@ func testDatabaseRecordedConversation(t *testing.T, format string, entrypoint, l
 	server := testServerWithCacheDir(t.TempDir())
 	server.conversationB.Close()
 	reader := conversation.NewReader(t.TempDir())
-	browser, err := conversation.NewBrowser(reader, t.TempDir(), conversation.DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, conversation.DefaultBrowserOptions())
 	defer server.herdrC.Close()
 	server.conversationM, server.conversationB = reader, browser
 	server.state.CommitInventory([]*coordinator.AgentState{{PaneID: "db-pane", TerminalID: "db-terminal", ServerSessionID: "primary", Agent: provider, Cwd: root, SessionID: session, AgentSessionID: session, Status: "working"}}, server.state.RevisionCounter())
@@ -394,11 +390,7 @@ func TestDatabaseFeedRefreshesCommitPublishedAfterItsWALWrite(t *testing.T) {
 	server := testServerWithCacheDir(t.TempDir())
 	server.conversationB.Close()
 	reader := conversation.NewReader(t.TempDir())
-	browser, err := conversation.NewBrowser(reader, t.TempDir(), conversation.DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, conversation.DefaultBrowserOptions())
 	defer server.herdrC.Close()
 	server.conversationM, server.conversationB = reader, browser
 	server.state.CommitInventory([]*coordinator.AgentState{{PaneID: "db-pane", TerminalID: "db-terminal", ServerSessionID: "primary", Agent: "opencode", Cwd: root, SessionID: session, AgentSessionID: session, Status: "working"}}, server.state.RevisionCounter())

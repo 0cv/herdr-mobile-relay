@@ -6,24 +6,7 @@ import (
 	"strings"
 )
 
-const (
-	maxTransportCapabilities            = 8
-	legacyEncryptedWebSocketSubprotocol = "herdr-e2ee-v1"
-)
-
-// TransportCapabilities returns the transports supported by an installed
-// release. Releases created before this metadata existed spoke E2EE v1 only.
-func TransportCapabilities(manifest Manifest) (app, relay []string) {
-	app = manifest.AppTransports
-	if len(app) == 0 {
-		app = []string{legacyEncryptedWebSocketSubprotocol}
-	}
-	relay = manifest.RelayTransports
-	if len(relay) == 0 {
-		relay = []string{legacyEncryptedWebSocketSubprotocol}
-	}
-	return app, relay
-}
+const maxTransportCapabilities = 8
 
 // ValidateUpgradeCompatibility requires both app-first and relay-first rollout
 // windows to remain connected. An incompatible transport change therefore
@@ -39,17 +22,19 @@ func ValidateUpgradeCompatibility(current, target Manifest) error {
 		return err
 	}
 
-	currentApp, currentRelay := TransportCapabilities(current)
-	if err := validateTransportCapabilities("current app", currentApp); err != nil {
+	if len(current.AppTransports) == 0 || len(current.RelayTransports) == 0 {
+		return errors.New("current release does not declare app/relay transport compatibility")
+	}
+	if err := validateTransportCapabilities("current app", current.AppTransports); err != nil {
 		return err
 	}
-	if err := validateTransportCapabilities("current relay", currentRelay); err != nil {
+	if err := validateTransportCapabilities("current relay", current.RelayTransports); err != nil {
 		return err
 	}
-	if !transportsIntersect(target.AppTransports, currentRelay) {
+	if !transportsIntersect(target.AppTransports, current.RelayTransports) {
 		return errors.New("target app cannot connect to the current relay; install a bridge release first")
 	}
-	if !transportsIntersect(currentApp, target.RelayTransports) {
+	if !transportsIntersect(current.AppTransports, target.RelayTransports) {
 		return errors.New("current app cannot connect to the target relay; install a bridge release first")
 	}
 	return nil

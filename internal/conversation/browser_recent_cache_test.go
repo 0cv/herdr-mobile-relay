@@ -133,10 +133,7 @@ func TestBrowserRecentProjectionCacheReusesVerifiedRange(t *testing.T) {
 	options.RecentBytes = 1 << 20
 	options.DefaultPageSize = 10
 	options.MaxPageSize = 10
-	browser, err := NewBrowser(reader, t.TempDir(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
+	browser := newTestBrowser(t, reader, options)
 	scope := BrowseScope{Provider: "claude", CWD: "/work", SessionID: testSessionID}
 	first, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 10})
 	if err != nil || len(first.Entries) != 2 {

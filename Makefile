@@ -5,12 +5,6 @@ endif
 
 WEB_PROJECT ?= herdr-0cv
 WEB_ORIGIN ?= https://$(WEB_PROJECT).pages.dev
-ifeq ($(origin WEB_PROJECT),file)
-ifeq ($(WEB_PROJECT),herdr-mobile-relay)
-$(warning WEB_PROJECT=herdr-mobile-relay is the retired default; using herdr-0cv)
-WEB_PROJECT := herdr-0cv
-endif
-endif
 WEB_BRANCH ?= main
 WRANGLER_VERSION ?= 4.125.0
 PATH := /opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$(HOME)/.local/bin:$(PATH)
@@ -94,6 +88,13 @@ check: backend-check frontend-check web-release-check cross-build release-bundle
 
 go-check:
 	@test -z "$$(gofmt -l $$(find . -name '*.go' -not -path './frontend/node_modules/*'))"
+	@for os in linux darwin; do \
+		output="$$(go run -exec "env GOOS=$$os" golang.org/x/tools/cmd/deadcode@v0.52.0 -test ./cmd/... ./internal/... ./tests/blackbox ./tests/mobile/fixture)" || exit; \
+		if [ -n "$$output" ]; then \
+			printf 'Unreachable Go functions (GOOS=%s):\n%s\n' "$$os" "$$output" >&2; \
+			exit 1; \
+		fi; \
+	done
 	go vet ./...
 	# Keep subprocess-based lifecycle tests deterministic when package work is busy.
 	go test -p 1 ./...
@@ -101,7 +102,9 @@ go-check:
 
 backend-check: go-check shell-check production-path-audit
 
+shell-check: export HERDR_TEST_RELAY_BIN = $(CURDIR)/bin/shell-test/herdr-mobile-relay
 shell-check:
+	go build -o $(HERDR_TEST_RELAY_BIN) ./cmd/herdr-mobile-relay
 	bun test tests/pi-command-bridge.test.mjs tests/pi-prompt.test.mjs tests/pi-activity.test.mjs tests/pi-notices.test.mjs tests/pi-reload.test.mjs
 	bash tests/test_pi_commands.sh
 	bash tests/test_dev_pi_commands.sh
@@ -115,6 +118,14 @@ shell-check:
 	sh tests/test_download_credentials.sh
 	bash tests/test_service_credentials.sh
 	bash tests/test_common.sh
+	bash tests/test_common_readiness.sh
+	bash tests/test_common_gateway.sh
+	bash tests/test_configure_app_deploy.sh
+	bash tests/test_plugin_choose_transport.sh
+	bash tests/test_start.sh
+	bash tests/test_plugin_install_service.sh
+	bash tests/test_plugin_setup_menu.sh
+	bash tests/test_change_hostname.sh
 	bash tests/test_gateway_deploy.sh
 	bash tests/test_plugin_build.sh
 	sh tests/test_plugin_recovery.sh
@@ -125,11 +136,11 @@ shell-check:
 	tests/test_stable_setup.sh
 
 production-path-audit:
-	@if rg -n '(^|[;&|][[:space:]]*)(python3?|uv)([[:space:]]|$$)' relay --glob '*.sh' --glob '*.command'; then \
+	@if grep -rEn '(^|[;&|][[:space:]]*)(python3?|uv)([[:space:]]|$$)' relay --include='*.sh'; then \
 		echo "Production shell path still invokes Python or uv" >&2; \
 		exit 1; \
 	fi
-	@if rg -n '(^|[;&|][[:space:]]*)go[[:space:]]+(build|run|install)' relay install.sh; then \
+	@if grep -rEn '(^|[;&|][[:space:]]*)go[[:space:]]+(build|run|install)' relay install.sh; then \
 		echo "End-user install/runtime path still invokes the Go toolchain" >&2; \
 		exit 1; \
 	fi
@@ -145,15 +156,12 @@ cross-build:
 	done
 
 release-bundle-check:
-	@tmp="$$(mktemp -d)"; trap 'rm -rf "$$tmp"' EXIT; \
+	@set -e; tmp="$$(mktemp -d)"; trap 'rm -rf "$$tmp"' EXIT; \
 	version="$$(sed -n 's/^version = "\([^"]*\)"/\1/p' herdr-plugin.toml)"; \
 	revision="$$(git rev-parse HEAD 2>/dev/null || echo test-revision)"; \
 	scripts/package-release.sh "$$version" "$$revision" "$$tmp"; \
 	test "$$(find "$$tmp" -name 'herdr-mobile-relay_*.tar.gz' | wc -l)" -eq 4; \
 	test -s "$$tmp/checksums.txt"; \
-	for archive in "$$tmp"/herdr-mobile-relay_*.tar.gz; do \
-		tar -tzf "$$archive" | grep -qx './relay/native-install-transaction.sh' || exit; \
-	done; \
 	host_os="$$(go env GOOS)"; host_arch="$$(go env GOARCH)"; \
 	scripts/check-installed-release.sh \
 		"$$tmp/herdr-mobile-relay_$${version}_$${host_os}_$${host_arch}.tar.gz" \
@@ -168,13 +176,12 @@ frontend-check:
 	bun build frontend/public/sw.js --outfile=/dev/null
 	bun build frontend/public/notification-icons.js --outfile=/dev/null
 	bash -n frontend/scripts/run-browser-tests.sh
-	bash -n frontend/scripts/run-attention-tests.sh
 
 frontend-browser:
-	frontend/scripts/run-browser-tests.sh dist
+	frontend/scripts/run-browser-tests.sh playwright.config.ts
 
 frontend-browser-release:
-	frontend/scripts/run-browser-tests.sh ../web
+	HERDR_WEB_ROOT=../web frontend/scripts/run-browser-tests.sh playwright.config.ts
 
 frontend-browser-attention-release:
 	HERDR_WEB_ROOT=../web bun run --cwd frontend test:browser:attention
@@ -227,7 +234,7 @@ mobile-ci-common-check: mobile-frontend-dependencies mobile-test-dependencies mo
 	go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -shellcheck= -pyflakes= .github/workflows/check.yml .github/workflows/mobile-ci.yml .github/workflows/release.yml
 
 mobile-unit-check: mobile-frontend-dependencies mobile-test-dependencies
-	MOBILE_UNIT_FILTER="$(value MOBILE_UNIT_FILTER)" bun run --cwd tests/mobile test:unit
+	filter="$(value MOBILE_UNIT_FILTER)"; bun run --cwd tests/mobile test:unit $${filter:+-t "$$filter"}
 
 mobile-frontend-dependencies:
 	bun install --frozen-lockfile --cwd frontend

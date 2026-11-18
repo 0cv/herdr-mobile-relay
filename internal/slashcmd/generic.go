@@ -54,16 +54,7 @@ func (reader *catalogReader) discoverGenericSkills(dirs []string, commandFormat 
 				continue
 			}
 			seen[name] = true
-			description := metadata["description"]
-			if description == "" {
-				description = strings.ToUpper(name[:1]) + name[1:] + " skill"
-			}
-			commands = append(commands, Command{
-				Command:      "/" + strings.TrimPrefix(strings.Replace(commandFormat, "{name}", name, 1), "/"),
-				Description:  compact(description, 240),
-				Source:       source,
-				ArgumentHint: compact(metadata["argument-hint"], 120),
-			})
+			commands = append(commands, skillCommand(formattedCommand(commandFormat, name), skillDescription(metadata, name), source, metadata))
 		}
 		if truncated {
 			break
@@ -79,13 +70,4 @@ func userInvocable(metadata map[string]string) bool {
 	default:
 		return true
 	}
-}
-
-func compact(value string, limit int) string {
-	value = strings.Join(strings.Fields(value), " ")
-	runes := []rune(value)
-	if len(runes) > limit {
-		return string(runes[:limit])
-	}
-	return value
 }

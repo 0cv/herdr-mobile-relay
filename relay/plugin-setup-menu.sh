@@ -14,7 +14,6 @@ unset HERDR_RELAY_BACKEND
 # never inherits the Herdr TUI pane's configuration.
 select_instance() {
     local backend="$1"
-    local service_env
 
     if [ "$backend" = hc ]; then
         unset HERDR_RELAY_ENV HERDR_PLUGIN_CONFIG_DIR HERDR_RELAY_PORT HERDR_RELAY_PLUGIN_PORT \
@@ -23,10 +22,7 @@ select_instance() {
     fi
     export HERDR_RELAY_BACKEND="$backend"
     resolve_relay_instance
-    if [ -z "${HERDR_RELAY_ENV:-}" ]; then
-        service_env="$(installed_service_env_file)"
-        [ -z "$service_env" ] || export HERDR_RELAY_ENV="$service_env"
-    fi
+    adopt_installed_service_env
     ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
     load_relay_env "$ENV_FILE"
 }
@@ -106,15 +102,16 @@ own_gateway_summary() {
 
 service_state() {
     local state
+    local service_file
 
+    service_file="$(relay_service_file)" || return 1
+    [ -f "$service_file" ] || return 1
     case "$(uname -s)" in
         Darwin)
-            [ -f "$HOME/Library/LaunchAgents/$RELAY_LAUNCHD_LABEL.plist" ] || return 1
             launchd_service_loaded "gui/$(id -u)/$RELAY_LAUNCHD_LABEL" &&
                 printf 'installed (loaded)\n' || printf 'installed (not loaded)\n'
             ;;
         Linux)
-            [ -f "$HOME/.config/systemd/user/$RELAY_SYSTEMD_LABEL" ] || return 1
             state="$(systemctl --user is-active "$RELAY_SYSTEMD_LABEL" 2>/dev/null || true)"
             printf 'installed (%s)\n' "${state:-unknown}"
             ;;
@@ -123,13 +120,11 @@ service_state() {
 }
 
 active_path() {
-    if [ -n "$(env_file_value "$ENV_FILE" HERDR_TAILSCALE_PORT)" ]; then
-        printf 'tailscale\n'
-    elif [ -n "$(gateway_urls "$ENV_FILE")" ]; then
-        printf 'webrtc\n'
-    elif [ -n "${CLOUDFLARED_CONFIG:-}" ] && [ -f "$CLOUDFLARED_CONFIG" ]; then
-        printf 'cloudflare\n'
-    fi
+    case "$(relay_transport "$ENV_FILE")" in
+        tailscale) printf 'tailscale\n' ;;
+        gateway) printf 'webrtc\n' ;;
+        cloudflare) [ ! -f "${CLOUDFLARED_CONFIG:-}" ] || printf 'cloudflare\n' ;;
+    esac
 }
 
 transport_summary() {
@@ -139,13 +134,15 @@ transport_summary() {
     local active
     local current
     local count
+    local transport
 
-    if [ -n "$(env_file_value "$ENV_FILE" HERDR_TAILSCALE_PORT)" ]; then
+    transport="$(relay_transport "$ENV_FILE")"
+    if [ "$transport" = tailscale ]; then
         printf 'Tailscale Serve (HTTPS port %s)\n' "$RELAY_TAILSCALE_PORT"
         return 0
     fi
-    gateways="$(gateway_urls "$ENV_FILE")"
-    if [ -n "$gateways" ]; then
+    if [ "$transport" = gateway ]; then
+        gateways="$(gateway_urls "$ENV_FILE")"
         active="$(json_string_field "$health" gateway_url)"
         [ -n "$active" ] || active="$(json_string_field "$health" url)"
         [ -n "$active" ] || active="${gateways%%,*}"
@@ -174,10 +171,9 @@ transport_summary() {
         printf '\n'
         return 0
     fi
-    if [ -n "${CLOUDFLARED_CONFIG:-}" ] && [ -f "$CLOUDFLARED_CONFIG" ]; then
+    if [ -f "${CLOUDFLARED_CONFIG:-}" ]; then
         printf 'Cloudflare tunnel %s\n' \
-            "$(sed -n 's/^[[:space:]]*-\{0,1\}[[:space:]]*hostname:[[:space:]]*\(.*\)/\1/p' \
-                "$CLOUDFLARED_CONFIG" | head -1)"
+            "$(yaml_scalar hostname "$CLOUDFLARED_CONFIG")"
         return 0
     fi
     printf 'not chosen yet - choose a path\n'

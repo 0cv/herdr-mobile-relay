@@ -6,19 +6,22 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode/utf8"
 
 	"github.com/coder/websocket"
 
 	"github.com/0cv/herdr-mobile-relay/internal/config"
+	"github.com/0cv/herdr-mobile-relay/internal/framing"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 )
 
 const (
-	wsMaxReadBytes         = 21 * 1024 * 1024
+	wsMaxReadBytes         = framing.MaxLogicalBytes
 	wsSendTimeout          = 5 * time.Second
 	wsCloseTimeout         = 1 * time.Second
 	handlerCapacity        = 32
@@ -53,13 +56,13 @@ func (c *ClientConn) Context() context.Context { return c.ctx }
 // TransportGateway, or TransportWebRTC.
 func (c *ClientConn) Transport() string { return c.transport }
 
-type MessageHandler func(client *ClientConn, msg map[string]any, admitted func())
+type MessageHandler func(client *ClientConn, message protocol.Inbound, admitted func())
 type ConnectHandler func(client *ClientConn)
 type DisconnectHandler func(client *ClientConn)
 
 type inboundMessage struct {
 	client  *ClientConn
-	message map[string]any
+	message protocol.Inbound
 }
 
 type Metrics struct {
@@ -71,12 +74,6 @@ type Metrics struct {
 	SlowClientEvictions   uint64         `json:"slow_client_evictions"`
 	ConnectedClients      int            `json:"connected_clients"`
 	ConnectedByTransport  map[string]int `json:"connected_by_transport,omitempty"`
-}
-
-type ConnectedIdentity struct {
-	ClientID  string `json:"client_id"`
-	Transport string `json:"transport"`
-	AuthenticatedIdentity
 }
 
 type Hub struct {
@@ -275,7 +272,7 @@ func (h *Hub) readPump(client *ClientConn) {
 				return
 			}
 		}
-		message, err := decodeWebSocketMessage(data)
+		message, err := protocol.DecodeFrame(data)
 		if err != nil {
 			if client.secure != nil {
 				client.logger.Debug("invalid encrypted message rejected")
@@ -283,44 +280,37 @@ func (h *Hub) readPump(client *ClientConn) {
 			}
 			continue
 		}
-		if len(message) == 1 && message["type"] == "ping" {
+		if message.Type == "ping" && isBarePing(data) {
 			h.Send(client, map[string]any{"type": "pong"})
 			continue
 		}
 		h.receiptMu.Lock()
-		message["_server_sequence"] = h.receiptSequence.Add(1)
-		message["_server_received_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+		message.ReceiptSequence = h.receiptSequence.Add(1)
+		message.ReceivedAt = time.Now().UTC()
 		h.submitMessage(client, message)
 		h.receiptMu.Unlock()
 	}
 }
 
-func decodeWebSocketMessage(data []byte) (map[string]any, error) {
-	if !utf8.Valid(data) {
-		return nil, errors.New("message is not valid UTF-8")
+func isBarePing(frame []byte) bool {
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(frame, &keys); err != nil || len(keys) != 1 {
+		return false
 	}
-	var message map[string]any
-	if err := json.Unmarshal(data, &message); err != nil {
-		return nil, err
-	}
-	if message == nil {
-		return nil, errors.New("message must be a JSON object")
-	}
-	return message, nil
+	value, ok := keys["type"]
+	return ok && string(value) == `"ping"`
 }
 
-func (h *Hub) submitMessage(client *ClientConn, message map[string]any) {
+func (h *Hub) submitMessage(client *ClientConn, message protocol.Inbound) {
 	select {
 	case h.orderedIngress <- inboundMessage{client: client, message: message}:
 		observeAtomicMax(&h.ingressHighWater, uint64(len(h.orderedIngress)))
 	default:
 		h.ingressRejected.Add(1)
-		requestID, _ := message["request_id"].(string)
-		action, _ := message["type"].(string)
 		h.Send(client, map[string]any{
 			"type":       "command_result",
-			"request_id": requestID,
-			"action":     action,
+			"request_id": message.RequestID,
+			"action":     message.Type,
 			"ok":         false,
 			"phase":      "not_started",
 			"error":      "Relay is busy; command was not sent",
@@ -405,24 +395,7 @@ func (h *Hub) SendByID(clientID string, message any) bool {
 }
 
 func (h *Hub) Broadcast(message any) {
-	data, kind, replaceable, err := encodeMessage(message)
-	if err != nil {
-		return
-	}
-	h.register.Lock()
-	defer h.register.Unlock()
-	h.mu.RLock()
-	clients := make([]*ClientConn, 0, len(h.clients))
-	for _, client := range h.clients {
-		clients = append(clients, client)
-	}
-	h.mu.RUnlock()
-	for _, client := range clients {
-		if !h.push(client, data, kind, replaceable) {
-			h.slowClientEvictions.Add(1)
-			h.removeClient(client)
-		}
-	}
+	h.BroadcastPrepared(message, nil)
 }
 
 // BroadcastPrepared applies a logical state update under the same registration
@@ -440,10 +413,7 @@ func (h *Hub) BroadcastPrepared(message any, prepare func()) {
 		prepare()
 	}
 	h.mu.RLock()
-	clients := make([]*ClientConn, 0, len(h.clients))
-	for _, client := range h.clients {
-		clients = append(clients, client)
-	}
+	clients := slices.Collect(maps.Values(h.clients))
 	h.mu.RUnlock()
 	h.pushPrepared(clients, []preparedMessage{{data: data, kind: kind, replaceable: replaceable}})
 }
@@ -476,10 +446,7 @@ func (h *Hub) BroadcastBatchPrepared(build func() (messages []any, commit func()
 		commit()
 	}
 	h.mu.RLock()
-	clients := make([]*ClientConn, 0, len(h.clients))
-	for _, client := range h.clients {
-		clients = append(clients, client)
-	}
+	clients := slices.Collect(maps.Values(h.clients))
 	h.mu.RUnlock()
 	h.pushPrepared(clients, prepared)
 	return nil
@@ -494,16 +461,7 @@ func (h *Hub) SendBatchPrepared(client *ClientConn, build func() []any) bool {
 	}
 	h.register.Lock()
 	defer h.register.Unlock()
-	messages := build()
-	prepared, err := prepareMessages(messages)
-	if err != nil {
-		return false
-	}
-	if !h.clientRegistered(client) {
-		return false
-	}
-	h.pushPrepared([]*ClientConn{client}, prepared)
-	return true
+	return h.sendBatchPreparedLocked(client, build, true)
 }
 
 // SendBatchPreparedByID resolves the client and invokes its builder under the
@@ -521,9 +479,16 @@ func (h *Hub) SendBatchPreparedByID(clientID string, build func() []any) bool {
 	if client == nil {
 		return false
 	}
+	return h.sendBatchPreparedLocked(client, build, false)
+}
+
+func (h *Hub) sendBatchPreparedLocked(client *ClientConn, build func() []any, requireRegistered bool) bool {
 	messages := build()
 	prepared, err := prepareMessages(messages)
 	if err != nil {
+		return false
+	}
+	if requireRegistered && !h.clientRegistered(client) {
 		return false
 	}
 	h.pushPrepared([]*ClientConn{client}, prepared)
@@ -591,22 +556,6 @@ func (h *Hub) ClientCount() int {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return len(h.clients)
-}
-
-func (h *Hub) ConnectedIdentities() []ConnectedIdentity {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	identities := make([]ConnectedIdentity, 0, len(h.clients))
-	for _, client := range h.clients {
-		identity, authenticated := client.Identity()
-		if !authenticated {
-			continue
-		}
-		identities = append(identities, ConnectedIdentity{
-			ClientID: client.id, Transport: client.transport, AuthenticatedIdentity: identity,
-		})
-	}
-	return identities
 }
 
 // DisconnectCredential closes every connection authenticated with the
@@ -694,10 +643,7 @@ func (h *Hub) SetE2EEAuthResolver(resolver E2EEAuthResolver) {
 // to exercise the client's reconnect path rather than shut down the relay.
 func (h *Hub) DropConnections() {
 	h.mu.RLock()
-	clients := make([]*ClientConn, 0, len(h.clients))
-	for _, client := range h.clients {
-		clients = append(clients, client)
-	}
+	clients := slices.Collect(maps.Values(h.clients))
 	pending := make(map[FrameConn]*ClientConn, len(h.pending))
 	for conn, client := range h.pending {
 		pending[conn] = client
@@ -709,20 +655,11 @@ func (h *Hub) DropConnections() {
 	}
 }
 
-func (h *Hub) CloseAll() {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_ = h.Shutdown(ctx)
-}
-
 func (h *Hub) Shutdown(ctx context.Context) error {
 	h.mu.Lock()
 	h.closing = true
-	clients := make([]*ClientConn, 0, len(h.clients))
-	for _, client := range h.clients {
-		clients = append(clients, client)
-		delete(h.clients, client.id)
-	}
+	clients := slices.Collect(maps.Values(h.clients))
+	clear(h.clients)
 	pending := h.pending
 	h.pending = make(map[FrameConn]*ClientConn)
 	h.mu.Unlock()

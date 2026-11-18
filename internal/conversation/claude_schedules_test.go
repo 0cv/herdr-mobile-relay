@@ -32,11 +32,7 @@ func claudeScheduleFixture(t *testing.T, segments int) (*Browser, BrowseScope, [
 	options := DefaultBrowserOptions()
 	options.RecentBytes = 256 * 1024
 	options.MaxPageSize = 512
-	b, err := NewBrowser(reader, t.TempDir(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = b.Close() })
+	b := newTestBrowser(t, reader, options)
 	return b, normalizeBrowseScope(BrowseScope{Provider: "claude", CWD: "/work", SessionID: testSessionID}), paths
 }
 
@@ -81,9 +77,12 @@ func TestClaudeChainCreatorPausedAtQueueAdmission(t *testing.T) {
 			var job *browseJob
 			if retry {
 				firstCapture, release := make(chan struct{}), make(chan struct{})
-				b.chainWorkerCaptureObserver = func([]claudeRangeEvidence) { close(firstCapture); <-release }
+				setBrowserObserver(b, "chain_worker_capture", func(observation browserObservation) {
+					close(firstCapture)
+					<-release
+				})
 				var page *BrowsePage
-				job, page = b.startClaudeChainJob(scope, chain, 1)
+				job, page = b.startClaudeChainJob(scope, chain, 1, newClaudeChainRequestBudget(b.options.RecentBytes).validation)
 				if job == nil || page != nil {
 					t.Fatalf("first job=%v page=%v", job, page)
 				}
@@ -109,16 +108,27 @@ func TestClaudeChainCreatorPausedAtQueueAdmission(t *testing.T) {
 			defer creatorOnce.Do(func() { close(creatorRelease) })
 			defer workerOnce.Do(func() { close(workerRelease) })
 			creatorPaused := make(chan struct{})
-			b.chainQueueAdmissionObserver = func(j *browseJob) { close(creatorPaused); admitted <- j; <-creatorRelease }
-			b.chainWorkerBeforeCaptureObserver = func() { <-creatorPaused }
-			b.chainWorkerCaptureObserver = func(e []claudeRangeEvidence) { captured <- e; <-workerRelease }
+			setBrowserObserver(b, "chain_queue_admission", func(observation browserObservation) {
+				j := observation.job
+				close(creatorPaused)
+				admitted <- j
+				<-creatorRelease
+			})
+			setBrowserObserver(b, "chain_worker_before_capture", func(observation browserObservation) {
+				<-creatorPaused
+			})
+			setBrowserObserver(b, "chain_worker_capture", func(observation browserObservation) {
+				e := observation.evidence
+				captured <- e
+				<-workerRelease
+			})
 			returned := make(chan bool, 1)
 			go func() {
 				if retry {
-					returned <- b.retryJob(context.Background(), job)
+					returned <- b.retryJob(context.Background(), job, newClaudeChainRequestBudget(b.options.RecentBytes).validation)
 					return
 				}
-				j, p := b.startClaudeChainJob(scope, chain, 1)
+				j, p := b.startClaudeChainJob(scope, chain, 1, newClaudeChainRequestBudget(b.options.RecentBytes).validation)
 				if j != nil {
 					b.releaseJob(j)
 				}
@@ -162,7 +172,7 @@ func TestClaudeChainCreatorPausedAtQueueAdmission(t *testing.T) {
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
-					j, p := b.startClaudeChainJob(scope, chain, 1)
+					j, p := b.startClaudeChainJob(scope, chain, 1, newClaudeChainRequestBudget(b.options.RecentBytes).validation)
 					if j != nil {
 						b.releaseJob(j)
 						if j != job {
@@ -208,11 +218,17 @@ func TestClaudeChainCreatorPausedAtQueueAdmission(t *testing.T) {
 func TestClaudeChainHotAppendEvidenceAndPhysicalBounds(t *testing.T) {
 	b, scope, paths := claudeScheduleFixture(t, 2)
 	var foreground, background, compactions atomic.Int64
-	b.foregroundReadObserver = func(n int64) { foreground.Add(n) }
-	b.backgroundReadObserver = func(n int64) { background.Add(n) }
+	setBrowserObserver(b, "foreground_read", func(observation browserObservation) {
+		n := observation.bytes
+		foreground.Add(n)
+	})
+	setBrowserObserver(b, "background_read", func(observation browserObservation) {
+		n := observation.bytes
+		background.Add(n)
+	})
 	var mutateCompaction atomic.Bool
 	mutationResult := make(chan error, 1)
-	b.chainCompactionObserver = func() {
+	setBrowserObserver(b, "chain_compaction", func(observation browserObservation) {
 		compactions.Add(1)
 		if !mutateCompaction.Swap(false) {
 			return
@@ -230,7 +246,7 @@ func TestClaudeChainHotAppendEvidenceAndPhysicalBounds(t *testing.T) {
 			}
 		}
 		mutationResult <- err
-	}
+	})
 	initial := scheduleLatest(t, b, scope)
 	if initial.ReasonCode != "" {
 		t.Fatalf("initial=%#v", initial)
@@ -312,7 +328,7 @@ func TestClaudeChainPreparedAppendLatestConcurrentGrownSegments(t *testing.T) {
 	chain := scheduleChain(t, b, scope)
 	// Prepare every segment through the production job admission path.
 	for segment := range paths {
-		job, page := b.startClaudeChainJob(scope, chain, segment)
+		job, page := b.startClaudeChainJob(scope, chain, segment, newClaudeChainRequestBudget(b.options.RecentBytes).validation)
 		if job == nil || page != nil {
 			t.Fatalf("prepare %d=%v", segment, page)
 		}
@@ -373,8 +389,15 @@ func TestClaudeChainPreparedAppendLatestConcurrentGrownSegments(t *testing.T) {
 	entered, release := make(chan struct{}), make(chan struct{})
 	var once sync.Once
 	var foreground, background atomic.Int64
-	b.foregroundReadObserver = func(n int64) { foreground.Add(n) }
-	b.backgroundReadObserver = func(n int64) { background.Add(n); once.Do(func() { close(entered); <-release }) }
+	setBrowserObserver(b, "foreground_read", func(observation browserObservation) {
+		n := observation.bytes
+		foreground.Add(n)
+	})
+	setBrowserObserver(b, "background_read", func(observation browserObservation) {
+		n := observation.bytes
+		background.Add(n)
+		once.Do(func() { close(entered); <-release })
+	})
 	var wg sync.WaitGroup
 	pages := make(chan BrowsePage, 12)
 	for caller := range 12 {

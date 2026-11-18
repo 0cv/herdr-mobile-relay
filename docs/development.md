@@ -51,7 +51,7 @@ the same request ID replay that result.
 
 ## Profile ownership and installation recovery
 
-Clear and Restart start a replacement with the agent's launch profile. A
+Clear starts a replacement with the agent's launch profile. A
 verified association between the profile and the terminal, pane, tab and
 workspace identities wins; otherwise the profile matching the agent's reported
 name (including aliases) is used. The replacement runs that profile's command,
@@ -66,8 +66,8 @@ and removed profiles are not verified. Confirmed disappearance or terminal
 replacement invalidates the association. Read-only access and explicitly
 requested stop operations do not need a profile.
 
-A corrupt ownership store disables verified associations, so Clear and Restart
-use the reported agent name. Preserve the store for inspection and restore a
+A corrupt ownership store disables verified associations, so Clear uses the
+reported agent name. Preserve the store for inspection and restore a
 trusted backup while the relay is stopped. If no backup exists, an operator can
 explicitly archive the damaged file and restart with an empty store; only new,
 verified launches establish ownership again. Do not copy records to a
@@ -83,8 +83,8 @@ Gateway mode does not require a Cloudflare URL.
 If rollback cannot be confirmed, its private recovery directory remains under
 `$XDG_STATE_HOME/herdr-mobile-relay/recovery` (default
 `~/.local/state/herdr-mobile-relay/recovery`). The `state` file identifies the
-original paths and activation settings; `0`, `1`, and `2` contain any previous
-current definition, legacy definition and environment file. A
+original paths and activation settings; `0` and `1` contain any previous
+definition and environment file. A
 `previous-ready.json` file, when present, records the previous verified runtime
 identity. Inspect the native manager and these files before attempting another
 installation; a retained directory means restoration is uncertain, not healthy.
@@ -149,7 +149,7 @@ installed once (`sudo dnf install podman`); the image is downloaded on first
 use and remains cached across runs and reboots. A Playwright version upgrade
 fetches the matching new image.
 
-Both browser test commands select the container automatically on Fedora:
+Both browser test commands share one wrapper, `frontend/scripts/run-browser-tests.sh`, and select the container automatically on Fedora:
 
 ```bash
 make frontend-browser                    # Chromium and WebKit UI journeys
@@ -158,19 +158,27 @@ make frontend-browser-attention-release  # Chromium and WebKit relay/attention t
 HERDR_WEB_ROOT=../web bun run --cwd frontend test:browser:attention --project=webkit-attention
 ```
 
-The attention runner keeps Bun, Go, and the isolated relay fixture on the host.
+The attention suite keeps Bun, Go, and the isolated relay fixture on the host.
 Only the WebKit browser runs in the container, with Playwright forwarding its
 loopback traffic to the host's test HTTP and relay WebSocket servers. The
 browser-control port is published only on `127.0.0.1`, on an automatically
-allocated port, and the runner removes its container on exit without removing
-the cached image. Test output and failure traces stay on the host. Ubuntu CI
-continues to use native browsers; `HERDR_WEBKIT_CONTAINER=1` selects Docker for
-hosts that explicitly want containerized WebKit. Directly invoking
-`playwright test --config playwright.attention.config.ts` bypasses the wrapper;
-use the package script or Make target instead.
+allocated port, and the wrapper removes its container on exit without removing
+the cached image. Test output and failure traces stay on the host.
+
+The UI journeys suite runs Chromium on the host and its whole WebKit project
+inside the container (`HERDR_WEBKIT_WORKERS` sets the container's worker count,
+default 2), because some of its tests launch WebKit directly.
+
+Journeys live in `frontend/tests/browser`, one file per journey, on the fake relay in `frontend/tests/support/journey-relay.ts`.
+
+Ubuntu CI continues to use native browsers; `HERDR_WEBKIT_CONTAINER=1` selects
+Docker for hosts that explicitly want containerized WebKit. Directly invoking
+`playwright test` bypasses the wrapper; use the Make targets or the package
+script instead.
 
 The test-only `cmd/fake-herdr` binary provides deterministic Herdr CLI behavior,
-failure injection, and process-control traces for black-box tests.
+a Herdr socket API (`fake-herdr socket-server`), response barriers, and
+process-control traces for black-box tests.
 
 Installed-PWA device CI is documented in `docs/mobile-device-ci.md`. Its host-only
 check does not replace the real Android Home Screen or iOS Home Screen runs;
@@ -245,9 +253,12 @@ workspace membership. It closes panes but never removes Git checkouts or
 branches. Worktree removal remains a separate destructive operation with its
 own dirty-checkout confirmation.
 
-Use the fake Herdr binary or a temporary Unix socket fixture for tests. Do not
-run production Herdr commands or mutate production state while checking these
-paths.
+Coordinator tests use the in-process `fakeBackend` (`internal/coordinator/backend_fake_test.go`),
+which records calls and runs per-method hooks. The poller and event stream tests
+that need the Herdr socket wire use `startSocketFixture`
+(`internal/coordinator/socket_fixture_test.go`). Black-box tests keep the
+`cmd/fake-herdr` binary. Do not run production Herdr commands or mutate
+production state while checking these paths.
 
 ## Core backend
 

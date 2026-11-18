@@ -2,25 +2,33 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+TMP_ROOT="$(cd "${TMPDIR:-/tmp}" && pwd -P)"
+WORK_DIR="$(mktemp -d "$TMP_ROOT/herdr-stable-test.XXXXXX")"
+trap 'rm -rf "$WORK_DIR"' EXIT
+
 TUNNEL_UUID="11111111-2222-4333-8444-555555555555"
-CASES=""
 TEST_COUNT=0
-TEST_BIN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/herdr-stable-bin.XXXXXX")"
+TEST_BIN_DIR="$WORK_DIR/bin"
 TEST_RELAY_BIN="$TEST_BIN_DIR/herdr-mobile-relay"
-GOMODCACHE="${GOMODCACHE:-${TMPDIR:-/tmp}/herdr-mobile-relay-go-mod}" \
-    GOCACHE="${GOCACHE:-${TMPDIR:-/tmp}/herdr-mobile-relay-go-cache}" \
-    go build -o "$TEST_RELAY_BIN" "$ROOT/cmd/herdr-mobile-relay"
-mkdir -p "$TEST_BIN_DIR/web"
+TEST_RELAY_DIR="$WORK_DIR/relay"
+# shellcheck source=lib.sh
+. "$ROOT/tests/lib.sh"
+mkdir -p "$TEST_BIN_DIR/web" "$TEST_RELAY_DIR" "$WORK_DIR/tmp"
+TMPDIR="$WORK_DIR/tmp" ensure_relay_test_binary "$TEST_BIN_DIR"
+[ "$HERDR_TEST_RELAY_BIN" = "$TEST_RELAY_BIN" ] || cp "$HERDR_TEST_RELAY_BIN" "$TEST_RELAY_BIN"
+cp -p "$ROOT"/relay/*.sh "$TEST_RELAY_DIR/"
+write_stub "$TEST_RELAY_DIR/speech-voices.sh" <<'EOF'
+#!/bin/sh
+[ "$#" -eq 1 ] && [ "$1" = --missing ]
+EOF
+cp "$ROOT/.env.example" "$WORK_DIR/.env.example"
 cp "$ROOT/web/release.json" "$TEST_BIN_DIR/web/release.json"
 printf '{"version":"dev","revision":"unknown","web_hash":"test-web"}\n' \
     > "$TEST_BIN_DIR/release-manifest.json"
-
-cleanup() {
-    # shellcheck disable=SC2086
-    rm -rf $CASES
-    rm -rf "$TEST_BIN_DIR"
-}
-trap cleanup EXIT
+cat > "$WORK_DIR/bash-env" <<'EOF'
+curl() { "$BIN/curl" "$@"; }
+hostname() { "$BIN/hostname" "$@"; }
+EOF
 
 fail() {
     echo "not ok - $1" >&2
@@ -243,20 +251,20 @@ write_origin_cert() {
 }
 
 new_case() {
-    CASE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/herdr-stable-test.XXXXXX")"
-    CASE_DIR="$(cd "$CASE_DIR" && pwd -P)"
-    CASES="$CASES $CASE_DIR"
+    CASE_DIR="$(mktemp -d "$WORK_DIR/case.XXXXXX")"
     HOME="$CASE_DIR/home"
     BIN="$HOME/.local/bin"
     OUTPUT="$CASE_DIR/output"
     STUB_LOG="$CASE_DIR/commands.log"
-    mkdir -p "$HOME" "$BIN"
+    mkdir -p "$HOME" "$BIN" "$CASE_DIR/tmp"
     : > "$STUB_LOG"
     write_stubs
 
     export HOME BIN STUB_LOG
-    export XDG_STATE_HOME="$HOME/state"
+    export BASH_ENV="$WORK_DIR/bash-env"
+    export XDG_CACHE_HOME="$HOME/.cache" XDG_STATE_HOME="$HOME/state"
     export PATH="$BIN:/usr/bin:/bin"
+    export HERDR_RELEASE_ROOT="$HOME/release"
     export HERDR_RELAY_ENV="$HOME/relay.env"
     export HERDR_RELAY_BIN="$TEST_RELAY_BIN"
     export HERDR_STABLE_STATE_FILE="$HOME/stable-setup.json"
@@ -272,8 +280,8 @@ new_case() {
     export STUB_LOGIN_MARKER="$CASE_DIR/login-complete"
     export STUB_ROUTE_MARKER="$CASE_DIR/dns-routed"
     export STUB_CREATED_TUNNEL_MARKER="$CASE_DIR/created-tunnel.json"
-    unset CLOUDFLARED_CONFIG DISPLAY WAYLAND_DISPLAY HERDR_PHONE_APP_URL
-    unset HERDR_APP_DEPLOY_ORIGIN HERDR_STABLE_REUSE_CONFIG HERDR_STABLE_RELOGIN
+    unset CLOUDFLARED_CONFIG TUNNEL_ORIGIN_CERT DISPLAY WAYLAND_DISPLAY HERDR_PHONE_APP_URL HERDR_PLUGIN_CONFIG_DIR
+    unset HERDR_APP_DEPLOY_ORIGIN HERDR_GATEWAY_URL HERDR_RELAY_PORT HERDR_STABLE_REUSE_CONFIG HERDR_STABLE_RELOGIN
     unset STUB_APP_ORIGIN STUB_CREATE_FAIL STUB_DELETE_FAIL STUB_DNS_MODE
     unset STUB_HTTP_MODE STUB_READY_MODE STUB_INGRESS_FAIL
     unset STUB_LIST_JSON STUB_LOGIN_REQUIRED STUB_ROUTE_FAIL STUB_ROUTE_NAME
@@ -284,7 +292,7 @@ run_setup() {
     set +e
     # Keep confirmation cases deterministic when the parent test runner has a
     # TTY (for example, `make check` inside a Herdr pane).
-    "$ROOT/relay/stable-setup.sh" < /dev/null > "$OUTPUT" 2>&1
+    TMPDIR="$CASE_DIR/tmp" "$TEST_RELAY_DIR/stable-setup.sh" < /dev/null > "$OUTPUT" 2>&1
     STATUS=$?
     set -e
 }
@@ -293,7 +301,7 @@ run_setup_with_input() {
     local input="$1"
 
     set +e
-    printf '%b' "$input" | "$ROOT/relay/stable-setup.sh" > "$OUTPUT" 2>&1
+    printf '%b' "$input" | TMPDIR="$CASE_DIR/tmp" "$TEST_RELAY_DIR/stable-setup.sh" > "$OUTPUT" 2>&1
     STATUS=$?
     set -e
 }
@@ -318,20 +326,28 @@ EOF
 HERDR_RELAY_TOKEN=test-token
 HERDR_RELAY_INSTANCE_ID=instance-a
 HERDR_RELAY_PORT=$port
-CLOUDFLARED_CONFIG=$config
+CLOUDFLARED_CONFIG='$config'
 EOF
     chmod 600 "$HERDR_RELAY_ENV" "$config" "$credentials"
 }
 
 test_success_and_alternate_port() {
+    local temp_entry
+
     new_case
-    printf 'HERDR_RELAY_PORT=8399\nHERDR_RELAY_TOKEN=fake-token\n' > "$HERDR_RELAY_ENV"
+    mkdir "$CASE_DIR/unrelated"
+    printf 'HERDR_RELAY_PORT=8399\nHERDR_RELAY_TOKEN=fake-token\nWORK_DIR=%q\n' \
+        "$CASE_DIR/unrelated" > "$HERDR_RELAY_ENV"
     run_setup
     [ "$STATUS" -eq 0 ] || { sed -n '1,240p' "$OUTPUT" >&2; fail "stable setup success"; }
     assert_contains "$HOME/cloudflared/config.yml" 'service: http://127.0.0.1:8399'
     assert_contains "$HERDR_RELAY_ENV" 'HERDR_RELAY_INSTANCE_ID='
     assert_contains "$OUTPUT" 'Stable relay verified'
     assert_contains "$OUTPUT" 'Herdr Mobile Relay phone setup'
+    [ -d "$CASE_DIR/unrelated" ] || fail "stable setup removed the directory named by relay.env"
+    temp_entry="$(find "$CASE_DIR/tmp" -maxdepth 1 -type d -name 'herdr-stable-setup.*' -print -quit)" ||
+        fail "could not inspect the stable setup temp directory"
+    [ -z "$temp_entry" ] || fail "stable setup left its work directory behind"
     assert_contains "$OUTPUT" 'https://relay-workstation.example.test/#label=workstation&relay=wss%3A%2F%2Frelay-workstation.example.test&setup=fake-token'
     assert_contains "$HOME/phone-app-origin-configured" 'https://relay-workstation.example.test'
     MODE="$(stat -c '%a' "$HOME/phone-app-origin-configured" 2>/dev/null || stat -f '%Lp' "$HOME/phone-app-origin-configured")"
@@ -393,6 +409,7 @@ test_discovered_phone_app_origin() {
     assert_contains "$OUTPUT" 'Direct browser fallback:'
     assert_contains "$OUTPUT" 'https://relay-workstation.example.test/#label=workstation&relay=wss%3A%2F%2Frelay-workstation.example.test&setup=fake-token'
     assert_contains "$HOME/phone-app-origin-configured" 'https://herdr.example.test'
+    assert_contains "$STUB_LOG" 'curl https://herdr.example.test/manifest.webmanifest'
     pass "stable setup discovers the shared phone app without changing the relay endpoint"
 }
 
@@ -547,7 +564,7 @@ test_zone_failure_preserves_state() {
     assert_contains "$OUTPUT" 'API error: zone authorization failed for test zone'
     assert_contains "$OUTPUT" 'zone selected during cloudflared tunnel login'
     assert_contains "$OUTPUT" 'Setup state was preserved'
-    assert_contains "$OUTPUT" "HERDR_RELAY_ENV=$HERDR_RELAY_ENV make stable-setup"
+    assert_contains "$OUTPUT" "HERDR_RELAY_ENV=$(printf '%q' "$HERDR_RELAY_ENV") make stable-setup"
     assert_not_contains "$OUTPUT" 'Herdr Mobile Relay phone setup'
     [ "$("$TEST_RELAY_BIN" stable-state get "$HERDR_STABLE_STATE_FILE" stage)" = routing_dns ] || fail "route stage not preserved"
     pass "zone authorization failures retain the original error and resumable state"
@@ -628,7 +645,7 @@ test_teardown_ownership_and_dns_retention() {
     "$TEST_RELAY_BIN" stable-state init "$HERDR_STABLE_STATE_FILE" "$HERDR_RELAY_ENV"
     "$TEST_RELAY_BIN" stable-state update "$HERDR_STABLE_STATE_FILE" 'tunnel_name=someone-elses-tunnel'
     set +e
-    HERDR_STABLE_TEARDOWN_YES=1 "$ROOT/relay/stable-teardown.sh" > "$OUTPUT" 2>&1
+    HERDR_STABLE_TEARDOWN_YES=1 "$TEST_RELAY_DIR/stable-teardown.sh" > "$OUTPUT" 2>&1
     STATUS=$?
     set -e
     [ "$STATUS" -ne 0 ] || fail "foreign tunnel teardown should fail"
@@ -637,27 +654,29 @@ test_teardown_ownership_and_dns_retention() {
 
     new_case
     write_existing_config 8401
-    sed 's/herdr-mobile-relay-existing/someone-elses-tunnel/' "$HOME/custom-config.yml" > "$HOME/foreign-config.yml"
-    mv "$HOME/foreign-config.yml" "$HOME/custom-config.yml"
     set +e
-    HERDR_STABLE_TEARDOWN_YES=1 "$ROOT/relay/stable-teardown.sh" > "$OUTPUT" 2>&1
+    HERDR_STABLE_TEARDOWN_YES=1 "$TEST_RELAY_DIR/stable-teardown.sh" > "$OUTPUT" 2>&1
     STATUS=$?
     set -e
-    [ "$STATUS" -ne 0 ] || fail "foreign config recovery should fail"
-    assert_contains "$OUTPUT" 'config tunnel is outside the Herdr stable-tunnel namespace'
-    [ -f "$HOME/custom-config.yml" ] || fail "foreign config recovery removed config"
+    [ "$STATUS" -ne 0 ] || fail "teardown without recorded state should fail"
+    assert_contains "$OUTPUT" "No stable setup state was found at $HERDR_STABLE_STATE_FILE"
+    [ ! -e "$HERDR_STABLE_STATE_FILE" ] || fail "teardown created missing state"
+    [ -f "$HOME/custom-config.yml" ] || fail "teardown without state removed config"
+    [ -f "$HOME/custom-credentials.json" ] || fail "teardown without state removed credentials"
     assert_not_contains "$STUB_LOG" ' tunnel delete '
 
     new_case
     write_existing_config 8401
+    export HERDR_STABLE_REUSE_CONFIG=1 STUB_DNS_MODE=always
+    run_setup
+    [ "$STATUS" -eq 0 ] || { sed -n '1,240p' "$OUTPUT" >&2; fail "setup before recorded relay teardown"; }
     assert_not_contains "$STUB_LOG" ' tunnel delete '
     export STUB_DNS_MODE=never
     set +e
-    HERDR_STABLE_TEARDOWN_YES=1 "$ROOT/relay/stable-teardown.sh" > "$OUTPUT" 2>&1
+    HERDR_STABLE_TEARDOWN_YES=1 "$TEST_RELAY_DIR/stable-teardown.sh" > "$OUTPUT" 2>&1
     STATUS=$?
     set -e
     [ "$STATUS" -eq 0 ] || { sed -n '1,240p' "$OUTPUT" >&2; fail "recorded relay teardown"; }
-    assert_contains "$OUTPUT" 'Recovered teardown identity from the retained Herdr Cloudflare config'
     assert_contains "$OUTPUT" 'Deleting configured stable tunnel herdr-mobile-relay-existing'
     assert_contains "$OUTPUT" 'Removed stable relay config'
     assert_contains "$OUTPUT" 'Removed stable relay credentials'
@@ -680,7 +699,7 @@ test_teardown_ownership_and_dns_retention() {
     [ "$STATUS" -eq 0 ] || fail "setup before failed tunnel deletion"
     export STUB_DELETE_FAIL=1
     set +e
-    HERDR_STABLE_TEARDOWN_YES=1 "$ROOT/relay/stable-teardown.sh" > "$OUTPUT" 2>&1
+    HERDR_STABLE_TEARDOWN_YES=1 "$TEST_RELAY_DIR/stable-teardown.sh" > "$OUTPUT" 2>&1
     STATUS=$?
     set -e
     [ "$STATUS" -ne 0 ] || fail "failed tunnel deletion should fail teardown"
@@ -693,7 +712,7 @@ test_teardown_ownership_and_dns_retention() {
     [ "$STATUS" -eq 0 ] || fail "setup before teardown"
     export STUB_DNS_MODE=persists
     set +e
-    HERDR_STABLE_TEARDOWN_YES=1 "$ROOT/relay/stable-teardown.sh" > "$OUTPUT" 2>&1
+    HERDR_STABLE_TEARDOWN_YES=1 "$TEST_RELAY_DIR/stable-teardown.sh" > "$OUTPUT" 2>&1
     STATUS=$?
     set -e
     [ "$STATUS" -ne 0 ] || fail "remaining DNS should be reported"
@@ -702,64 +721,6 @@ test_teardown_ownership_and_dns_retention() {
     [ -f "$HERDR_STABLE_STATE_FILE" ] || fail "diagnostic state was removed"
     pass "teardown protects foreign state, removes recorded relays, and retains DNS diagnosis"
 }
-
-# The wizard's own config records the tunnel UUID, so recovery has to resolve
-# the name behind that id before the namespace guard can judge it.
-write_tunnel_list() {
-    local name="$1"
-
-    printf '[{"id":"%s","name":"%s"}]\n' "$TUNNEL_UUID" "$name" > "$HOME/tunnel-list.json"
-    export STUB_LIST_JSON="$HOME/tunnel-list.json"
-}
-
-test_teardown_recovers_uuid_config_by_tunnel_name() {
-    new_case
-    write_existing_config 8401 "$TUNNEL_UUID"
-    write_origin_cert zone-old
-    write_tunnel_list herdr-mobile-relay-workstation
-    export STUB_DNS_MODE=never
-    set +e
-    HERDR_STABLE_TEARDOWN_YES=1 "$ROOT/relay/stable-teardown.sh" > "$OUTPUT" 2>&1
-    STATUS=$?
-    set -e
-    [ "$STATUS" -eq 0 ] || { sed -n '1,240p' "$OUTPUT" >&2; fail "uuid config recovery"; }
-    assert_contains "$OUTPUT" 'Recovered teardown identity from the retained Herdr Cloudflare config'
-    assert_contains "$OUTPUT" "Tunnel:      herdr-mobile-relay-workstation ($TUNNEL_UUID)"
-    assert_contains "$STUB_LOG" "tunnel --origincert $HOME/.cloudflared/cert.pem list --id $TUNNEL_UUID"
-    assert_contains "$OUTPUT" 'Deleting configured stable tunnel herdr-mobile-relay-workstation'
-    assert_contains "$STUB_LOG" "tunnel delete --force $TUNNEL_UUID"
-    [ ! -f "$HOME/custom-config.yml" ] || fail "uuid config recovery retained config"
-
-    new_case
-    write_existing_config 8401 "$TUNNEL_UUID"
-    write_origin_cert zone-old
-    write_tunnel_list my-personal-tunnel
-    set +e
-    HERDR_STABLE_TEARDOWN_YES=1 "$ROOT/relay/stable-teardown.sh" > "$OUTPUT" 2>&1
-    STATUS=$?
-    set -e
-    [ "$STATUS" -ne 0 ] || fail "foreign resolved tunnel name should fail"
-    assert_contains "$OUTPUT" 'config tunnel is outside the Herdr stable-tunnel namespace: my-personal-tunnel'
-    assert_not_contains "$STUB_LOG" ' tunnel delete '
-    [ -f "$HOME/custom-config.yml" ] || fail "foreign resolved name removed config"
-    [ -f "$HOME/custom-credentials.json" ] || fail "foreign resolved name removed credentials"
-
-    new_case
-    write_existing_config 8401 "$TUNNEL_UUID"
-    write_origin_cert zone-old
-    export STUB_LOGIN_REQUIRED=1
-    set +e
-    HERDR_STABLE_TEARDOWN_YES=1 "$ROOT/relay/stable-teardown.sh" > "$OUTPUT" 2>&1
-    STATUS=$?
-    set -e
-    [ "$STATUS" -ne 0 ] || fail "unresolvable tunnel name should fail"
-    assert_contains "$OUTPUT" "Cloudflare could not name tunnel $TUNNEL_UUID"
-    assert_contains "$OUTPUT" 'cloudflared tunnel login'
-    assert_not_contains "$STUB_LOG" ' tunnel delete '
-    [ -f "$HOME/custom-config.yml" ] || fail "unresolvable name removed config"
-    pass "teardown recovery resolves a UUID config to its tunnel name before judging the namespace"
-}
-
 
 test_core_instance() {
     new_case
@@ -800,7 +761,7 @@ test_core_refuses_old_release() {
     pass "core stable setup refuses an old relay release before changing anything"
 }
 
-echo "1..20"
+echo "1..19"
 test_core_instance
 test_core_refuses_old_release
 test_success_and_alternate_port
@@ -820,4 +781,3 @@ test_health_mismatch_suppresses_qr
 test_inventory_failure_suppresses_qr
 test_separate_readiness_timeouts
 test_teardown_ownership_and_dns_retention
-test_teardown_recovers_uuid_config_by_tunnel_name

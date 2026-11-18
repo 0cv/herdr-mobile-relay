@@ -12,7 +12,7 @@ export function validateReleaseFixture(root: string, mutate?: (bundle: string) =
   const frontend = join(root, 'frontend');
   const scripts = join(frontend, 'scripts');
   mkdirSync(scripts, { recursive: true });
-  for (const name of ['validate-build.mjs', 'compressed-assets.mjs', 'pages-policy.ts']) {
+  for (const name of ['validate-build.mjs', 'compressed-assets.mjs', 'pages-policy.ts', 'release-rules.ts']) {
     cpSync(join(repository, 'frontend/scripts', name), join(scripts, name));
   }
   writeFileSync(join(frontend, 'build-versions.json'), JSON.stringify({ ...versions, assets: identity.assets }));

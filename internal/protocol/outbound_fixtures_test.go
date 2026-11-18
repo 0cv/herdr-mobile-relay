@@ -13,7 +13,7 @@ import (
 )
 
 func TestAgentsFixtureMatchesGoType(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("..", "..", "contracts", "fixtures", "outbound", "agents.json"))
+	data, err := os.ReadFile(filepath.Join("testdata", "outbound", "agents.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +58,7 @@ func TestAgentsFixtureMatchesGoType(t *testing.T) {
 }
 
 func TestCommandResultFixtureIsExact(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("..", "..", "contracts", "fixtures", "outbound", "command_result.json"))
+	data, err := os.ReadFile(filepath.Join("testdata", "outbound", "command_result.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestQuestionResultFixturesCoverTerminalProtocol(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			data, err := os.ReadFile(filepath.Join("..", "..", "contracts", "fixtures", "outbound", test.name))
+			data, err := os.ReadFile(filepath.Join("testdata", "outbound", test.name))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -113,7 +113,7 @@ func TestQuestionResultFixturesCoverTerminalProtocol(t *testing.T) {
 }
 
 func TestSlashCommandsFixtureMatchesCompleteClaudeCatalog(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("..", "..", "contracts", "fixtures", "outbound", "slash_commands.json"))
+	data, err := os.ReadFile(filepath.Join("testdata", "outbound", "slash_commands.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +130,7 @@ func TestSlashCommandsFixtureMatchesCompleteClaudeCatalog(t *testing.T) {
 	if err := json.Unmarshal(data, &fixture); err != nil {
 		t.Fatal(err)
 	}
-	actual := slashcmd.CatalogFor("claude", "/nonexistent", "/nonexistent")
+	actual := slashcmd.CatalogFor("claude", "claude", slashcmd.DiscoverContext{Cwd: "/nonexistent", Home: "/nonexistent"})
 	if fixture.Type != "command_result" || fixture.RequestID != "req-slash-1" ||
 		fixture.Action != "list_slash_commands" || !fixture.OK ||
 		fixture.Phase != "completed" || fixture.Error != "" || fixture.PaneID != "pane-1" ||
@@ -140,7 +140,7 @@ func TestSlashCommandsFixtureMatchesCompleteClaudeCatalog(t *testing.T) {
 }
 
 func TestAgentUpdateFixtureMatchesGoType(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("..", "..", "contracts", "fixtures", "outbound", "agent_update.json"))
+	data, err := os.ReadFile(filepath.Join("testdata", "outbound", "agent_update.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +163,7 @@ func TestAgentUpdateFixtureMatchesGoType(t *testing.T) {
 }
 
 func TestActivityHistoryFixtureMatchesGoType(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("..", "..", "contracts", "fixtures", "outbound", "activity_history.json"))
+	data, err := os.ReadFile(filepath.Join("testdata", "outbound", "activity_history.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,11 +197,11 @@ func TestActivityHistoryFixtureMatchesGoType(t *testing.T) {
 }
 
 func TestOutboundFixturesUseConsistentTimestampUnit(t *testing.T) {
-	agentsData, err := os.ReadFile(filepath.Join("..", "..", "contracts", "fixtures", "outbound", "agents.json"))
+	agentsData, err := os.ReadFile(filepath.Join("testdata", "outbound", "agents.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	updateData, err := os.ReadFile(filepath.Join("..", "..", "contracts", "fixtures", "outbound", "agent_update.json"))
+	updateData, err := os.ReadFile(filepath.Join("testdata", "outbound", "agent_update.json"))
 	if err != nil {
 		t.Fatal(err)
 	}

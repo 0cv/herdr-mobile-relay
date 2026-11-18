@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -372,5 +374,48 @@ func TestRearmedBootstrapRefreshesExpiryWithEnrolledDevices(t *testing.T) {
 	}
 	if !bytes.Equal(resolved, secret) {
 		t.Fatal("refreshed re-armed bootstrap returned the wrong secret")
+	}
+}
+
+func TestFailedPersistLeavesStoreUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EnsureBootstrapInvitation(bytes.Repeat([]byte{3}, secretBytes), "phone", "en"); err != nil {
+		t.Fatal(err)
+	}
+	store.state.Credentials = []credentialRecord{
+		testCredential("device-one", "credential-one", RoleController),
+		testCredential("device-two", "credential-two", RoleController),
+	}
+	before := store.ListCredentials("")
+	store.dir = filepath.Join(dir, "missing")
+
+	if _, err := store.RenameCredential("credential-one", "renamed"); err == nil {
+		t.Fatal("RenameCredential() succeeded with a broken store directory")
+	}
+	if _, err := store.RevokeCredential("credential-one"); err == nil {
+		t.Fatal("RevokeCredential() succeeded with a broken store directory")
+	}
+	if _, err := store.CompleteE2EEAuth(context.Background(), transport.E2EEAuthSelector{
+		Kind: transport.E2EEAuthInvitation, ID: bootstrapInvitationID, Version: 1, Locale: "en",
+	}, true); err == nil {
+		t.Fatal("invitation redemption succeeded with a broken store directory")
+	}
+	if _, err := store.CreateInvitation("tablet", RoleReader, "en"); err == nil {
+		t.Fatal("CreateInvitation() succeeded with a broken store directory")
+	}
+	if err := store.ResetWithBootstrap(bytes.Repeat([]byte{4}, secretBytes), "phone", "en"); err == nil {
+		t.Fatal("ResetWithBootstrap() succeeded with a broken store directory")
+	}
+
+	if !reflect.DeepEqual(store.ListCredentials(""), before) {
+		t.Fatalf("credentials changed: %#v, want %#v", store.ListCredentials(""), before)
+	}
+	if invitation := store.state.Invitation; invitation == nil ||
+		invitation.InvitationID != bootstrapInvitationID || invitation.PendingCredentialID != "" {
+		t.Fatalf("invitation changed: %#v", invitation)
 	}
 }

@@ -40,16 +40,6 @@ var supportedInputModifiers = map[string]string{
 	"shift": "shift",
 }
 
-// SemanticInputKeys returns the exact unmodified key names advertised to
-// clients. Modifiers may be prepended in ctrl, alt, shift order.
-func SemanticInputKeys() []string {
-	keys := []string{"Enter", "Esc", "Tab", "Backspace", "Up", "Down", "Left", "Right"}
-	for number := 1; number <= 24; number++ {
-		keys = append(keys, fmt.Sprintf("F%d", number))
-	}
-	return keys
-}
-
 func ValidatePaneInput(input PaneInput) (PaneInput, error) {
 	return normalizePaneInput(input)
 }
@@ -128,23 +118,11 @@ func (c *Client) SendInput(ctx context.Context, paneID string, input PaneInput) 
 		params["keys"] = normalized.Keys
 	}
 
-	api := c.api
-	api.mu.Lock()
-	defer api.mu.Unlock()
-	_ = api.closeLocked()
-	if err := api.connect(ctx); err != nil {
-		return errors.Join(ErrNotStarted, err)
+	err = c.api.requestResult(ctx, "pane.send_input", params, "ok", nil)
+	var cliErr *CLIError
+	// Herdr types the text before it validates the keys, so even a refusal may have applied.
+	if errors.As(err, &cliErr) {
+		return errors.Join(ErrDispatchedUnknown, err)
 	}
-	response, wrote, err := api.requestConnected(ctx, "pane.send_input", params)
-	_ = api.closeLocked()
-	if err != nil {
-		if wrote {
-			return errors.Join(ErrDispatchedUnknown, err)
-		}
-		return errors.Join(ErrNotStarted, err)
-	}
-	if response.Result.Type != "ok" {
-		return errors.Join(ErrDispatchedUnknown, fmt.Errorf("Herdr socket API returned %q for pane.send_input", response.Result.Type))
-	}
-	return nil
+	return err
 }

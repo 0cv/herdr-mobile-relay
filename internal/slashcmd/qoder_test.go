@@ -7,7 +7,7 @@ import (
 )
 
 func TestQoderBuiltins(t *testing.T) {
-	catalog := CatalogFor("qoder", "/tmp", "/nonexistent")
+	catalog := catalogFor("qoder", "/tmp", "/nonexistent")
 	if len(catalog.Commands) == 0 {
 		t.Fatal("no commands returned")
 	}
@@ -24,7 +24,7 @@ func TestQoderPersonalCommands(t *testing.T) {
 	os.MkdirAll(cmdDir, 0o755)
 	os.WriteFile(filepath.Join(cmdDir, "deploy.md"), []byte("Deploy app"), 0o644)
 
-	catalog := CatalogFor("qoder", "/tmp", home)
+	catalog := catalogFor("qoder", "/tmp", home)
 	if !hasCommand(catalog, "/deploy") {
 		t.Error("missing /deploy from personal commands")
 	}
@@ -41,7 +41,7 @@ func TestQoderProjectCommands(t *testing.T) {
 	os.MkdirAll(sub, 0o755)
 
 	home := t.TempDir()
-	catalog := CatalogFor("qoder", sub, home)
+	catalog := catalogFor("qoder", sub, home)
 	if !hasCommand(catalog, "/test") {
 		t.Error("missing /test from project commands via git root")
 	}
@@ -53,7 +53,7 @@ func TestQoderRecursiveNamespace(t *testing.T) {
 	os.MkdirAll(cmdDir, 0o755)
 	os.WriteFile(filepath.Join(cmdDir, "commit.md"), []byte("Commit"), 0o644)
 
-	catalog := CatalogFor("qoder", "/tmp", home)
+	catalog := catalogFor("qoder", "/tmp", home)
 	if !hasCommand(catalog, "/git:commit") {
 		t.Error("missing /git:commit")
 	}
@@ -65,7 +65,7 @@ func TestQoderSkills(t *testing.T) {
 	os.MkdirAll(skillDir, 0o755)
 	os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\nname: my-skill\ndescription: Does things\n---\n"), 0o644)
 
-	catalog := CatalogFor("qoder", "/tmp", home)
+	catalog := catalogFor("qoder", "/tmp", home)
 	if !hasCommand(catalog, "/my-skill") {
 		t.Error("missing /my-skill from personal skills")
 	}
@@ -82,7 +82,7 @@ func TestQoderSameNameCommandsCoexist(t *testing.T) {
 	os.MkdirAll(projectDir, 0o755)
 	os.WriteFile(filepath.Join(projectDir, "deploy.md"), []byte("Project"), 0o644)
 
-	catalog := CatalogFor("qoder", cwd, home)
+	catalog := catalogFor("qoder", cwd, home)
 	var sources []string
 	for _, cmd := range catalog.Commands {
 		if cmd.Command == "/deploy" {
@@ -98,7 +98,7 @@ func TestQoderSameNameCommandsCoexist(t *testing.T) {
 }
 
 func TestQodercliProfileID(t *testing.T) {
-	catalog := CatalogForProfile("qodercli", "qodercli", "/tmp", "/nonexistent", nil, "", "", "")
+	catalog := CatalogFor("qodercli", "qodercli", DiscoverContext{Cwd: "/tmp", Home: "/nonexistent"})
 	if !hasCommand(catalog, "/clear") {
 		t.Error("qodercli profile should resolve to qoder provider")
 	}
@@ -110,7 +110,7 @@ func TestQoderDoesNotUseClaudeDirectories(t *testing.T) {
 	os.MkdirAll(claudeDir, 0o755)
 	os.WriteFile(filepath.Join(claudeDir, "claude-only.md"), []byte("Claude"), 0o644)
 
-	catalog := CatalogFor("qoder", "/tmp", home)
+	catalog := catalogFor("qoder", "/tmp", home)
 	if hasCommand(catalog, "/claude-only") {
 		t.Error("qoder should not discover from .claude/ directories")
 	}
@@ -126,7 +126,7 @@ func TestQoderNonInvocableCommandSuppressesBuiltin(t *testing.T) {
 		0o644,
 	)
 
-	catalog := CatalogFor("qoder", "/tmp", home)
+	catalog := catalogFor("qoder", "/tmp", home)
 	if hasCommand(catalog, "/clear") {
 		t.Error("non-invocable personal command did not suppress builtin /clear")
 	}
@@ -147,7 +147,7 @@ func TestQoderProjectSuppressionHidesLowerScopeCommand(t *testing.T) {
 		0o644,
 	)
 
-	catalog := CatalogFor("qoder", cwd, home)
+	catalog := catalogFor("qoder", cwd, home)
 	if hasCommand(catalog, "/deploy") {
 		t.Error("project suppression did not hide lower-scope /deploy")
 	}
@@ -169,7 +169,7 @@ func TestQoderNearProjectSuppressionHidesOuterProjectCommand(t *testing.T) {
 		0o644,
 	)
 
-	catalog := CatalogFor("qoder", cwd, t.TempDir())
+	catalog := catalogFor("qoder", cwd, t.TempDir())
 	if hasCommand(catalog, "/deploy") {
 		t.Error("near project suppression did not hide outer project /deploy")
 	}
@@ -183,7 +183,7 @@ func TestQoderHomeRootIsNotAlsoProjectScope(t *testing.T) {
 	}
 	writeFile(t, filepath.Join(home, ".qoder", "commands", "deploy.md"), "Deploy")
 
-	catalog := CatalogFor("qoder", cwd, home)
+	catalog := catalogFor("qoder", cwd, home)
 	count := 0
 	for _, command := range catalog.Commands {
 		if command.Command == "/deploy" {

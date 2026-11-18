@@ -18,7 +18,7 @@ func TestAuthoritativeOptionalKindInventory(t *testing.T) {
 			var reply atomic.Value
 			reply.Store(json.RawMessage(`{"type":"agent_list","agents":[{"pane_id":"pane","terminal_id":"terminal","workspace_id":"workspace","tab_id":"tab","name":"Named agent","agent_status":"unknown","cwd":"/home/example/Development"}]}`))
 			var failed atomic.Bool
-			socket := startPollerTestSocket(t, func(method string) (any, string) {
+			socket := startSocketFixture(t, func(method string) (any, string) {
 				switch method {
 				case "agent.list":
 					if failed.Load() {
@@ -39,7 +39,7 @@ func TestAuthoritativeOptionalKindInventory(t *testing.T) {
 			client := herdr.NewClient("unused", socket)
 			t.Cleanup(func() { _ = client.Close() })
 			inventory, err := client.GetInventory(ctx)
-			if err != nil || len(inventory.Panes) != 1 || inventory.Panes[0].Agent != "" || inventory.Panes[0].Session != "" {
+			if err != nil || len(inventory.Panes) != 1 || inventory.Panes[0].Agent != "" || inventory.Panes[0].Session.Value != "" {
 				t.Fatalf("optional fields rejected by GetInventory: %+v %v", inventory, err)
 			}
 			state := testState()

@@ -57,13 +57,12 @@ func TestRecentOpeningWorkBudget(t *testing.T) {
 	measure := func(name string, recent int64, limit int) work {
 		options := DefaultBrowserOptions()
 		options.RecentBytes = recent
-		browser, err := NewBrowser(reader, t.TempDir(), options)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer browser.Close()
+		browser := newTestBrowser(t, reader, options)
 		var bytes int64
-		browser.physicalReadObserver = func(n int64) { bytes += n }
+		setBrowserObserver(browser, "physical_read", func(observation browserObservation) {
+			n := observation.bytes
+			bytes += n
+		})
 		start := time.Now()
 		first, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: limit})
 		cold := time.Since(start)
@@ -104,11 +103,7 @@ func TestRecentOpeningWorkBudget(t *testing.T) {
 
 func TestSmallRecentWindowPagesHaveNoGapsOrDuplicates(t *testing.T) {
 	reader, scope, _ := syntheticCodexHistory(t, 1600, 200)
-	browser, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
 	cursor := ""
 	seen := make(map[string]bool)
 	last := 1600

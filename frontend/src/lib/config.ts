@@ -1,3 +1,4 @@
+import { isAuthenticationSecret, isAuthenticationVersion, isInvitationId } from './device-auth';
 import { canRendezvous, RELAY_ID_LENGTH } from './gateway-credentials';
 import type { RelayConfig } from './types';
 
@@ -6,7 +7,6 @@ export const THEME_KEY = 'herdr_theme';
 // Keep the existing key so stored terminal-size preferences migrate into the
 // whole-interface size without resetting users.
 export const INTERFACE_SIZE_KEY = 'herdr_terminal_font_size';
-export const LEGACY_FONT_KEY = 'herdr_home_font_size';
 export const TERMINAL_HISTORY_KEY = 'herdr_terminal_history_lines';
 export const TERMINAL_REFRESH_KEY = 'herdr_terminal_refresh_ms';
 export const TERMINAL_RESIZE_SESSION_KEY = 'herdr_terminal_resize_session';
@@ -17,9 +17,7 @@ export const DEVICE_LOCK_KEY = 'herdr_require_device_unlock';
 export const DEVICE_CREDENTIAL_KEY = 'herdr_device_unlock_credential';
 export const PUSH_ENABLED_KEY = 'herdr_push_enabled';
 export const PUSH_FINISHED_KEY = 'herdr_push_finished';
-export const PUSH_CLIENT_KEY = 'herdr_push_client_id';
 export const PUSH_VAPID_KEY_PREFIX = 'herdr_push_vapid_key_';
-export const HANDLED_NOTIFICATION_ACTIONS_KEY = 'herdr_handled_notification_actions';
 export const DEFAULT_AGENT_VIEW_KEY = 'herdr_default_agent_view';
 export const PANE_AGENT_VIEW_OVERRIDES_KEY = 'herdr_pane_agent_view_overrides';
 export const HIDDEN_SERVERS_KEY = 'herdr_hidden_servers';
@@ -203,11 +201,11 @@ function isRelayId(value: unknown): value is string {
 }
 
 function isRendezvousKey(value: unknown): value is string {
-  return typeof value === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value);
+  return isAuthenticationSecret(value);
 }
 
-export function loadRelayConfigs(storage: Storage = localStorage): RelayConfig[] {
-  const raw = storage.getItem(RELAYS_KEY);
+export function loadRelayConfigs(): RelayConfig[] {
+  const raw = localStorage.getItem(RELAYS_KEY);
   if (raw) {
     try {
       const parsed: unknown = JSON.parse(raw);
@@ -219,22 +217,14 @@ export function loadRelayConfigs(storage: Storage = localStorage): RelayConfig[]
           .map(normalizeRelayConfig);
       }
     } catch {
-      // Fall through to the legacy single-relay keys.
+      return [];
     }
   }
-  const url = storage.getItem('herdr_relay_url') || '';
-  if (!url) return [];
-  const relay = normalizeRelayConfig({
-    url,
-    token: storage.getItem('herdr_relay_token') || '',
-    label: relayLabelFromUrl(url),
-  });
-  storage.setItem(RELAYS_KEY, JSON.stringify([relay]));
-  return [relay];
+  return [];
 }
 
-export function saveRelayConfigs(relays: RelayConfig[], storage: Storage = localStorage): void {
-  storage.setItem(RELAYS_KEY, JSON.stringify(relays));
+export function saveRelayConfigs(relays: RelayConfig[]): void {
+  localStorage.setItem(RELAYS_KEY, JSON.stringify(relays));
 }
 export interface QuickSetupInvitation {
   id: string;
@@ -261,10 +251,9 @@ export function quickSetupInvitation(locationValue: Pick<Location, 'hash'>): Qui
   const version = Number(params.get('invite_version'));
   const expiresAt = Number(params.get('invite_expires'));
   if (
-    !/^[A-Za-z0-9_-]{16,128}$/.test(id)
-    || !/^[A-Za-z0-9_-]{43}$/.test(secret)
-    || !Number.isSafeInteger(version)
-    || version < 1
+    !isInvitationId(id)
+    || !isAuthenticationSecret(secret)
+    || !isAuthenticationVersion(version)
     || !Number.isSafeInteger(expiresAt)
     || expiresAt < 1
   ) return null;

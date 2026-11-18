@@ -502,10 +502,6 @@ func TestClassifyUnknownAgentsWithoutFabricatedControls(t *testing.T) {
 			t.Fatalf("unknown-agent classification = %+v", got)
 		}
 	}
-	_, _, options := ApprovalDetails("")
-	if len(options) != 0 {
-		t.Fatalf("empty pane fabricated approval options: %#v", options)
-	}
 }
 
 func TestClassifyOpenCodeApprovalLikeLayoutsWithoutFabricatedControls(t *testing.T) {
@@ -955,11 +951,8 @@ func TestClassifyCapturedOpenCodeQuestionLayouts(t *testing.T) {
 			content := attentionFixture(t, test.fixture)
 			if !LayoutHint(content) {
 				lines := strings.Split(content, "\n")
-				var cleaned []string
-				for _, line := range lines[len(lines)-min(8, len(lines)):] {
-					cleaned = append(cleaned, cleanOpenCodeLine(line))
-				}
-				t.Fatalf("layout hint missing; cleaned tail = %#v", cleaned)
+				tail := lines[len(lines)-min(8, len(lines)):]
+				t.Fatalf("layout hint missing; raw tail = %q", tail)
 			}
 			got := Classify(content, "opencode")
 			if got.Kind != AttentionQuestion || got.Interaction == nil || len(got.Options) != 0 {
@@ -1584,5 +1577,43 @@ func TestApprovalFingerprintBindsPromptCommandAndOrderedOptions(t *testing.T) {
 	precomputed.ApprovalIdentity = strings.Repeat("f", 64)
 	if got := ApprovalFingerprint(precomputed); got != precomputed.ApprovalIdentity {
 		t.Fatalf("precomputed fingerprint = %q", got)
+	}
+}
+
+func TestClassifyOMPStaleToolBoxAbovePlanReview(t *testing.T) {
+	got := Classify(ompToolApprovalView+ompPlanApprovalView, "omp")
+	wantOptions := []string{
+		"Approve and execute",
+		"Approve and compact context",
+		"Approve and keep context (~59k / 1m)",
+		"Refine plan",
+	}
+	if got.Kind != AttentionApproval || got.ApprovalFocus != 0 || !reflect.DeepEqual(got.Options, wantOptions) ||
+		got.Command != "↑↓ scroll · ⇧ faster · pgup/pgdn · g/G ends · a annotate …" {
+		t.Fatalf("classification = %+v, want the plan review menu as approval", got)
+	}
+	if !strings.HasPrefix(got.approvalSource, "╭─ Allow tool: bash") || strings.Contains(got.approvalSource, "Plan Review") {
+		t.Fatalf("approval source = %q, want the stale tool box", got.approvalSource)
+	}
+	const wantFingerprint = "55c3bbce6b3f78b32af8358100f22c1ca66895bc290ad4f3da533e355f8acca1"
+	if fingerprint := ApprovalFingerprint(got); fingerprint != wantFingerprint {
+		t.Fatalf("fingerprint = %q, want %q", fingerprint, wantFingerprint)
+	}
+}
+
+func BenchmarkClassifyApproval(b *testing.B) {
+	for _, pane := range []struct{ name, agent, text string }{
+		{"codex", "codex", codexApprovalView},
+		{"omp tool", "omp", ompToolApprovalView},
+		{"hermes", "hermes", hermesApprovalView},
+	} {
+		b.Run(pane.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				if got := Classify(pane.text, pane.agent); got.Kind != AttentionApproval {
+					b.Fatalf("classification = %+v, want approval", got)
+				}
+			}
+		})
 	}
 }

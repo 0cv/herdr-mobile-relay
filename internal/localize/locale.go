@@ -10,15 +10,6 @@ const (
 	SimplifiedChinese Locale = "zh-CN"
 )
 
-var supportedLocales = [...]Locale{English, SimplifiedChinese}
-
-// SupportedLocales returns the complete set of locales with catalogs.
-func SupportedLocales() []Locale {
-	locales := make([]Locale, len(supportedLocales))
-	copy(locales, supportedLocales[:])
-	return locales
-}
-
 // NormalizeLocale converts a locale tag to a supported locale. Unsupported and
 // malformed tags deliberately fall back to English.
 func NormalizeLocale(value string) Locale {

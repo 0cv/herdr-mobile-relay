@@ -5,7 +5,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"regexp"
-	"strings"
+	"slices"
+
+	"github.com/0cv/herdr-mobile-relay/internal/agentkind"
 )
 
 const (
@@ -63,10 +65,7 @@ func Revise(catalog Catalog) Catalog {
 }
 
 func IsPi(profile, agent string) bool {
-	provider := resolveProvider(profile)
-	if provider == nil {
-		provider = resolveProvider(ProfileIDForAgentName(agent))
-	}
+	provider := providerFor(profile, agent)
 	return provider != nil && provider.ID() == "pi"
 }
 
@@ -93,86 +92,34 @@ func MergePiRuntime(entries []RuntimeCommand, status string, truncated bool) Cat
 	return Revise(Catalog{Commands: commands, Metadata: metadata, Status: status, Truncated: truncated})
 }
 
-// ProfileIDForAgentName maps an agent name as herdr reports it onto a provider
-// profile ID. Both entrypoints resolve through this one table on purpose: while
-// they carried separate switches the two drifted, and a kimi or opencode pane
-// whose binary was missing from the relay's PATH fell through to the generic
-// path and got an empty palette - not even builtins.
-func ProfileIDForAgentName(agent string) string {
-	switch strings.ToLower(strings.TrimSpace(agent)) {
-	case "claude", "claude-code", "claude code":
-		return "claude"
-	case "codex":
-		return "codex"
-	case "cursor", "cursor-agent", "cursor agent":
-		return "cursor"
-	case "grok", "grok-build":
-		return "grok"
-	case "qoder", "qodercli":
-		return "qoder"
-	case "pi", "pi-coding-agent":
-		return "pi"
-	case "omp", "oh my pi", "oh-my-pi":
-		return "omp"
-	case "kimi", "kimi code", "kimi-code", "kimi-cli":
-		return "kimi"
-	case "opencode", "open code", "open-code":
-		return "opencode"
-	case "hermes", "hermes-agent", "hermes agent":
-		return "hermes"
-	case "agy", "antigravity", "antigravity-cli", "antigravity cli":
-		return "agy"
+func CatalogFor(profileID, reportedAgent string, ctx DiscoverContext) Catalog {
+	provider := providerFor(profileID, reportedAgent)
+	if provider == nil {
+		commands, truncated := newCatalogReader().discoverGenericSkills(ctx.SkillDirs, ctx.CommandFormat)
+		return finalizeCatalog(commands, truncated)
 	}
-	return ""
-}
-
-func CatalogFor(agent, cwd, home string) Catalog {
-	return CatalogForProfile(ProfileIDForAgentName(agent), agent, cwd, home, nil, "", "", "")
-}
-
-func CatalogForProfile(
-	profileID, reportedAgent, cwd, home string,
-	skillDirs []string,
-	commandFormat, agentVersion, agentDir string,
-) Catalog {
-	return CatalogForProfileWithSuppression(
-		profileID, reportedAgent, cwd, home,
-		skillDirs, commandFormat, agentVersion, agentDir, false,
-	)
-}
-
-func CatalogForProfileWithSuppression(
-	profileID, reportedAgent, cwd, home string,
-	skillDirs []string,
-	commandFormat, agentVersion, agentDir string,
-	suppressNative bool,
-) Catalog {
-	var commands []Command
-	var truncated bool
-
-	ctx := DiscoverContext{
-		ProfileID:      profileID,
-		AgentDir:       agentDir,
-		Cwd:            cwd,
-		Home:           home,
-		SkillDirs:      skillDirs,
-		CommandFormat:  commandFormat,
-		AgentVersion:   agentVersion,
-		SuppressNative: suppressNative,
+	if ctx.SuppressNative {
+		return finalizeCatalog(slices.Clone(provider.Builtins()), false)
 	}
-
-	p := resolveProvider(profileID)
-	if p == nil && reportedAgent != "" {
-		p = resolveProvider(ProfileIDForAgentName(reportedAgent))
-	}
-
-	if p != nil {
-		commands, truncated = p.Discover(ctx)
-	} else {
-		commands, truncated = discoverGenericSkills(skillDirs, commandFormat)
-	}
-
+	commands, truncated := provider.Discover(ctx)
 	return finalizeCatalog(commands, truncated)
+}
+
+// configuredCatalog serves a profile whose INI file named the command format:
+// the builtins, then skills from the configured directories, builtins winning
+// name collisions. Native discovery is skipped.
+func (reader *catalogReader) configuredCatalog(builtins []Command, ctx DiscoverContext) ([]Command, bool) {
+	custom, truncated := reader.discoverGenericSkills(ctx.SkillDirs, ctx.CommandFormat)
+	list := newCommandList(builtins, false)
+	list.addIfAbsent(custom)
+	return list.commands(), truncated || reader.truncated
+}
+
+func providerFor(profileID, agent string) Provider {
+	if provider := resolveProvider(profileID); provider != nil {
+		return provider
+	}
+	return resolveProvider(agentkind.Of(agent))
 }
 
 func finalizeCatalog(commands []Command, truncated bool) Catalog {

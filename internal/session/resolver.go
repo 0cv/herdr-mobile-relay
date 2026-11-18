@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
+	"github.com/0cv/herdr-mobile-relay/internal/agentkind"
 	"github.com/0cv/herdr-mobile-relay/internal/conversation"
 )
 
@@ -28,11 +28,6 @@ type Resolver struct {
 	reader *conversation.Reader
 }
 
-// NewResolver creates an independent title and transcript resolver.
-func NewResolver(home string) *Resolver {
-	return NewResolverWithReader(home, conversation.NewReader(home))
-}
-
 // NewResolverWithReader shares transcript-location decisions with conversation
 // history consumers.
 func NewResolverWithReader(home string, reader *conversation.Reader) *Resolver {
@@ -41,13 +36,6 @@ func NewResolverWithReader(home string, reader *conversation.Reader) *Resolver {
 	}
 	return &Resolver{cache: make(map[string]cacheEntry), home: home, reader: reader}
 }
-
-// Root accessors remain useful in tests that pin configuration precedence.
-func (r *Resolver) claudeRoots() []string { return agentroots.Claude(r.home) }
-func (r *Resolver) qoderRoots() []string  { return agentroots.Qoder(r.home) }
-func (r *Resolver) codexHomes() []string  { return agentroots.CodexHomes(r.home) }
-func (r *Resolver) piRoots() []string     { return agentroots.Pi(r.home) }
-func (r *Resolver) ompRoots() []string    { return agentroots.OMP(r.home) }
 
 func (r *Resolver) SessionName(agent, cwd, sessionID string) string {
 	return r.SessionNameWithProject(agent, conversation.ProjectContext{CWD: cwd}, sessionID)
@@ -78,16 +66,16 @@ func (r *Resolver) SessionNameWithProject(agent string, project conversation.Pro
 	r.mu.Unlock()
 
 	var name string
-	switch {
-	case isOMPSessionAgent(agentLower):
+	switch agentkind.Of(agent) {
+	case agentkind.OMP:
 		name = extractOMPSessionTitle(location.Path)
-	case isPiSessionAgent(agentLower):
+	case agentkind.Pi:
 		name = extractPiSessionTitle(location.Path)
-	case isHermesSessionAgent(agentLower), conversation.IsKimi(agentLower), agentLower == "grok":
+	case agentkind.Hermes, agentkind.Kimi, agentkind.Grok:
 		name = location.Title
-	case strings.Contains(agentLower, "qoder"), strings.Contains(agentLower, "claude"):
+	case agentkind.Qoder, agentkind.Claude:
 		name = extractTitle(location.Path)
-	case strings.Contains(agentLower, "codex"):
+	case agentkind.Codex:
 		name = codexIndexThreadName(filepath.Join(filepath.Dir(location.Root), "session_index.jsonl"), sessionID)
 	}
 
@@ -98,34 +86,7 @@ func (r *Resolver) SessionNameWithProject(agent string, project conversation.Pro
 }
 
 func sessionCacheKey(agent string, project conversation.ProjectContext, sessionID string) string {
-	if project.ForegroundCWD == "" {
-		// Preserve the pane-only key for existing callers and cache tests.
-		return agent + "|" + project.CWD + "|" + sessionID
-	}
 	return agent + "|" + project.CWD + "|" + project.ForegroundCWD + "|" + sessionID
-}
-
-func isOMPSessionAgent(agent string) bool {
-	switch strings.ToLower(strings.TrimSpace(agent)) {
-	case "omp", "oh-my-pi", "oh my pi", "ohmypi":
-		return true
-	default:
-		return false
-	}
-}
-
-func isPiSessionAgent(agent string) bool {
-	switch strings.ToLower(strings.TrimSpace(agent)) {
-	case "pi", "pi-coding-agent":
-		return true
-	default:
-		return false
-	}
-}
-
-func isHermesSessionAgent(agent string) bool {
-	normalized := strings.NewReplacer("-", "", "_", "", " ", "").Replace(strings.ToLower(strings.TrimSpace(agent)))
-	return normalized == "hermes" || normalized == "hermesagent"
 }
 
 func extractOMPSessionTitle(path string) string {

@@ -31,11 +31,7 @@ func TestClaudeForegroundHintIsDistinctFromWhitespacePaneCWD(t *testing.T) {
 	if location.Path != foregroundPath {
 		t.Fatalf("location = %q, want foreground path %q", location.Path, foregroundPath)
 	}
-	browser, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
 	foregroundScope := BrowseScope{Provider: "claude", CWD: paneCWD, ForegroundCWD: foregroundCWD, SessionID: testSessionID}
 	page, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: foregroundScope, Limit: 1})
 	if err != nil || !page.Available || len(page.Entries) != 1 || page.Entries[0].Text != "foreground answer" || page.NextCursor == "" {
@@ -65,8 +61,8 @@ func TestClaudeLocateWithProjectUsesForegroundDirectory(t *testing.T) {
 	if location.Path != path || location.Root != filepath.Join(home, ".claude", "projects") {
 		t.Fatalf("location = %#v, want foreground path %q in default root", location, path)
 	}
-	page, err := reader.ReadWithProject("claude", ProjectContext{CWD: "/work/pane", ForegroundCWD: foreground}, testSessionID, "", 80)
-	if err != nil || !page.Available || len(page.Entries) != 2 || page.Entries[1].Text != "foreground answer" {
+	page, err := reader.ReadLatest("claude", ProjectContext{CWD: "/work/pane", ForegroundCWD: foreground}, testSessionID, 80)
+	if err != nil || len(page) != 2 || page[1].Text != "foreground answer" {
 		t.Fatalf("foreground page = %#v, err = %v", page, err)
 	}
 }
@@ -241,8 +237,8 @@ func TestProjectContextLeavesNonClaudeProvidersPaneOnly(t *testing.T) {
 	if got.Path != panePath {
 		t.Fatalf("qoder location = %q, want pane path %q", got.Path, panePath)
 	}
-	page, err := reader.ReadWithProject("qoder", projectContext, testSessionID, "", 10)
-	if err != nil || !page.Available || len(page.Entries) == 0 || page.Entries[len(page.Entries)-1].Text != "pane" {
+	page, err := reader.ReadLatest("qoder", projectContext, testSessionID, 10)
+	if err != nil || len(page) == 0 || page[len(page)-1].Text != "pane" {
 		t.Fatalf("qoder page = %#v, err = %v; want pane transcript", page, err)
 	}
 }
@@ -278,11 +274,7 @@ func TestClaudeBrowserUsesForegroundScopeAndRejectsOldCursor(t *testing.T) {
 
 func TestClaudeBrowserRecoversWhenForegroundHintChangesAfterMiss(t *testing.T) {
 	reader, home := testReader(t)
-	browser, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
 	missing := BrowseScope{Provider: "claude", CWD: "/work/pane", ForegroundCWD: "/work/missing", SessionID: testSessionID}
 	miss, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: missing, Limit: 1})
 	if err != nil || miss.Available || miss.ReasonCode != "invalid_session" {
@@ -305,11 +297,7 @@ func TestClaudeBrowserCursorIgnoresRedundantForegroundHints(t *testing.T) {
 		map[string]any{"type": "assistant", "uuid": "first", "message": map[string]any{"content": "first answer"}},
 		map[string]any{"type": "assistant", "uuid": "second", "message": map[string]any{"content": "second answer"}},
 	)
-	browser, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, DefaultBrowserOptions())
 	base := BrowseScope{Provider: "claude", CWD: "/work/pane", SessionID: testSessionID}
 	first, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: base, Limit: 1})
 	if err != nil || !first.Available || first.NextCursor == "" {

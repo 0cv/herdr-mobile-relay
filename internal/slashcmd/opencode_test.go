@@ -3,7 +3,7 @@ package slashcmd
 import "testing"
 
 func TestOpenCodeBuiltinCatalog(t *testing.T) {
-	catalog := CatalogForProfile("opencode", "opencode", "/tmp", "/nonexistent", nil, "", "1.18.5", "")
+	catalog := catalogFor("opencode", "/tmp", "/nonexistent")
 	if catalog.Truncated {
 		t.Fatal("OpenCode builtins should not be truncated")
 	}
@@ -18,7 +18,7 @@ func TestOpenCodeBuiltinCatalog(t *testing.T) {
 }
 
 func TestOpenCodeOmitsConditionalCommands(t *testing.T) {
-	catalog := CatalogFor("open-code", "/tmp", "/nonexistent")
+	catalog := catalogFor("open-code", "/tmp", "/nonexistent")
 	for _, command := range []string{"/org", "/variants", "/warp", "/workspaces"} {
 		if hasCommand(catalog, command) {
 			t.Errorf("OpenCode catalog unexpectedly includes conditional command %q", command)

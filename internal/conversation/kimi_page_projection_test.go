@@ -95,14 +95,13 @@ func TestKimiPageProjectionDifferential(t *testing.T) {
 				t.Fatalf("projector differs: new=%+v old=%+v", projection, reference)
 			}
 			kimiFixture(t, root, kimiWorkspaceKey(cwd), id, cwd, "Differential", 1, wire)
-			browser, err := NewBrowser(NewReader(home), t.TempDir(), DefaultBrowserOptions())
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer browser.Close()
+			browser := newTestBrowser(t, NewReader(home), DefaultBrowserOptions())
 			scope := BrowseScope{Provider: "kimi", CWD: cwd, SessionID: id, PaneID: "pane", ProcessIdentity: "1:test"}
 			var work kimiMaterializationWork
-			browser.kimiMaterializationObserver = func(value kimiMaterializationWork) { work = value }
+			setBrowserObserver(browser, "kimi_materialization", func(observation browserObservation) {
+				value := observation.work
+				work = value
+			})
 			cursor, remaining, revision := "", len(reference.entries), ""
 			seen := make(map[string]bool)
 			for {
@@ -251,16 +250,20 @@ func TestKimiPageProjectionWorkAndMemory(t *testing.T) {
 			t.Setenv("KIMI_CODE_HOME", "")
 			cwd, id := "/fixture/kimi-work", "session_work"
 			kimiFixture(t, root, kimiWorkspaceKey(cwd), id, cwd, "Work", 1, wire)
-			browser, err := NewBrowser(NewReader(home), t.TempDir(), DefaultBrowserOptions())
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer browser.Close()
+			browser := newTestBrowser(t, NewReader(home), DefaultBrowserOptions())
 			var physical int64
 			validations := 0
-			browser.physicalReadObserver = func(n int64) { physical += n }
-			browser.kimiProjectionObserver = func() { validations++ }
-			browser.kimiMaterializationObserver = func(value kimiMaterializationWork) { work = value }
+			setBrowserObserver(browser, "physical_read", func(observation browserObservation) {
+				n := observation.bytes
+				physical += n
+			})
+			setBrowserObserver(browser, "kimi_projection", func(observation browserObservation) {
+				validations++
+			})
+			setBrowserObserver(browser, "kimi_materialization", func(observation browserObservation) {
+				value := observation.work
+				work = value
+			})
 			scope := BrowseScope{Provider: "kimi", CWD: cwd, SessionID: id, PaneID: "pane"}
 			read := func(cursor string) BrowsePage {
 				t.Helper()
@@ -297,11 +300,7 @@ func TestKimiPageProjectionConcurrentCacheAndClose(t *testing.T) {
 	t.Setenv("KIMI_CODE_HOME", "")
 	cwd, id := "/fixture/kimi-race", "session_race"
 	path := kimiFixture(t, root, kimiWorkspaceKey(cwd), id, cwd, "Race", 1, kimiWorkJournal(384, 160, true))
-	browser, err := NewBrowser(NewReader(home), t.TempDir(), DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, NewReader(home), DefaultBrowserOptions())
 	scope := BrowseScope{Provider: "kimi", CWD: cwd, SessionID: id, PaneID: "pane"}
 	var wg sync.WaitGroup
 	for i := 0; i < 4; i++ {

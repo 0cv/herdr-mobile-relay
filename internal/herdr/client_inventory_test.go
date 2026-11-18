@@ -30,7 +30,7 @@ func TestGetInventoryParsesAgentActivitySequence(t *testing.T) {
 		t.Fatalf("GetInventory() panes = %d, want 1", len(inventory.Panes))
 	}
 	pane := inventory.Panes[0]
-	if pane.StateChangeSeq != 794 || pane.Session != "session-1" {
+	if pane.StateChangeSeq != 794 || pane.Session.Value != "session-1" {
 		t.Fatalf("GetInventory() pane = %#v", pane)
 	}
 	if socketErr := <-done; socketErr != nil {

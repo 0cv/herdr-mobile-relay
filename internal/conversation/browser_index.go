@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 
@@ -211,14 +212,6 @@ type preparedIndexedRecord struct {
 	writes      bool
 }
 
-func (s *snapshotIndex) applyRecord(agent, revision string, record JSONLRecord) (projectionResult, error) {
-	results, err := s.applyRecords(agent, revision, []JSONLRecord{record})
-	if len(results) == 0 {
-		return projectionResult{}, err
-	}
-	return results[0], err
-}
-
 func (s *snapshotIndex) applyRecords(agent, revision string, records []JSONLRecord) ([]projectionResult, error) {
 	if s == nil {
 		return nil, errors.New("conversation snapshot is closed")
@@ -359,9 +352,7 @@ func (s *snapshotIndex) entriesBefore(boundary int64, limit int) ([]projectedEnt
 	if err != nil {
 		return nil, false, err
 	}
-	for left, right := 0, len(result)-1; left < right; left, right = left+1, right-1 {
-		result[left], result[right] = result[right], result[left]
-	}
+	slices.Reverse(result)
 	checkBefore := boundary
 	if len(result) > 0 {
 		checkBefore = result[0].Offset
@@ -391,10 +382,6 @@ func (s *snapshotIndex) entriesBefore(boundary int64, limit int) ([]projectedEnt
 		return nil, false, err
 	}
 	return result, hasMore, nil
-}
-
-func (s *snapshotIndex) count() (int, error) {
-	return s.countWithCheckpoint(nil)
 }
 
 func (s *snapshotIndex) countWithCheckpoint(checkpoint func() error) (int, error) {

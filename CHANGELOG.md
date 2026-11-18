@@ -5,6 +5,54 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-11-18
+
+### Changed
+
+- The relay now starts even if old push keys or subscriptions cannot be parsed.
+  If push notifications stop after updating, turning Push Notifications off and
+  on in Settings restores them.
+- Interface sizes saved before 0.10.0 and never changed now reset to the
+  default. Sizes saved by newer app builds are unchanged.
+- Relay status and `/healthz` now report `gateway.stun.mapped` as a single address
+  string instead of an array, or an empty string before discovery succeeds.
+- Relay rows in Settings now use the same wording as the update screen while an
+  update is scheduled, verifying or installing.
+- A hand-edited `relay.env` value that refers to another variable with `$` is
+  now rejected by the update and event-hook paths, with an error naming the
+  key. Literal plain, single-quoted and double-quoted values work as before.
+
+### Fixed
+
+- When loading conversation history stops after its two-minute limit, the status
+  line now always shows why, instead of sometimes staying on "Loading
+  conversation context…" or showing nothing.
+- The README in a generated gateway bundle now names the current setup menu path
+  to an already running gateway.
+- Cloudflare setup links, status, and hostname changes now read quoted tunnel
+  hostnames and trailing comments correctly. Hostname changes also accept pasted
+  HTTPS or WebSocket URLs and reject invalid domain labels before routing.
+- Empty conversations now show their explanation once instead of repeating it
+  above the message list.
+- Failed commands now keep the correct action name in results and activity,
+  including prompts rejected because their agent session changed.
+- Release bundles now include `relay/rotate-token.sh`, so the documented
+  key-rotation command works from an installed release.
+- Self-hosted gateways deployed with the generated Compose bundle now honor
+  `HERDR_GATEWAY_MAX_RELAYS` and `HERDR_GATEWAY_MAX_CLIENTS` from `.env`, so
+  operators can change the gateway-wide connection limits.
+- Clearing activity history no longer leaves the relay stuck when the clear
+  fails; the phone now gets the failure result.
+- Stable setup and hostname changes no longer leave a temporary folder behind
+  each time they finish.
+
+### Removed
+
+- `HERDR_SQLITE_BACKEND` and the external `sqlite3` backend. Conversation history
+  always uses the SQLite driver built into the relay; no `sqlite3` command is needed.
+- Support for upgrading installs older than 0.20.0. Uninstall them before
+  installing this version, then pair every phone again.
+
 ## [0.25.1] - 2026-11-10
 
 ### Fixed
@@ -2031,7 +2079,9 @@ Version 0.22.5 was withdrawn; this release skips its version and asset generatio
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.25.0...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.26.0...HEAD
+[0.26.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.25.1...v0.26.0
+[0.25.1]: https://github.com/0cv/herdr-mobile-relay/compare/v0.25.0...v0.25.1
 [0.25.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.5...v0.24.0
 [0.23.5]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.4...v0.23.5

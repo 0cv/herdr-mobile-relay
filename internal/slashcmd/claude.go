@@ -10,6 +10,8 @@ type claudeProvider struct{}
 
 func (p *claudeProvider) ID() string { return "claude" }
 
+func (p *claudeProvider) Builtins() []Command { return claudeBuiltins }
+
 var claudeBuiltins = []Command{
 	{"/add-dir", "Add another working directory", "builtin", "<path>"},
 	{"/agents", "Manage agent configurations", "builtin", ""},
@@ -66,30 +68,13 @@ var claudeBuiltins = []Command{
 
 func (p *claudeProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	reader := newCatalogReader()
-	if ctx.SuppressNative {
-		builtins := make([]Command, len(claudeBuiltins))
-		copy(builtins, claudeBuiltins)
-		return builtins, reader.truncated
-	}
 	truncated := false
 	budget := maxCustomFiles
-	active := make(map[string]Command, len(claudeBuiltins))
-	order := make([]string, 0, len(claudeBuiltins))
+	list := newCommandList(claudeBuiltins, false)
 	apply := func(commands []Command, suppressed []string) {
-		for _, name := range suppressed {
-			if _, exists := active[name]; exists {
-				delete(active, name)
-				order = removeCommandName(order, name)
-			}
-		}
-		for _, command := range commands {
-			if _, exists := active[command.Command]; !exists {
-				order = append(order, command.Command)
-			}
-			active[command.Command] = command
-		}
+		list.remove(suppressed)
+		list.set(commands)
 	}
-	apply(claudeBuiltins, nil)
 
 	if ctx.Cwd != "" {
 		projectDirs := findProjectDirs(ctx.Cwd, []string{".claude"})
@@ -117,26 +102,11 @@ func (p *claudeProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	truncated = truncated || trunc
 
 	apply(nil, reader.claudeSkillOverrides(ctx))
-	commands := make([]Command, 0, len(order))
-	for _, name := range order {
-		if command, exists := active[name]; exists {
-			commands = append(commands, command)
-		}
-	}
 
 	if budget <= 0 {
 		truncated = true
 	}
-	return commands, truncated || reader.truncated
-}
-
-func removeCommandName(values []string, name string) []string {
-	for index, value := range values {
-		if value == name {
-			return append(values[:index], values[index+1:]...)
-		}
-	}
-	return values
+	return list.commands(), truncated || reader.truncated
 }
 
 // claudeSkillOverrides reads skillOverrides from Claude's settings files.
@@ -180,72 +150,6 @@ func (reader *catalogReader) claudeSkillOverrides(ctx DiscoverContext) []string 
 		overridden = append(overridden, name)
 	}
 	return overridden
-}
-
-// dedupClaudePrecedence implements Python's precedence:
-// - personal overrides project (same name)
-// - nearest project overrides outer project (last in slice wins)
-// - any custom overrides builtin
-// - suppressed names (user-invocable: false) remove matching entries entirely
-func dedupClaudePrecedence(commands []Command, builtinCount, personalCount int, suppressed []string) []Command {
-	suppressedSet := make(map[string]bool, len(suppressed))
-	for _, name := range suppressed {
-		suppressedSet[name] = true
-	}
-
-	personalEnd := builtinCount + personalCount
-
-	// Determine the winner for each command name.
-	// Priority: personal > nearest project (last) > outer project > builtin.
-	winners := make(map[string]Command, len(commands))
-	for i, cmd := range commands {
-		if suppressedSet[cmd.Command] {
-			continue
-		}
-		existing, seen := winners[cmd.Command]
-		if !seen {
-			winners[cmd.Command] = cmd
-			continue
-		}
-		isPersonal := i >= builtinCount && i < personalEnd
-		isProject := i >= personalEnd
-		existingIsBuiltin := existing.Source == "builtin"
-		existingIsPersonal := existing.Source == "personal"
-
-		if isPersonal {
-			// Personal always wins over builtin and project.
-			winners[cmd.Command] = cmd
-		} else if isProject {
-			if existingIsBuiltin || existingIsPersonal == false && existing.Source == "project" {
-				// Nearest project (later in slice) wins over outer project and builtin.
-				winners[cmd.Command] = cmd
-			}
-			// Project does NOT win over personal.
-			_ = existingIsPersonal
-		}
-	}
-
-	// Remove suppressed names entirely.
-	for name := range suppressedSet {
-		delete(winners, name)
-	}
-
-	// Emit in wire order, skipping duplicates and suppressed entries.
-	seen := make(map[string]bool, len(winners))
-	result := make([]Command, 0, len(winners))
-	for _, cmd := range commands {
-		if suppressedSet[cmd.Command] {
-			continue
-		}
-		if seen[cmd.Command] {
-			continue
-		}
-		seen[cmd.Command] = true
-		if winner, ok := winners[cmd.Command]; ok {
-			result = append(result, winner)
-		}
-	}
-	return result
 }
 
 func init() {

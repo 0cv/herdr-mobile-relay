@@ -11,9 +11,8 @@
   "scripts": {
     "lint": "eslint .",
     "check": "tsc --noEmit",
-    "test:unit": "bun unit/run.ts",
+    "test:unit": "bun test --timeout 180000 ./unit/suite.test.ts",
     "test:android-inspection": "bash unit/android-inspection-check.sh",
-    "test:android-attachment": "bun unit/android-retained-launch.ts --recorded-two-page",
     "prepare:bundle": "bun prepare.ts",
     "prepare:current": "bun prepare-current.ts",
     "test:cache-recovery": "bun integration/cache-recovery.ts",

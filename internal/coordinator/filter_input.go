@@ -47,16 +47,16 @@ func cursorFilterValue(screen string) (string, error) {
 	return strings.TrimRight(value, " \r"), nil
 }
 
-func (d *Dispatcher) handleFilterText(ctx context.Context, receivedAt time.Time, requestID, paneID string, message map[string]any) *CommandResult {
+func (d *Dispatcher) handleFilterText(ctx context.Context, req commandRequest) *CommandResult {
 	const action = "send_filter_text"
-	text := stringValue(message, "text")
-	if err := herdr.ValidateFilterText(text); err != nil || paneID == "" {
-		return d.fail(requestID, action, paneID, "Filter text requires an agent and 1–32 ASCII letters, digits, spaces or .-_/+:()[]; no trailing space")
+	text := req.in.Text
+	if err := herdr.ValidateFilterText(text); err != nil || req.paneID == "" {
+		return d.fail(req.requestID, action, req.paneID, "Filter text requires an agent and 1–32 ASCII letters, digits, spaces or .-_/+:()[]; no trailing space")
 	}
 	var gate sync.Mutex
 	dispatched := false
 	stopped := false
-	result := d.schedule(ctx, ScheduleOptions{Command: d.command(ctx, receivedAt, requestID, CommandFilterText, paneID, commandDeadline, text)}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
+	result := d.schedule(ctx, req, ScheduleOptions{Command: d.command(req, action, commandDeadline)}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
 		run := func() error {
 			check := func() error {
 				if err := ctx.Err(); err != nil {
@@ -71,7 +71,7 @@ func (d *Dispatcher) handleFilterText(ctx context.Context, receivedAt time.Time,
 				if err := check(); err != nil {
 					return "", err
 				}
-				pane, err := d.herdr.ReadPaneVisible(effectCtx, paneID, 200, "text")
+				pane, err := d.herdr.ReadPaneVisible(effectCtx, req.paneID, 200, "text")
 				if err != nil {
 					return "", err
 				}
@@ -87,16 +87,17 @@ func (d *Dispatcher) handleFilterText(ctx context.Context, receivedAt time.Time,
 					}
 					return check()
 				}
-				timer := time.NewTimer(duration)
-				defer timer.Stop()
-				select {
-				case <-ctx.Done():
-					return ctx.Err()
-				case <-effectCtx.Done():
-					return effectCtx.Err()
-				case <-timer.C:
-					return check()
+				waitCtx, cancel := context.WithCancel(effectCtx)
+				defer cancel()
+				stop := context.AfterFunc(ctx, cancel)
+				defer stop()
+				if err := contextDelay(waitCtx, duration); err != nil {
+					if ctx.Err() != nil {
+						return ctx.Err()
+					}
+					return err
 				}
+				return check()
 			}
 			if deadline, ok := effectCtx.Deadline(); !ok || time.Until(deadline) < time.Duration(len(text))*300*time.Millisecond+time.Second {
 				return errors.New("insufficient time remaining for filter delivery")
@@ -126,7 +127,7 @@ func (d *Dispatcher) handleFilterText(ctx context.Context, receivedAt time.Time,
 				alreadyDispatched := dispatched
 				dispatched = true
 				gate.Unlock()
-				if err := d.herdr.SendLiteralKey(effectCtx, paneID, string(character)); err != nil {
+				if err := d.herdr.SendLiteralKey(effectCtx, req.paneID, string(character)); err != nil {
 					if !alreadyDispatched && errors.Is(err, herdr.ErrNotStarted) && !errors.Is(err, herdr.ErrDispatchedUnknown) {
 						gate.Lock()
 						dispatched = false
@@ -169,9 +170,9 @@ func (d *Dispatcher) handleFilterText(ctx context.Context, receivedAt time.Time,
 				err = errors.Join(herdr.ErrNotStarted, err)
 			}
 			gate.Unlock()
-			return EffectResult{Result: d.failErr(requestID, action, paneID, err)}
+			return EffectResult{Result: d.failErr(req.requestID, action, req.paneID, err)}
 		}
-		return EffectResult{Result: completed(requestID, action, paneID, nil)}
+		return EffectResult{Result: completed(req.requestID, action, req.paneID, nil)}
 	}))
 	gate.Lock()
 	stopped = true
@@ -183,7 +184,7 @@ func (d *Dispatcher) handleFilterText(ctx context.Context, receivedAt time.Time,
 		result.Data = map[string]any{"dispatched_unknown": true}
 	}
 	if result.OK {
-		d.recordActivity(action, "sent", "Filter text verified; select separately", paneID, requestID)
+		d.activities.record(action, "sent", "Filter text verified; select separately", req.paneID, req.requestID)
 	}
 	d.wake()
 	return result

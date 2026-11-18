@@ -3,10 +3,8 @@ export type EnvironmentStatus = 'PASS' | 'FAIL' | 'UNKNOWN';
 export interface MeasurementIdentity {
   runId: string;
   attempt: string;
-  suite: 'smoke' | 'release';
   platform: 'android' | 'ios';
   baseline: string;
-  scenario: 'historical' | 'synthetic';
   sourceCommit: string;
   sourceRunHeadSha: string;
   candidateWebHash: string;
@@ -68,8 +66,7 @@ export function qualified(result: Pick<MobileResultContract, 'product' | 'finali
 }
 export function validateMeasurementIdentity(value: MeasurementIdentity): void {
   if (!value || !/^[1-9]\d*$/u.test(value.runId) || !/^[1-9]\d*$/u.test(value.attempt)
-    || !['smoke', 'release'].includes(value.suite) || !['android', 'ios'].includes(value.platform)
-    || !['historical', 'synthetic'].includes(value.scenario) || !/^[A-Za-z0-9._-]{1,100}$/u.test(value.baseline)
+    || !['android', 'ios'].includes(value.platform) || !/^[A-Za-z0-9._-]{1,100}$/u.test(value.baseline)
     || !/^[a-f0-9]{40}$/u.test(value.sourceCommit) || !/^[a-f0-9]{40}$/u.test(value.sourceRunHeadSha)
     || !/^[a-f0-9]{64}$/u.test(value.candidateWebHash) || !/^[a-f0-9]{64}$/u.test(value.candidateBuild)
     || !/^[A-Za-z0-9-]{1,80}$/u.test(value.measurementId)) throw new Error('MOBILE_IDENTITY: incomplete current measurement identity');

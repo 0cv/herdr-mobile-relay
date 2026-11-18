@@ -189,15 +189,14 @@ func (c *client) mapPCP(ctx context.Context, gateway netip.Addr, internalPort ui
 	}
 
 	return &Mapping{
-		External:  result.External,
-		Internal:  internalPort,
-		Method:    MethodPCP,
-		Lifetime:  granted,
-		ExpiresAt: time.Now().Add(granted),
-		owner:     c,
-		gateway:   gateway,
-		local:     local,
-		nonce:     nonce,
+		External: result.External,
+		Internal: internalPort,
+		Method:   MethodPCP,
+		Lifetime: granted,
+		owner:    c,
+		gateway:  gateway,
+		local:    local,
+		nonce:    nonce,
 	}, nil
 }
 

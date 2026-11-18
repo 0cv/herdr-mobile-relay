@@ -2,7 +2,7 @@
   import { onDestroy } from 'svelte';
   import Button from '$components/ui/Button.svelte';
   import KeyboardIcon from '$components/ui/KeyboardIcon.svelte';
-  import { agentNeedsResponse, attentionKind, approvalButtonTone, approvalOptions, questionInteraction } from '$lib/agents';
+  import { agentNeedsResponse, attentionKind, approvalButtonVariant, approvalOptions, questionInteraction } from '$lib/agents';
   import { relayStore } from '$lib/store';
   import { AppReloadHeld, importOrReload } from '$lib/updates';
   import type { Agent } from '$lib/types';
@@ -29,7 +29,7 @@
   <div class="quick-actions" aria-label="Approval choices">
     {#each options as option, index (`${index}:${option}`)}
       <Button disabled={responding || blocked}
-        variant={approvalButtonTone(option, index, options.length) === 'deny' ? 'danger' : approvalButtonTone(option, index, options.length) === 'trust' ? 'trust' : 'default'}
+        variant={approvalButtonVariant(option, index, options.length)}
         onclick={() => { if (!readOnly && !responding && !blocked) relayStore.respond(agent, index, options.length, option); }}
       >{option}</Button>
     {/each}

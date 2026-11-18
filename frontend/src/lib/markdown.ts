@@ -1,7 +1,5 @@
 import { escapeHtml, safeExternalUrl, trimUrlPunctuation } from './rich-output';
-export { safeExternalUrl } from './rich-output';
 
-const URL_PATTERN = /https?:\/\/[^\s<>"']+/giu;
 const INLINE_PATTERN = /(`[^`\n]+`|\*\*[^*\n]+\*\*|\[[^\]\n]+\]\(https?:\/\/[^\s)]+\)|https?:\/\/[^\s<>"']+)/giu;
 // Markdown does not treat a number longer than nine digits as a list number.
 const LIST_ITEM = /^(\s*)(?:([-*+])|(\d{1,9})[.)])(\s+)(.+)$/u;
@@ -354,21 +352,4 @@ export function safeMarkdownHtml(value: string, highlight = ''): string {
   flushCode();
   flushList();
   return output.join('');
-}
-
-export function linkifyPlainText(value: string): string {
-  let output = '';
-  let cursor = 0;
-  for (const match of value.matchAll(URL_PATTERN)) {
-    const index = match.index || 0;
-    output += escapeHtml(value.slice(cursor, index));
-    const [candidate, suffix] = trimUrlPunctuation(match[0]);
-    const href = safeExternalUrl(candidate);
-    output += href
-      ? `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">${escapeHtml(candidate)}</a>${escapeHtml(suffix)}`
-      : escapeHtml(match[0]);
-    cursor = index + match[0].length;
-  }
-  output += escapeHtml(value.slice(cursor));
-  return output;
 }

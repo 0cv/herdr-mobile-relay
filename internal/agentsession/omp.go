@@ -28,16 +28,13 @@ export default pi => {
 
 func manageOmpExtension(home, binary, operation string, output io.Writer) error {
 	dir := filepath.Join(home, ".omp", "agent")
-	info, err := os.Stat(dir)
-	if os.IsNotExist(err) {
-		fmt.Fprintln(output, "omp: config absent")
-		return nil
-	}
+	exists, err := configDirExists(dir)
 	if err != nil {
 		return err
 	}
-	if !info.IsDir() {
-		return fmt.Errorf("%s: not a directory", dir)
+	if !exists {
+		fmt.Fprintln(output, "omp: config absent")
+		return nil
 	}
 	dir = filepath.Join(dir, "extensions")
 	path := filepath.Join(dir, "herdr-mobile-relay-session.ts")

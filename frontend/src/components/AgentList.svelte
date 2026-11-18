@@ -1,6 +1,6 @@
 <script lang="ts">
   import { createReorderHold } from '$lib/reorder-hold';
-  import { displacedSlot, insertionSlot, slotGap, type ReorderSlot } from '$lib/reorder-geometry';
+  import { createReorderDrag, measureReorderSlots } from '$lib/reorder-drag.svelte';
   import { onMount } from 'svelte';
   import AgentLogo, { agentDisplayName, hasAgentLogo } from '$components/AgentLogo.svelte';
   import PairDeferredRelay from '$components/PairDeferredRelay.svelte';
@@ -9,7 +9,7 @@
     agentLastActiveAt,
     agentStatusGroup,
     agentStatusTone,
-    approvalButtonTone,
+    approvalButtonVariant,
     approvalOptions,
     approvalPromptPreview,
     displayName,
@@ -20,9 +20,10 @@
   } from '$lib/agents';
   import { hiddenServers, homeLayout, setServerHidden } from '$lib/preferences';
   import { answerFailureToast, returnedInteraction } from '$lib/questions';
-  import { relayStore, type CommandError } from '$lib/store';
+  import type { CommandError } from '$lib/command-error';
+  import { relayStore } from '$lib/store';
   import type { Agent, QuestionInteraction, RelayConfig, RelayConnectionView, RelayWorkspace } from '$lib/types';
-  import { homeRelativePath, informativePath, workspaceGroupTrees, workspaceGroups, workspaceIdentity, workspaceProvenance, workspaceStateTone, type WorkspaceGroup, type WorkspaceGroupTree, type WorkspaceTab } from '$lib/workspaces';
+  import { homeRelativePath, informativePath, workspaceGroupTrees, workspaceGroups, workspaceRecordsFor, workspaceProvenance, workspaceStateTone, type WorkspaceGroup, type WorkspaceGroupTree, type WorkspaceTab } from '$lib/workspaces';
 
   let {
     agents: allAgents,
@@ -88,17 +89,7 @@
   ] as const;
   let relativeNow = $state(Date.now());
   let movingTab = $state('');
-  let tabDrag = $state<{
-    owner: HTMLElement;
-    workspaceKey: string;
-    sourceTabId: string;
-    pointerId: number;
-    startY: number;
-    deltaY: number;
-    insertIdx: number;
-    items: ReorderSlot[];
-    gap: number;
-  } | null>(null);
+  const tabDrag = createReorderDrag();
   // Optimistic arrangement applied between releasing a drag and the relay
   // confirming the new order, so tabs never snap back while Herdr catches up.
   let pendingTabOrder = $state<{ key: string; order: string[] } | null>(null);
@@ -111,11 +102,11 @@
   const mixedLayout = $derived($homeLayout === 'mixed');
   const doneWorkspaces = $derived(mixedLayout ? [] : workspaceGroupTrees(workspaceGroups(
     doneAgents,
-    workspaceRecordsFor(doneAgents, false),
+    workspaceRecordsFor(doneAgents, agents, workspaces, false),
   )));
   const workingWorkspaces = $derived(mixedLayout ? [] : workspaceGroupTrees(workspaceGroups(
     workingAgents,
-    workspaceRecordsFor(workingAgents, false),
+    workspaceRecordsFor(workingAgents, agents, workspaces, false),
   )));
   const idleAgents = $derived(backgroundAgents.filter((agent) => {
     const group = agentStatusGroup(agent);
@@ -123,60 +114,11 @@
   }));
   const idleWorkspaces = $derived(mixedLayout ? [] : workspaceGroupTrees(workspaceGroups(
     idleAgents,
-    workspaceRecordsFor(idleAgents, true),
+    workspaceRecordsFor(idleAgents, agents, workspaces, true),
   )));
   const mixedWorkspaces = $derived(mixedLayout
-    ? workspaceGroupTrees(workspaceGroups(backgroundAgents, workspaceRecordsFor(backgroundAgents, true)))
+    ? workspaceGroupTrees(workspaceGroups(backgroundAgents, workspaceRecordsFor(backgroundAgents, agents, workspaces, true)))
     : []);
-
-  function workspaceRecordsFor(visible: Agent[], includeEmpty: boolean): RelayWorkspace[] {
-    const visibleKeys = new Set(visible.map((agent) => workspaceIdentity(agent)));
-    const occupiedKeys = new Set(agents.map((agent) => workspaceIdentity(agent)));
-    // A linked worktree whose repository workspace is not open on the same
-    // relay has no parent card to nest under (relayWorkspaceTrees renders it
-    // top-level), so an empty one must stay visible in its own right.
-    const orphanLinkedWorktree = (workspace: RelayWorkspace): boolean => {
-      const worktree = workspace.worktree;
-      if (worktree?.is_linked_worktree !== true) return false;
-      if (!worktree.repo_key) return true;
-      return !workspaces.some((candidate) => (
-        candidate.relay_id === workspace.relay_id
-        && candidate.worktree?.repo_key === worktree.repo_key
-        && candidate.worktree.is_linked_worktree === false
-      ));
-    };
-    const selected = new Set(workspaces.filter((workspace) => {
-      const key = `${workspace.relay_id}\u0000${workspace.workspace_id}`;
-      const unoccupiedTopLevel = includeEmpty
-        && !occupiedKeys.has(key)
-        && (workspace.worktree?.is_linked_worktree !== true || orphanLinkedWorktree(workspace));
-      return visibleKeys.has(key) || unoccupiedTopLevel;
-    }).map((workspace) => `${workspace.relay_id}\u0000${workspace.workspace_id}`));
-    for (const workspace of workspaces) {
-      const key = `${workspace.relay_id}\u0000${workspace.workspace_id}`;
-      const worktree = workspace.worktree;
-      if (!worktree?.repo_key) continue;
-      if (worktree.is_linked_worktree && selected.has(key)) {
-        const parent = workspaces.find((candidate) => (
-          candidate.relay_id === workspace.relay_id
-          && candidate.worktree?.repo_key === worktree.repo_key
-          && candidate.worktree.is_linked_worktree === false
-        ));
-        if (parent) selected.add(`${parent.relay_id}\u0000${parent.workspace_id}`);
-      } else if (!worktree.is_linked_worktree && selected.has(key)) {
-        for (const child of workspaces) {
-          const childKey = `${child.relay_id}\u0000${child.workspace_id}`;
-          if (child.relay_id === workspace.relay_id
-            && child.worktree?.repo_key === worktree.repo_key
-            && child.worktree.is_linked_worktree
-            && !occupiedKeys.has(childKey)) {
-            selected.add(childKey);
-          }
-        }
-      }
-    }
-    return workspaces.filter((workspace) => selected.has(`${workspace.relay_id}\u0000${workspace.workspace_id}`));
-  }
 
   $effect(() => {
     if (!pendingTabOrder) return;
@@ -244,7 +186,7 @@
     }
 
     function clearOwnedDrag() {
-      if (tabDrag?.owner === node) tabDrag = null;
+      tabDrag.clear(node);
     }
 
     function onPointerDown(event: PointerEvent) {
@@ -254,7 +196,7 @@
       const workspace = current.workspace;
       if (!workspace || !event.isPrimary || event.button !== 0 || movingTab) return;
       hold.start(event, () => {
-        const items = measureTabSlots(node);
+        const items = measureReorderSlots(node, '.workspace-tabs', '.workspace-tab', 'tabId');
         if (items.length < 2) {
           hold.reset();
           return;
@@ -263,18 +205,7 @@
           liftedOwner = pointerIdentity(event);
           suppressOpen = true;
         });
-        const sourceIdx = items.findIndex((item) => item.id === current.tabId);
-        tabDrag = {
-          owner: node,
-          workspaceKey: workspace.key,
-          sourceTabId: current.tabId,
-          pointerId: hold.pointerId,
-          startY: hold.startY + window.scrollY,
-          deltaY: 0,
-          insertIdx: Math.max(0, sourceIdx),
-          items,
-          gap: slotGap(items),
-        };
+        tabDrag.begin(node, hold, workspace.key, current.tabId, items);
       });
     }
 
@@ -302,7 +233,7 @@
 
     const stopListening = hold.listen(onPointerDown, {
       move(event) {
-        if (current.workspace) trackTabDrag(event, current.workspace);
+        if (current.workspace) tabDrag.track(event, current.workspace.key);
       },
       finish(event) {
         if (current.workspace) finishTabDrag(event, current.workspace);
@@ -328,43 +259,10 @@
     };
   }
 
-  // Slots are captured in document coordinates when the drag starts, so the
-  // preview stays correct while the page auto-scrolls under the pointer.
-  function measureTabSlots(node: HTMLElement): ReorderSlot[] {
-    const container = node.closest('.workspace-tabs');
-    if (!container) return [];
-    return [...container.querySelectorAll<HTMLElement>('.workspace-tab')].map((section) => {
-      const bounds = section.getBoundingClientRect();
-      return { id: section.dataset.tabId || '', top: bounds.top + window.scrollY, height: bounds.height };
-    });
-  }
-
-  function trackTabDrag(event: PointerEvent, workspace: WorkspaceGroup) {
-    if (!tabDrag || tabDrag.pointerId !== event.pointerId || tabDrag.workspaceKey !== workspace.key) return;
-    event.preventDefault();
-    if (event.clientY < 72) window.scrollBy(0, -12);
-    else if (event.clientY > window.innerHeight - 72) window.scrollBy(0, 12);
-    const pointerY = event.clientY + window.scrollY;
-    const insertIdx = insertionSlot(tabDrag.items, tabDrag.sourceTabId, pointerY);
-    tabDrag = { ...tabDrag, deltaY: pointerY - tabDrag.startY, insertIdx };
-  }
-
-  // The dragged tab follows the pointer; every other tab translates by the
-  // dragged tab's height to preview the drop slot.
-  function tabShift(workspace: WorkspaceGroup, tabId: string): string {
-    if (!tabDrag || tabDrag.workspaceKey !== workspace.key) return '';
-    if (tabId === tabDrag.sourceTabId) return `translateY(${tabDrag.deltaY}px)`;
-    const { items, sourceTabId, insertIdx, gap } = tabDrag;
-    return displacedSlot(items, sourceTabId, tabId, insertIdx, gap);
-  }
-
   function finishTabDrag(event: PointerEvent, workspace: WorkspaceGroup) {
-    if (!tabDrag || tabDrag.pointerId !== event.pointerId || tabDrag.workspaceKey !== workspace.key) return;
-    const completed = tabDrag;
-    tabDrag = null;
-    const sourceIdx = completed.items.findIndex((item) => item.id === completed.sourceTabId);
-    if (sourceIdx < 0 || completed.insertIdx === sourceIdx) return;
-    const others = completed.items.filter((item) => item.id !== completed.sourceTabId);
+    const completed = tabDrag.finish(event, workspace.key);
+    if (!completed) return;
+    const others = completed.items.filter((item) => item.id !== completed.sourceId);
     // Herdr's insert_index addresses the pre-move list and shifts the slot
     // down by one itself when the source sits before it.
     const insertIndex = completed.insertIdx >= others.length
@@ -372,10 +270,10 @@
       : completed.items.findIndex((item) => item.id === others[completed.insertIdx].id);
     const order = [
       ...others.slice(0, completed.insertIdx).map((item) => item.id),
-      completed.sourceTabId,
+      completed.sourceId,
       ...others.slice(completed.insertIdx).map((item) => item.id),
     ];
-    void commitReorder(workspace, completed.sourceTabId, insertIndex, order);
+    void commitReorder(workspace, completed.sourceId, insertIndex, order);
   }
 
 
@@ -552,7 +450,7 @@
             {:else}
               {#each options as option, index (`${index}:${option}`)}
                 <Button
-                  variant={approvalButtonTone(option, index, options.length) === 'deny' ? 'danger' : approvalButtonTone(option, index, options.length) === 'trust' ? 'trust' : 'default'}
+                  variant={approvalButtonVariant(option, index, options.length)}
                   size="sm"
                   disabled={!inventoryReady}
                   title={!inventoryReady ? 'Agent controls are unavailable until Herdr inventory recovers.' : undefined}
@@ -573,11 +471,11 @@
   <div class="workspace-tabs">
     {#each displayTabs(workspace) as tab (tab.id)}
       <section
-        class:tab-dragging={tabDrag?.workspaceKey === workspace.key && tabDrag.sourceTabId === tab.id}
+        class:tab-dragging={tabDrag.isSource(workspace.key, tab.id)}
         class="workspace-tab"
         data-tab-id={tab.id}
         aria-label={`${tab.label} tab`}
-        style:transform={tabShift(workspace, tab.id) || undefined}
+        style:transform={tabDrag.shift(workspace.key, tab.id) || undefined}
       >
         <header class="workspace-tab-header">
           <h3>{tab.label}</h3>

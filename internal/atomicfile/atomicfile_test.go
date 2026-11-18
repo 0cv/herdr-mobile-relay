@@ -12,23 +12,6 @@ import (
 	"testing"
 )
 
-func atomicFixtureDir(t *testing.T) string {
-	t.Helper()
-	dir, err := os.MkdirTemp("", "herdr-atomicfile-test-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := os.RemoveAll(dir); err != nil {
-			t.Errorf("remove fixture directory: %v", err)
-		}
-	})
-	if err := os.Chmod(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	return dir
-}
-
 type recordingOps struct {
 	events       []string
 	fail         map[string]error
@@ -186,7 +169,7 @@ func TestReplaceFaultsAndPrecedence(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			dir := atomicFixtureDir(t)
+			dir := t.TempDir()
 			target := filepath.Join(dir, "target")
 			if err := os.WriteFile(target, []byte("old bytes"), 0o600); err != nil {
 				t.Fatal(err)
@@ -256,7 +239,7 @@ func TestReplaceFaultsAndPrecedence(t *testing.T) {
 }
 
 func TestReplaceNoncanonicalPathsRemainSeparate(t *testing.T) {
-	root := atomicFixtureDir(t)
+	root := t.TempDir()
 	physical := filepath.Join(root, "physical")
 	child := filepath.Join(physical, "child")
 	if err := os.Mkdir(physical, 0o700); err != nil {
@@ -324,7 +307,7 @@ func TestReplaceNoncanonicalPathsRemainSeparate(t *testing.T) {
 }
 
 func TestReplacePublicMode(t *testing.T) {
-	dir := atomicFixtureDir(t)
+	dir := t.TempDir()
 	target := filepath.Join(dir, "target")
 	if err := os.WriteFile(target, []byte("old"), 0o600); err != nil {
 		t.Fatal(err)
@@ -357,7 +340,7 @@ func TestReplacePublicMode(t *testing.T) {
 }
 
 func TestReplaceNativeVisibility(t *testing.T) {
-	dir := atomicFixtureDir(t)
+	dir := t.TempDir()
 	target := filepath.Join(dir, "target")
 	old := bytes.Repeat([]byte("old-payload-"), 8192)
 	newData := bytes.Repeat([]byte("new-payload-"), 8192)
@@ -431,5 +414,44 @@ func TestReplaceNativeVisibility(t *testing.T) {
 	data, err := os.ReadFile(target)
 	if err != nil || !reflect.DeepEqual(data, old) {
 		t.Fatalf("final target = %d bytes, error %v", len(data), err)
+	}
+}
+
+func TestWriteJSONCreatesDirectoryAndWritesIndentedJSON(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "state.json")
+
+	outcome, err := WriteJSON(path, map[string]int{"count": 2}, 0o640)
+	if err != nil || outcome != Renamed {
+		t.Fatalf("WriteJSON() = %v, %v", outcome, err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "{\n  \"count\": 2\n}\n"; string(data) != want {
+		t.Fatalf("content = %q, want %q", data, want)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o640 {
+		t.Fatalf("mode = %v", info.Mode().Perm())
+	}
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("entries = %v, %v", entries, err)
+	}
+}
+
+func TestWriteJSONRejectsUnencodableValueWithoutWriting(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+
+	outcome, err := WriteJSON(path, make(chan int), 0o600)
+	if err == nil || outcome != RenameNotConfirmed {
+		t.Fatalf("WriteJSON() = %v, %v", outcome, err)
+	}
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Fatalf("target exists: %v", statErr)
 	}
 }

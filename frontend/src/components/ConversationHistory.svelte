@@ -1,14 +1,16 @@
 <script lang="ts">
-  import { onDestroy, onMount, tick, untrack } from 'svelte';
+  import { copyText } from '$lib/clipboard';
+  import { onMount, tick, untrack } from 'svelte';
   import PromptComposer from '$components/PromptComposer.svelte';
   import AgentInteraction from '$components/AgentInteraction.svelte';
-  import { terminalInputDelivery } from '$lib/terminal-input-delivery.svelte';
-  import { piPromptDelivery } from '$lib/pi-prompt.svelte';
+  import { terminalInputGate } from '$lib/terminal-input-gate.svelte';
+  import { paneActive, pollPane } from '$lib/pane-activity.svelte';
   import { promptDispatchRestriction } from '$lib/terminal-input';
   import { targetRefForAgent } from '$lib/resource-id';
   import ConversationMessage from '$components/ConversationMessage.svelte';
   import OmoPlan from '$components/OmoPlan.svelte';
   import Button from '$components/ui/Button.svelte';
+  import CopyIcon from '$components/ui/CopyIcon.svelte';
   import KeyboardIcon from '$components/ui/KeyboardIcon.svelte';
   import { agentNeedsResponse, attentionKind, displayName, questionInteraction } from '$lib/agents';
   import { conversationEntries, pendingQuestionEntryId } from '$lib/conversation';
@@ -24,21 +26,18 @@
     putConversationPreview,
   } from '$lib/conversation-cache';
   import {
-    armSpeechKeepalive,
-    releaseSpeechKeepalive,
-    speakViaRelay,
+    toggleSpeech as toggleResponseSpeech,
     speechEnabled,
     speechLanguage,
     speechLanguageLabel,
     speechState,
-    stopSpeech,
   } from '$lib/speech';
   import { fencedCodeText } from '$lib/markdown';
   import { ConversationLiveReader, LIVE_MAX_BYTES, type LiveReaderState } from '$lib/conversation-live';
   import { ConversationMessageStateStore } from '$lib/conversation-message-state';
   import { securityState } from '$lib/security';
-  import { terminalDraftState } from '$lib/terminal-draft-state.svelte';
-  import { CommandError, relayStore } from '$lib/store';
+  import { CommandError } from '$lib/command-error';
+  import { relayStore } from '$lib/store';
   import { stripAnsi } from '$lib/terminal';
   import { terminalTextInputMode } from '$lib/terminal-menu';
   import type { Agent, ConversationCapabilities, ConversationEntry, ConversationPage, TerminalFrame } from '$lib/types';
@@ -52,20 +51,14 @@
   }: { agent: Agent; readOnly?: boolean; frame?: TerminalFrame; responding?: Set<string>; onInitialPage?: (page: ConversationPage) => void } = $props();
 
   const connections = relayStore.connections;
-  let paneVisible = $state(true);
-  const draftState = terminalDraftState(() => agent, () => frame);
   const paneConnectionStatus = $derived($connections.get(agent.relay_id)?.status);
   const paneStateIdentity = $derived(JSON.stringify(targetRefForAgent(agent)));
   $effect(() => {
     const identity = paneStateIdentity;
     const status = paneConnectionStatus;
-    const target = untrack(() => ({ ...agent }));
-    if (!controllerReady || !paneVisible || $securityState.locked || status !== 'connected') return;
+    if (!controllerReady || !paneActive.current || status !== 'connected') return;
     void identity;
-    const refreshState = () => relayStore.readPane(target, false, 30);
-    relayStore.readPane(target, true, 30);
-    const refresh = setInterval(refreshState, 2_000);
-    return () => clearInterval(refresh);
+    return untrack(() => pollPane(agent, { lines: 30, forceRepeats: false }));
   });
 
   const messageStates = new ConversationMessageStateStore();
@@ -92,8 +85,8 @@
   const requestPhase = $derived(historyState?.requestPhase ?? 'initial');
   const preparationPolls = $derived(historyState?.preparationPolls ?? 0);
   const error = $derived(historyState?.error?.message || '');
-  const errorCode = $derived(historyState?.errorCode ?? '');
-  const errorRetryable = $derived(historyState?.errorRetryable ?? false);
+  const errorCode = $derived(historyState?.error?.code ?? '');
+  const errorRetryable = $derived(historyState?.error?.retryable ?? false);
   const loadingOlder = $derived(requestPhase === 'older');
   const loading = $derived(!entries.length && !previewVisible && requestPhase === 'initial');
   let liveEntries = $state<ConversationEntry[]>([]);
@@ -143,20 +136,11 @@
   });
   const waitingQuestionEntryId = $derived(agentNeedsResponse(agent) && attentionKind(agent) === 'question' ? pendingQuestionEntryId(mode === 'activity' ? [...modeEntries, ...liveEntries] : modeEntries) : null);
   const questionFormShown = $derived(!readOnly && Boolean(questionInteraction(agent)));
-  const draftPersistenceAllowed = $derived(draftState.allowed);
   const screenPickerActive = $derived(frame?.paneId === agent.pane_id && terminalTextInputMode(stripAnsi(frame.content)) === 'filter');
-  const delivery = $derived(terminalInputDelivery(agent));
-  const piDelivery = $derived(piPromptDelivery(agent));
-  const inputBlocked = $derived(delivery.pending || delivery.uncertain || piDelivery.pending || piDelivery.uncertain);
-  $effect.pre(() => {
-    const state = delivery;
-    const piState = piDelivery;
-    state.retain();
-    piState.retain();
-    return () => { state.release(); piState.release(); };
-  });
+  const inputGate = terminalInputGate(() => agent);
+  const delivery = $derived(inputGate.delivery);
+  const inputBlocked = $derived(inputGate.blocked);
   const dispatchBlocked = $derived(promptDispatchRestriction(agent, screenPickerActive));
-  const noEchoActive = $derived(Boolean(frame?.paneId === agent.pane_id && frame?.noEcho));
   const inputPlaceholder = $derived(readOnly ? 'Reader access is read only' : 'Type a reply…');
   function matchesSearch(entry: ConversationEntry, needle: string): boolean {
     return `${entry.text} ${(entry.tools || []).map(tool => `${tool.name} ${tool.input || ''} ${tool.output || ''}`).join(' ')}`.toLocaleLowerCase().includes(needle);
@@ -186,6 +170,7 @@
     : liveState === 'unavailable' ? 'Live events unavailable — recorded history only.'
     : '');
   const historyBusy = $derived(requestPhase !== 'idle');
+  const historyDamaged = $derived(Boolean(diagnostics?.source_truncated || diagnostics?.oversized_records || diagnostics?.corrupt_records));
   const historyStatusText = $derived.by(() => {
     if (pausedReason) return pausedReason;
     if (latestGapOutstanding) return 'Checking for new messages…';
@@ -195,16 +180,9 @@
     if (requestPhase === 'older') return 'Loading earlier messages…';
     if (requestPhase === 'initial' && !entries.length) return 'Loading conversation…';
     if (beginningReached && entries.length) {
-      return diagnostics?.source_truncated || diagnostics?.oversized_records || diagnostics?.corrupt_records
+      return historyDamaged
         ? 'Beginning of available history reached.'
         : 'Beginning of conversation reached.';
-    }
-    if (authoritative && !entries.length
-      && (diagnostics?.source_truncated || diagnostics?.oversized_records || diagnostics?.corrupt_records || diagnostics?.continuation_incomplete)) {
-      return 'No readable conversation messages are available in the loaded history.';
-    }
-    if (authoritative && entries.length && !modeEntries.length && mode === 'conversation') {
-      return 'No user prompts or agent answers are recorded in the available history.';
     }
     return '';
   });
@@ -215,7 +193,7 @@
       return 'No user prompts or agent answers are recorded in the available history.';
     }
     if (!entries.length) {
-      return diagnostics?.source_truncated || diagnostics?.oversized_records || diagnostics?.corrupt_records || diagnostics?.continuation_incomplete
+      return historyDamaged || diagnostics?.continuation_incomplete
         ? 'No readable conversation messages are available in the loaded history.'
         : 'No conversation messages have been recorded yet.';
     }
@@ -250,31 +228,24 @@
       maxContentBytes: HISTORY_MAX_CONTENT_BYTES - LIVE_MAX_BYTES,
       onState: applyHistoryState,
       onInitialPage: (page) => onInitialPage?.(page),
-      getPreview: (identity) => getConversationPreview(identity, Date.now(), HISTORY_WIRE_PAGE_SIZE),
+      getPreview: (identity) => getConversationPreview(identity),
       putPreview: (preview) => putConversationPreview(preview),
-      isActive: () => mounted
-        && document.visibilityState !== 'hidden'
-        && !$securityState.locked,
+      isActive: () => mounted && paneActive.current,
     });
     controllerReady = true;
     historyController.start();
     refreshTimer = setInterval(() => {
       if (!liveReader?.observing) historyController?.refresh();
     }, refreshIntervalMs);
-    const syncHistoryVisibility = () => {
-      paneVisible = document.visibilityState !== 'hidden';
-      if (document.visibilityState === 'hidden' || $securityState.locked) { liveReader?.pause(); historyController?.pause(); }
-      else { liveReader?.resume(); historyController?.resume(); }
-    };
     const selectionChanged = () => { if (selectionInHistory()) suspendFollowing(); };
-    document.addEventListener('visibilitychange', syncHistoryVisibility);
     document.addEventListener('selectionchange', selectionChanged);
     return () => {
       mounted = false;
       controllerReady = false;
+      messageStates.clear();
+      if (pinPendingTimer) clearTimeout(pinPendingTimer);
       if (refreshTimer) clearInterval(refreshTimer);
       refreshTimer = undefined;
-      document.removeEventListener('visibilitychange', syncHistoryVisibility);
       document.removeEventListener('selectionchange', selectionChanged);
       liveReader?.stop();
       liveReader = null;
@@ -340,7 +311,7 @@
     if (!list || !sentinel || typeof IntersectionObserver === 'undefined') return;
     const observer = new IntersectionObserver((observations) => {
       if (!observations.some((observation) => observation.isIntersecting)) return;
-      if (searching || !historyController || document.visibilityState === 'hidden' || $securityState.locked) return;
+      if (searching || !historyController || !paneActive.current) return;
       if (pinnedToBottom || !upwardDemand) return;
       demandOlder();
     }, { root: list, rootMargin: '300px 0px 0px 0px', threshold: 0 });
@@ -368,18 +339,26 @@
     historyController.setAgent(currentAgent);
   });
 
+  function syncActive() {
+    if (!paneActive.current) {
+      liveReader?.pause();
+      historyController?.pause();
+    } else {
+      liveReader?.resume();
+      historyController?.resume();
+    }
+  }
+
   $effect(() => {
-    const locked = $securityState.locked;
     if (!controllerReady || !historyController) return;
-    if (locked || document.visibilityState === 'hidden') { liveReader?.pause(); historyController.pause(); }
-    else { liveReader?.resume(); historyController.resume(); }
+    syncActive();
   });
 
   $effect(() => {
     const status = paneConnectionStatus;
     const identity = `${paneStateIdentity}:${historyState?.epoch}`;
     const failure = historyState?.error?.code;
-    const visible = paneVisible && !$securityState.locked;
+    const visible = paneActive.current;
     if (status !== 'connected') { recoveryAttemptedFor = ''; return; }
     if (!visible || failure !== 'transport_disconnected' || recoveryAttemptedFor === identity) return;
     if (historyController?.recoverAfterReconnect(agent)) recoveryAttemptedFor = identity;
@@ -476,7 +455,7 @@
     pinPendingUntil = 0;
     pinnedToBottom = false;
     renderAnchor ||= visibleEntries[0]?.id || null;
-    if (document.visibilityState === 'hidden' || $securityState.locked) return;
+    if (!paneActive.current) return;
     if (bottomGap < bottomThreshold) {
       if (renderStart + mountedEntryLimit < filteredEntries.length) {
         if (movedTowardTail) demandNewer();
@@ -516,17 +495,9 @@
     if (next.requestPhase === 'idle' && wasLoadingOlder) pendingAnchor = null;
   }
 
-  function cancelHistoryRequests() {
-    historyController?.cancel();
-  }
-
   function requestLatest() {
     sourceChangedNotice = '';
     historyController?.returnToLatest();
-  }
-
-  function reloadHistory() {
-    requestLatest();
   }
 
   function continuePreparation() {
@@ -576,31 +547,13 @@
     historyController.demandOlder();
   }
 
-  function loadOlder() {
-    demandOlder();
-  }
   function toggleSpeech(text: string): void {
-    if ($speechState === 'speaking') {
-      stopSpeech();
-      return;
-    }
-    const toast = (message: string) => relayStore.showToast(message, true);
-    // Checked before anything plays: unlocking audio for a language the relay
-    // cannot speak leaves the phone with a silent stream and no explanation.
-    const languages = $connections.get(agent.relay_id)?.speechLanguages ?? [];
-    if (!languages.includes($speechLanguage)) {
-      toast(`This relay has no ${speechLanguageLabel($speechLanguage)} voice; install a Piper voice for it on that computer.`);
-      return;
-    }
-    // Armed inside the tap: the relay fetches audio before playing, and a
-    // play() after that round trip is autoplay-blocked.
-    armSpeechKeepalive(toast);
-    const spoke = speakViaRelay(
+    void toggleResponseSpeech(
       text,
+      $connections.get(agent.relay_id)?.speechLanguages ?? [],
       (chunk, language) => relayStore.speakToAgent(agent, chunk, language),
-      toast,
+      (message) => relayStore.showToast(message, true),
     );
-    if (!spoke) releaseSpeechKeepalive();
   }
 
 
@@ -670,10 +623,9 @@
       relayStore.showToast('Clipboard access is unavailable. Select the text manually.', true);
       return;
     }
-    try {
-      await navigator.clipboard.writeText(entry.text);
+    if (await copyText(entry.text)) {
       relayStore.showToast('Markdown copied.');
-    } catch {
+    } else {
       relayStore.showToast('Could not copy. Select it manually.', true);
     }
   }
@@ -682,22 +634,12 @@
       relayStore.showToast('Clipboard access is unavailable while the app is locked.', true);
       return;
     }
-    try {
-      await navigator.clipboard.writeText(code);
+    if (await copyText(code)) {
       relayStore.showToast('Code copied.');
-    } catch {
+    } else {
       relayStore.showToast('Could not copy. Select it manually.', true);
     }
   }
-
-
-  onDestroy(() => {
-    messageStates.clear();
-    liveReader?.stop();
-    if (pinPendingTimer) clearTimeout(pinPendingTimer);
-    cancelHistoryRequests();
-  });
-
 </script>
 
 <main class="conversation-page" aria-labelledby="conversation-title">
@@ -735,12 +677,12 @@
     {#if sourceChangedNotice}
       <p class="conversation-warning error" role="alert">
         {sourceChangedNotice}
-        <Button variant="secondary" size="sm" onclick={reloadHistory}>Reload history</Button>
+        <Button variant="secondary" size="sm" onclick={requestLatest}>Reload history</Button>
       </p>
     {/if}
     {#if hasMore && !sourceChangedNotice && preparationPolls < maxPreparationPolls && browseState !== 'preparing'}
       <div class="conversation-older">
-        <Button variant="secondary" size="sm" disabled={loadingOlder || preparationPolls >= maxPreparationPolls} onclick={loadOlder}>
+        <Button variant="secondary" size="sm" disabled={loadingOlder || preparationPolls >= maxPreparationPolls} onclick={demandOlder}>
           {loadingOlder ? 'Loading…' : browseState === 'failed' ? 'Retry loading' : 'Load older turns'}
         </Button>
       </div>
@@ -758,7 +700,7 @@
     {#if diagnostics?.continuation_incomplete}
       <p class="conversation-warning error" role="status">
         {continuationMessage()}
-        <Button variant="secondary" size="sm" onclick={reloadHistory}>Reload history</Button>
+        <Button variant="secondary" size="sm" onclick={requestLatest}>Reload history</Button>
       </p>
     {/if}
     {#if diagnostics?.oversized_records}
@@ -834,10 +776,7 @@
                     title="Copy Markdown"
                     onclick={() => copyMarkdown(entry)}
                   >
-                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                      <rect x="9" y="9" width="13" height="13" rx="2"></rect>
-                      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-                    </svg>
+                    <CopyIcon />
                   </Button>
                 {/if}
                 {#if code}
@@ -870,8 +809,7 @@
     <AgentInteraction {agent} {readOnly} responding={responding.has(agent.pane_id)} blocked={inputBlocked} />
     {#key JSON.stringify(targetRefForAgent(agent))}
       <PromptComposer {agent} {frame} {readOnly}
-        dispatchBlocked={inputBlocked ? 'Check terminal input delivery in Terminal before sending.' : draftState.secretReady ? '' : dispatchBlocked}
-        {noEchoActive} {draftPersistenceAllowed} noEchoPrompt={frame?.noEchoPrompt || 'Password:'}
+        {dispatchBlocked}
         placeholder={inputPlaceholder} onsubmitted={() => { historyController?.refresh(); }} />
     {/key}
     {#if readOnly}

@@ -113,7 +113,7 @@ func TestRealPTYDeviceMismatchIsRefused(t *testing.T) {
 	}
 	ttys := &fakeTTYs{byPID: map[int]string{321: slavePath}}
 	logs := &logRecorder{}
-	m := newManager(provider, ttys, ioctlTerminalOps{}, LeaseTTL, ReleaseGrace, clock.Now, slog.New(logs))
+	m := newManager(provider, ttys, ioctlTerminalOps{}, clock.Now, slog.New(logs))
 
 	if columns, rows, err := m.Acquire(context.Background(), "client-a", "pane-1", 84, 0); err != nil || columns != 84 || rows != 40 {
 		t.Fatalf("Acquire() = %d, %d, %v", columns, rows, err)

@@ -36,10 +36,6 @@ func Path(runtimeDir string) string {
 }
 
 func Write(runtimeDir string, snapshot Snapshot) error {
-	return write(runtimeDir, snapshot, atomicfile.Replace)
-}
-
-func write(runtimeDir string, snapshot Snapshot, replace func(string, string, string, []byte, os.FileMode) (atomicfile.Outcome, error)) error {
 	if err := os.MkdirAll(runtimeDir, 0o700); err != nil {
 		return err
 	}
@@ -48,7 +44,7 @@ func write(runtimeDir string, snapshot Snapshot, replace func(string, string, st
 	if err != nil {
 		return err
 	}
-	outcome, err := replace(runtimeDir, Path(runtimeDir), ".support-state.*.tmp", data, 0o600)
+	outcome, err := atomicfile.Replace(runtimeDir, Path(runtimeDir), ".support-state.*.tmp", data, 0o600)
 	if outcome == atomicfile.Renamed {
 		return nil
 	}

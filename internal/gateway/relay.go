@@ -98,21 +98,8 @@ func (s *Server) handleRelay(w http.ResponseWriter, r *http.Request) {
 
 // relayHello performs the challenge exchange and optional registration checks.
 func (s *Server) relayHello(ctx context.Context, conn *websocket.Conn) (string, bool) {
-	nonce, err := randomNonce()
-	if err != nil {
-		s.logger.Error("nonce generation failed", "error", err)
-		reject(ctx, conn, gatewaywire.CodeInternal, "gateway could not generate a challenge")
-		return "", false
-	}
-	if err := writeJSON(ctx, conn, gatewaywire.ServerHello{
-		Type:     gatewaywire.TypeServerHello,
-		Proto:    gatewaywire.Proto,
-		Nonce:    nonce,
-		StunPort: s.stunPort,
-		Version:  s.opts.Version,
-		Revision: s.opts.Revision,
-	}); err != nil {
-		s.logger.Debug("relay hello write failed", "error", err)
+	nonce, ok := s.sendServerHello(ctx, conn, "relay")
+	if !ok {
 		return "", false
 	}
 

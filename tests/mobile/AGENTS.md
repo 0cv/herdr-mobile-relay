@@ -9,23 +9,21 @@
 
 ## Rules
 
+- Node and Bun versions live in `toolchains.json` and the Go version in `go.mod`. Workflows and the device action install them through `.github/actions/setup-toolchain`; never write the versions into a workflow.
 - Never weaken a product assertion to get a green run. Limits such as at most 2 reloads and at most 2 lifecycle launches describe what users must experience.
 - `APPIUM_TIMEOUT` stays fatal for the rest of the run because the driver can no longer be trusted. Do not retry inside the run.
 - Hosted iOS runs with `MOBILE_TIMING_SCALE=3`, which scales phase and request allowances but not admission. The release scenario has 45 minutes and the device job 60.
 - Appium's iOS remote debugger deletes properties named `ceil`, `clone`, `floor`, `round`, `scale` and `toString` from web script results. Do not use those names in returned objects.
-- The Android environment check fails on any process death it cannot explain. When a hosted run fails with `ADVERSE_DEATH`:
-  1. Commit a trimmed copy of the hosted logcat to `unit/fixtures/`.
-  2. Add a test that accepts the new case and still rejects crashes, signals, low-memory kills, force stops, package changes and PID reuse.
-  3. Replay earlier recorded runs before widening what is accepted.
 - Raw logs, screenshots and page XML stay in private artifacts with one-day retention. Public summaries carry only the bounded fields built by `publicMobileSummary` in `support/android-product.ts`. Never print raw device output in step logs.
 - Treat a failed download, runner image or simulator boot as an infrastructure fault: rerun the whole workflow, never single jobs. A lane change is done after two green attempts on the same commit.
 
 ## Tests
 
-- Run tests with `MOBILE_UNIT_FILTER='<regex>' bun run --cwd tests/mobile test:unit`. The slow groups are:
-  - `^iOS `: about 18 minutes. Narrow it with `IOS_TEST_FILTER`.
-  - `^Android product`: about 11 minutes.
-  - `^Android production CLI `: about 11 minutes.
+- Run tests with `MOBILE_UNIT_FILTER='<regex>' make mobile-unit-check`. CI runs the suite as four legs split by these names. On hosted runners:
+  - `^iOS `: about 1 minute.
+  - `^Android product/environment `: about 1 minute.
+  - `^Android production CLI `: about 18 minutes.
+  - everything else: about 19 minutes, most of it `^Native startup actual XCTest supervisor `.
 
   Run the group you changed first, then all groups before pushing.
 - To show that a new test catches the bug, run it against the previous version of the source file and confirm that it fails.

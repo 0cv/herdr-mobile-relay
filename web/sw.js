@@ -79,26 +79,6 @@ async function closeExactNotification(tag) {
     if (notification.tag === tag) notification.close();
   }
 }
-function legacyNotificationPayload(payload) {
-  if (!payload || typeof payload !== 'object'
-    || typeof payload.title !== 'string' || !payload.title
-    || typeof payload.url !== 'string') return null;
-  const actions = [];
-  return {
-    title: payload.title,
-    options: {
-      body: typeof payload.body === 'string' ? payload.body : '',
-      tag: typeof payload.tag === 'string' ? payload.tag : '',
-      icon: HERDR_NOTIFICATION_ICON,
-      badge: HERDR_NOTIFICATION_BADGE,
-      actions,
-      data: {
-        legacyURL: safeAppURL(payload.url).href,
-      },
-    },
-  };
-}
-
 
 self.addEventListener('push', event => {
   let payload;
@@ -107,11 +87,7 @@ self.addEventListener('push', event => {
   } catch (_err) {
     payload = null;
   }
-  if (!payload || payload.v !== 1 || !validPushEventKey(payload.key)) {
-    const legacy = legacyNotificationPayload(payload);
-    if (legacy) event.waitUntil(self.registration.showNotification(legacy.title, legacy.options));
-    return;
-  }
+  if (!payload || payload.v !== 1 || !validPushEventKey(payload.key)) return;
 
   const tag = notificationTag(payload.key);
   event.waitUntil((async () => {
@@ -164,9 +140,6 @@ function notificationOpenRequest(data, action) {
     url.searchParams.set('push_action_ref', actionRef);
   }
   return {
-    // 0.19.1 only recognizes this name. Newer clients accept both this legacy
-    // envelope and the typed fields below, so a just-activated worker cannot
-    // lose a click while an older page is still controlled.
     type: 'herdr_notification_click',
     mode: safeAction ? 'revalidate_action' : 'thread',
     key: data.key,
@@ -197,11 +170,6 @@ async function openOrFocusApp(request) {
 self.addEventListener('notificationclick', event => {
   event.notification.close();
   const data = event.notification.data || {};
-  if (typeof data.legacyURL === 'string') {
-    const url = safeAppURL(data.legacyURL).href;
-    event.waitUntil(openOrFocusApp({type: 'herdr_notification_click', url}));
-    return;
-  }
   if (!validPushEventKey(data.key)) return;
   event.waitUntil(openOrFocusApp(notificationOpenRequest(data, event.action)));
 });

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 )
 
@@ -17,7 +18,7 @@ func TestAppendWritesPrivateStructuredRecords(t *testing.T) {
 	}
 	ok := true
 	if err := logger.Append(Record{
-		Stage: "result", Action: "send_text", RequestID: "request-1",
+		Stage: "result", Action: "submit_prompt", RequestID: "request-1",
 		ClientID: "phone-1", ConnectionID: "connection-1", PaneID: "pane-1",
 		OK: &ok, Phase: "completed", Details: map[string]any{"text_bytes": 12},
 	}); err != nil {
@@ -39,7 +40,7 @@ func TestAppendWritesPrivateStructuredRecords(t *testing.T) {
 	if err := json.Unmarshal(data, &record); err != nil {
 		t.Fatal(err)
 	}
-	if record.Timestamp == "" || record.Action != "send_text" || record.ClientID != "phone-1" || record.OK == nil || !*record.OK {
+	if record.Timestamp == "" || record.Action != "submit_prompt" || record.ClientID != "phone-1" || record.OK == nil || !*record.OK {
 		t.Fatalf("record = %#v", record)
 	}
 }
@@ -96,7 +97,11 @@ func TestAppendRejectsSymlinkReplacement(t *testing.T) {
 	if err := os.Symlink(outside, logger.path); err != nil {
 		t.Fatal(err)
 	}
-	if err := logger.Append(Record{Stage: "attempt", Action: "send_text", ClientID: "phone"}); err == nil {
+	if file, err := logger.openAppendFile(); err == nil {
+		_ = file.Close()
+		t.Fatal("opening a symlink unexpectedly succeeded")
+	}
+	if err := logger.Append(Record{Stage: "attempt", Action: "submit_prompt", ClientID: "phone"}); err == nil {
 		t.Fatal("append through a symlink unexpectedly succeeded")
 	}
 	data, err := os.ReadFile(outside)
@@ -108,6 +113,35 @@ func TestAppendRejectsSymlinkReplacement(t *testing.T) {
 	}
 }
 
+func TestOpenAppendFileRejectsFIFO(t *testing.T) {
+	for _, withReader := range []bool{false, true} {
+		name := "without reader"
+		if withReader {
+			name = "with reader"
+		}
+		t.Run(name, func(t *testing.T) {
+			logger, err := Open(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := syscall.Mkfifo(logger.path, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if withReader {
+				reader, err := os.OpenFile(logger.path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer reader.Close()
+			}
+			if file, err := logger.openAppendFile(); err == nil {
+				_ = file.Close()
+				t.Fatal("opening a FIFO unexpectedly succeeded")
+			}
+		})
+	}
+}
+
 func TestAppendRotatesBeforeCrossingLimit(t *testing.T) {
 	logger, err := Open(t.TempDir())
 	if err != nil {
@@ -116,7 +150,7 @@ func TestAppendRotatesBeforeCrossingLimit(t *testing.T) {
 	if err := os.WriteFile(logger.path, []byte(strings.Repeat("x", maxAuditBytes)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := logger.Append(Record{Stage: "attempt", Action: "send_text", ClientID: "phone"}); err != nil {
+	if err := logger.Append(Record{Stage: "attempt", Action: "submit_prompt", ClientID: "phone"}); err != nil {
 		t.Fatal(err)
 	}
 	if info, err := os.Stat(logger.path + ".1"); err != nil || info.Size() != maxAuditBytes {

@@ -37,13 +37,16 @@ const (
 	FlagEnd   = 1 << 1
 	flagKnown = FlagStart | FlagEnd
 
-	// MaxLogicalBytes mirrors the WebSocket read limit of the legacy path so
-	// no transport can buy more memory than another.
+	// MaxLogicalBytes caps one logical frame on every transport, including the
+	// WebSocket read limit, so no transport can buy more memory than another.
 	MaxLogicalBytes = 21 * 1024 * 1024
 
 	// StallTimeout abandons a partially received frame whose remaining chunks
 	// stopped arriving.
 	StallTimeout = 30 * time.Second
+	// StallSweepInterval is how often connections are checked against
+	// StallTimeout.
+	StallSweepInterval = 5 * time.Second
 
 	// WebRTCChunkSize stays well under the SCTP message limit every browser
 	// implements.

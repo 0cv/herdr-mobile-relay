@@ -1,53 +1,105 @@
 package coordinator
 
-// Verification tests for lifecycle generations (§9.5). Unlike the red tests,
-// these are expected to PASS — they lock the implemented behavior against
-// regression. They drive the interleaving deterministically by holding the
-// pane FIFO slot while a Clear/Stop bumps the generation.
-// Helpers testLogger/recordingHerdr live in sibling *_test.go files.
-
 import (
 	"context"
-	"os"
-	"path/filepath"
-	"strings"
+	"reflect"
+	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/0cv/herdr-mobile-relay/internal/herdr"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 )
+
+func generationResult(t *testing.T, ctx context.Context, results <-chan *CommandResult) *CommandResult {
+	t.Helper()
+	select {
+	case result := <-results:
+		if result == nil {
+			t.Fatal("command returned no result")
+		}
+		return result
+	case <-ctx.Done():
+		t.Fatal("command did not finish: ", ctx.Err())
+		return nil
+	}
+}
+
+func mutationQueuedBehindStop(t *testing.T, d *Dispatcher, client *fakeBackend, message protocol.Inbound) *CommandResult {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
+	defer cancel()
+	entered, release := make(chan struct{}), make(chan struct{})
+	client.setHook("StopPane", func(ctx context.Context, _ fakeCall) error {
+		close(entered)
+		select {
+		case <-release:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	})
+	stopped := make(chan *CommandResult, 1)
+	go func() {
+		stopped <- d.Handle(ctx, protocol.Inbound{
+			Type:      "agent_stop",
+			RequestID: "stop",
+			PaneID:    "pane-1",
+		})
+	}()
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatal("stop did not reach backend: ", ctx.Err())
+	}
+
+	admitted := make(chan struct{})
+	results := make(chan *CommandResult, 1)
+	go func() {
+		results <- d.HandleAdmitted(ctx, message, func() { close(admitted) })
+	}()
+	select {
+	case <-admitted:
+	case <-ctx.Done():
+		t.Fatal("mutation was not admitted: ", ctx.Err())
+	}
+	fence, err := d.scheduler.Execute(ctx, ScheduleOptions{RelayLevel: true, Command: Command{
+		ID: d.scheduler.NextCommandID(), RequestID: "fence", ReceivedAt: time.Now(), Deadline: time.Now().Add(time.Second),
+	}}, EffectFunc(func(context.Context, WorkerToken) EffectResult {
+		return EffectResult{Result: completed("fence", "fence", "", nil)}
+	}))
+	if err != nil || fence == nil || !fence.OK {
+		t.Fatalf("scheduler fence: result=%+v err=%v", fence, err)
+	}
+	select {
+	case result := <-results:
+		t.Fatalf("mutation did not wait for stop: %+v", result)
+	default:
+	}
+
+	close(release)
+	if result := generationResult(t, ctx, stopped); !result.OK {
+		t.Fatalf("stop failed: %+v", result)
+	}
+	return generationResult(t, ctx, results)
+}
 
 // §9.5: a mutation that captured generation N must abort — without sending any
 // input — if a Clear/Stop advances the generation while it was queued.
 func TestMutationAbortsWhenGenerationAdvancesWhileQueued(t *testing.T) {
-	dir := t.TempDir()
-	record := filepath.Join(dir, "sends.log")
-	d := NewDispatcher(herdr.NewClient(recordingHerdr(t, dir, record, `{"ok":true}`), filepath.Join(dir, "sock")), NewState(testLogger()), nil, testLogger())
+	client := newFakeBackend()
+	d := newTestDispatcher(t, client, NewState(testLogger()))
 
-	// Occupy the pane FIFO so the prompt captures the generation and then queues.
-	slot := d.paneSlot("pane-1")
-	slot <- struct{}{}
-
-	resCh := make(chan *CommandResult, 1)
-	go func() {
-		resCh <- d.Handle(context.Background(), map[string]any{
-			"action": "submit_prompt", "request_id": "p", "pane_id": "pane-1", "text": "hi",
-		})
-	}()
-
-	time.Sleep(100 * time.Millisecond) // prompt is now parked on slot.Lock(), gen captured
-
-	// A Clear commits while the prompt is queued.
-	d.state.BumpGeneration("pane-1")
-	<-slot
-
-	res := <-resCh
+	d.state.CommitInventory([]*AgentState{{PaneID: "pane-1", Status: "working"}}, d.state.RevisionCounter())
+	res := mutationQueuedBehindStop(t, d, client, protocol.Inbound{
+		Type: "submit_prompt", RequestID: "p", PaneID: "pane-1", Text: "hi",
+	})
 	if res.OK || res.Error != "pane session was replaced" {
 		t.Fatalf("prompt dispatched after generation advanced: ok=%v phase=%q err=%q "+
 			"(§9.5: input must not land on a replaced session)", res.OK, res.Phase, res.Error)
 	}
-	if data, _ := os.ReadFile(record); strings.Contains(string(data), "send-text") {
-		t.Fatalf("prompt sent input to herdr despite a stale generation:\n%s", data)
+	want := []fakeCall{{Method: "StopPane", Args: []any{"pane-1"}}}
+	if got := client.recorded(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("prompt sent input to herdr despite a stale generation: calls = %+v", got)
 	}
 }
 
@@ -55,54 +107,42 @@ func TestMutationAbortsWhenGenerationAdvancesWhileQueued(t *testing.T) {
 // so a fresh attempt (against the new session) can dispatch — the abort is a
 // definite non-dispatch, not an uncertain one.
 func TestApprovalLedgerReleasedOnStaleGeneration(t *testing.T) {
-	dir := t.TempDir()
-	record := filepath.Join(dir, "sends.log")
-	d := NewDispatcher(herdr.NewClient(recordingHerdr(t, dir, record, approvalPane), filepath.Join(dir, "sock")), NewState(testLogger()), nil, testLogger())
+	client := newFakeBackend()
+	client.contents["pane-1"] = approvalPane
+	d := newTestDispatcher(t, client, NewState(testLogger()))
 	commitApproval(d.state, "pane-1")
 	eventID := blockedEventID(t, d, "pane-1")
 	fingerprint, choice := approvalIdentity(t, d, "pane-1", 0)
 
-	slot := d.paneSlot("pane-1")
-	slot <- struct{}{}
-
-	resCh := make(chan *CommandResult, 1)
-	go func() {
-		resCh <- d.Handle(context.Background(), map[string]any{
-			"action": "respond", "request_id": "a", "pane_id": "pane-1", "event_id": eventID,
-			"approval_fingerprint": fingerprint, "choice": choice, "index": float64(0), "total": float64(2),
-		})
-	}()
-
-	time.Sleep(100 * time.Millisecond)
-	d.state.BumpGeneration("pane-1")
-	<-slot
-
-	if first := <-resCh; first.Error != "pane session was replaced" {
+	first := mutationQueuedBehindStop(t, d, client, protocol.Inbound{
+		Type: "respond", RequestID: "a", PaneID: "pane-1", EventID: eventID,
+		ApprovalFingerprint: fingerprint, Choice: choice, Index: intPtr(0), Total: intPtr(2),
+	})
+	if first.OK || first.Error != "pane session was replaced" {
 		t.Fatalf("precondition: first approval err=%q, want stale-generation abort", first.Error)
 	}
 
 	// The claim must have been released: a retry can now dispatch.
-	second := d.Handle(context.Background(), map[string]any{
-		"action": "respond", "request_id": "b", "pane_id": "pane-1", "event_id": eventID,
-		"approval_fingerprint": fingerprint, "choice": choice, "index": float64(0), "total": float64(2),
+	second := d.Handle(context.Background(), protocol.Inbound{
+		Type:                "respond",
+		RequestID:           "b",
+		PaneID:              "pane-1",
+		EventID:             eventID,
+		ApprovalFingerprint: fingerprint,
+		Choice:              choice,
+		Index:               intPtr(0),
+		Total:               intPtr(2),
 	})
 	if !second.OK {
 		t.Fatalf("retry after stale-generation abort was blocked: phase=%q err=%q (ledger not released)", second.Phase, second.Error)
 	}
-	if data, _ := os.ReadFile(record); strings.Count(string(data), "send-keys") != 1 {
-		t.Fatalf("want exactly one approval dispatch after release, got:\n%s", data)
+	if sends := client.callsTo("SendKeys"); len(sends) != 1 {
+		t.Fatalf("want exactly one approval dispatch after release, got: %+v", client.recorded())
 	}
 }
 
 func TestSchedulerDoesNotRunMutationQueuedBeforeGenerationBump(t *testing.T) {
-	scheduler := NewScheduler(1, testLogger())
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		if err := scheduler.Close(ctx); err != nil {
-			t.Errorf("close scheduler: %v", err)
-		}
-	})
+	scheduler := newTestScheduler(t, 1)
 
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -111,7 +151,7 @@ func TestSchedulerDoesNotRunMutationQueuedBeforeGenerationBump(t *testing.T) {
 		now := time.Now()
 		result, _ := scheduler.Execute(context.Background(), ScheduleOptions{Command: Command{
 			ID: scheduler.NextCommandID(), RequestID: "clear", ReceivedAt: now,
-			Deadline: now.Add(time.Second), Kind: CommandClear, PaneID: "pane-1",
+			Deadline: now.Add(time.Second), Action: "agent_clear", PaneID: "pane-1",
 		}}, EffectFunc(func(context.Context, WorkerToken) EffectResult {
 			close(started)
 			<-release
@@ -131,7 +171,7 @@ func TestSchedulerDoesNotRunMutationQueuedBeforeGenerationBump(t *testing.T) {
 		now := time.Now()
 		result, _ := scheduler.ExecuteAdmitted(context.Background(), ScheduleOptions{Command: Command{
 			ID: scheduler.NextCommandID(), RequestID: "prompt", ReceivedAt: now,
-			Deadline: now.Add(time.Second), Kind: CommandPrompt, PaneID: "pane-1",
+			Deadline: now.Add(time.Second), Action: "submit_prompt", PaneID: "pane-1",
 		}}, EffectFunc(func(context.Context, WorkerToken) EffectResult {
 			promptRan <- struct{}{}
 			return EffectResult{Result: completed("prompt", "prompt", "pane-1", nil)}
@@ -146,8 +186,8 @@ func TestSchedulerDoesNotRunMutationQueuedBeforeGenerationBump(t *testing.T) {
 		t.Fatalf("clear result = %+v", result)
 	}
 	result := <-promptResult
-	if result == nil || result.OK || result.Error != "pane session was replaced" {
-		t.Fatalf("queued prompt result = %+v, want stale generation failure", result)
+	if result == nil || result.OK || result.Error != "pane session was replaced" || result.Action != "submit_prompt" {
+		t.Fatalf("queued prompt result = %+v, want stale submit_prompt failure", result)
 	}
 	select {
 	case <-promptRan:
@@ -157,17 +197,10 @@ func TestSchedulerDoesNotRunMutationQueuedBeforeGenerationBump(t *testing.T) {
 }
 
 func TestQueuedMutationDoesNotReachReplacementPane(t *testing.T) {
-	scheduler := NewScheduler(1, testLogger())
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		if err := scheduler.Close(ctx); err != nil {
-			t.Errorf("close scheduler: %v", err)
-		}
-	})
+	scheduler := newTestScheduler(t, 1)
 	if !scheduler.ApplyTopology(
 		map[string]bool{"pane-1": true},
-		map[string]uint64{"pane-1": 0},
+		map[string]int64{"pane-1": 0},
 	) {
 		t.Fatal("initial topology was not applied")
 	}
@@ -179,7 +212,7 @@ func TestQueuedMutationDoesNotReachReplacementPane(t *testing.T) {
 		now := time.Now()
 		result, _ := scheduler.Execute(context.Background(), ScheduleOptions{Command: Command{
 			ID: scheduler.NextCommandID(), RequestID: "first", ReceivedAt: now,
-			Deadline: now.Add(time.Second), Kind: CommandPrompt, PaneID: "pane-1",
+			Deadline: now.Add(time.Second), Action: "submit_prompt", PaneID: "pane-1",
 		}}, EffectFunc(func(context.Context, WorkerToken) EffectResult {
 			close(started)
 			<-release
@@ -196,7 +229,7 @@ func TestQueuedMutationDoesNotReachReplacementPane(t *testing.T) {
 		now := time.Now()
 		result, _ := scheduler.ExecuteAdmitted(context.Background(), ScheduleOptions{Command: Command{
 			ID: scheduler.NextCommandID(), RequestID: "queued", ReceivedAt: now,
-			Deadline: now.Add(time.Second), Kind: CommandPrompt, PaneID: "pane-1",
+			Deadline: now.Add(time.Second), Action: "submit_prompt", PaneID: "pane-1",
 		}}, EffectFunc(func(context.Context, WorkerToken) EffectResult {
 			queuedRan <- struct{}{}
 			return EffectResult{Result: completed("queued", "prompt", "pane-1", nil)}
@@ -210,7 +243,7 @@ func TestQueuedMutationDoesNotReachReplacementPane(t *testing.T) {
 	}
 	if !scheduler.ApplyTopology(
 		map[string]bool{"pane-1": true},
-		map[string]uint64{"pane-1": 2},
+		map[string]int64{"pane-1": 2},
 	) {
 		t.Fatal("replacement topology was not applied")
 	}
@@ -232,7 +265,7 @@ func TestQueuedMutationDoesNotReachReplacementPane(t *testing.T) {
 	freshRan := false
 	result, err := scheduler.Execute(context.Background(), ScheduleOptions{Command: Command{
 		ID: scheduler.NextCommandID(), RequestID: "fresh", ReceivedAt: now,
-		Deadline: now.Add(time.Second), Kind: CommandPrompt, PaneID: "pane-1",
+		Deadline: now.Add(time.Second), Action: "submit_prompt", PaneID: "pane-1",
 	}, PaneGeneration: 2}, EffectFunc(func(context.Context, WorkerToken) EffectResult {
 		freshRan = true
 		return EffectResult{Result: completed("fresh", "prompt", "pane-1", nil)}
@@ -243,95 +276,89 @@ func TestQueuedMutationDoesNotReachReplacementPane(t *testing.T) {
 }
 
 func TestCommandReceivedWhilePaneAbsentDoesNotReachReplacement(t *testing.T) {
-	dir := t.TempDir()
-	record := filepath.Join(dir, "sends.log")
-	d := NewDispatcher(
-		herdr.NewClient(recordingHerdr(t, dir, record, `{"ok":true}`), filepath.Join(dir, "sock")),
-		NewState(testLogger()),
-		nil,
-		testLogger(),
-	)
-	t.Cleanup(func() {
-		_ = d.Close(context.Background())
-	})
-	d.state.CommitInventory([]*AgentState{{
-		PaneID: "pane-1", RawPaneID: "raw-old", TerminalID: "terminal-old", Status: "working",
-	}}, d.state.RevisionCounter())
+	f, old := newClearFixture(t, launchFixtureOptions{})
+	d := f.dispatcher
 	d.state.CommitInventory(nil, d.state.RevisionCounter())
+	if got := d.Handle(f.ctx, protocol.Inbound{
+		Type:   "submit_prompt",
+		PaneID: old.PaneID,
+		Text:   "must not cross sessions",
+	}); got.OK || got.Error != ErrPaneReplaced.Error() {
+		t.Fatalf("absent prompt result = %+v, want replaced-session failure", got)
+	}
 
-	// Hold the pre-scheduler test gate so the replacement appears after Handle
-	// captured the pane's absence but before prompt scheduling.
-	slot := d.paneSlot("pane-1")
-	slot <- struct{}{}
-	result := make(chan *CommandResult, 1)
-	go func() {
-		result <- d.Handle(context.Background(), map[string]any{
-			"action": "submit_prompt", "request_id": "absent-prompt",
-			"pane_id": "pane-1", "text": "must not cross sessions",
-		})
+	client := f.client
+	entered, release := make(chan struct{}), make(chan struct{})
+	var blocked atomic.Bool
+	client.setHook("CapabilityStatus", func(context.Context, fakeCall) error {
+		if blocked.CompareAndSwap(false, true) {
+			close(entered)
+			<-release
+		}
+		return nil
+	})
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
 	}()
-	time.Sleep(20 * time.Millisecond)
+	results := make(chan *CommandResult, 1)
+	go func() {
+		results <- d.Handle(f.ctx, clearMessage())
+	}()
+	select {
+	case <-entered:
+	case <-f.ctx.Done():
+		t.Fatal("clear did not reach backend: ", f.ctx.Err())
+	}
 	d.state.CommitInventory([]*AgentState{{
-		PaneID: "pane-1", RawPaneID: "raw-new", TerminalID: "terminal-new", Status: "working",
+		PaneID: old.PaneID, RawPaneID: old.PaneID, TerminalID: "terminal-replacement",
+		TabID: old.TabID, WorkspaceID: old.WorkspaceID, Agent: "claude", Status: "working", Cwd: f.cwd,
 	}}, d.state.RevisionCounter())
-	<-slot
+	close(release)
 
-	if got := <-result; got.OK || got.Error != ErrPaneReplaced.Error() {
-		t.Fatalf("absence-window prompt result = %+v, want replaced-session failure", got)
+	if got := generationResult(t, f.ctx, results); got.OK || got.Error != ErrPaneReplaced.Error() {
+		t.Fatalf("absence-window clear result = %+v, want replaced-session failure", got)
 	}
-	if data, _ := os.ReadFile(record); len(data) != 0 {
-		t.Fatalf("absence-window prompt reached replacement pane:\n%s", data)
+	if calls := client.recorded(); len(calls) != 0 {
+		t.Fatalf("absence-window command reached replacement pane: %+v", calls)
 	}
-	if generation := d.state.Generation("pane-1"); generation != 2 {
+	if generation := d.state.Generation(old.PaneID); generation != 2 {
 		t.Fatalf("replacement generation = %d, want distinct epoch 2", generation)
 	}
 }
 
 func TestAbsentPaneMutationsDoNotInvokeHerdr(t *testing.T) {
-	dir := t.TempDir()
-	record := filepath.Join(dir, "sends.log")
-	d := NewDispatcher(
-		herdr.NewClient(recordingHerdr(t, dir, record, `{"ok":true}`), filepath.Join(dir, "sock")),
-		NewState(testLogger()),
-		nil,
-		testLogger(),
-	)
-	t.Cleanup(func() {
-		_ = d.Close(context.Background())
-	})
+	client := newFakeBackend()
+	d := newTestDispatcher(t, client, NewState(testLogger()))
 
-	messages := []map[string]any{
-		{"action": "send_keys", "request_id": "keys", "pane_id": "missing", "keys": []any{"Enter"}},
-		{"action": "send_text", "request_id": "text", "pane_id": "missing", "text": "text"},
-		{"action": "agent_stop", "request_id": "stop", "pane_id": "missing"},
-		{"action": "agent_rename", "request_id": "rename", "pane_id": "missing", "name": "new-name"},
-		{"action": "agent_clear", "request_id": "clear", "pane_id": "missing"},
-		{"action": "acknowledge_pane", "request_id": "ack", "pane_id": "missing"},
-		{"action": "respond", "request_id": "approval", "pane_id": "missing", "event_id": "old-event", "index": float64(0)},
-		{"action": "answer_question", "request_id": "question", "pane_id": "missing", "interaction_id": "old-question", "selected": []any{float64(0)}},
+	messages := []protocol.Inbound{
+		{Type: "send_keys", RequestID: "keys", PaneID: "missing", Keys: []string{"Enter"}},
+		{Type: "send_input", RequestID: "text", PaneID: "missing", Text: "text"},
+		{Type: "agent_stop", RequestID: "stop", PaneID: "missing"},
+		{Type: "agent_rename", RequestID: "rename", PaneID: "missing", Name: "new-name"},
+		{Type: "agent_clear", RequestID: "clear", PaneID: "missing"},
+		{Type: "acknowledge_pane", RequestID: "ack", PaneID: "missing"},
+		{Type: "respond", RequestID: "approval", PaneID: "missing", EventID: "old-event", Index: intPtr(0)},
+		{Type: "answer_question", RequestID: "question", PaneID: "missing", InteractionID: "old-question"},
 	}
 	for _, message := range messages {
 		if result := d.Handle(context.Background(), message); result.OK {
-			t.Errorf("%s unexpectedly succeeded for absent pane", message["action"])
+			t.Errorf("%s unexpectedly succeeded for absent pane", message.Type)
 		}
 	}
-	if data, _ := os.ReadFile(record); len(data) != 0 {
-		t.Fatalf("absent-pane mutation invoked Herdr:\n%s", data)
+	if calls := client.recorded(); len(calls) != 0 {
+		t.Fatalf("absent-pane mutation invoked Herdr: %+v", calls)
 	}
 }
 
 func TestSchedulerInvalidatesSameIDReplacementGeneration(t *testing.T) {
-	scheduler := NewScheduler(1, testLogger())
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		if err := scheduler.Close(ctx); err != nil {
-			t.Errorf("close scheduler: %v", err)
-		}
-	})
+	scheduler := newTestScheduler(t, 1)
 	if !scheduler.ApplyTopology(
 		map[string]bool{"pane-1": true},
-		map[string]uint64{"pane-1": 0},
+		map[string]int64{"pane-1": 0},
 	) {
 		t.Fatal("initial topology was not applied")
 	}
@@ -342,7 +369,7 @@ func TestSchedulerInvalidatesSameIDReplacementGeneration(t *testing.T) {
 		now := time.Now()
 		_, _ = scheduler.Execute(context.Background(), ScheduleOptions{Command: Command{
 			ID: scheduler.NextCommandID(), RequestID: "first", ReceivedAt: now,
-			Deadline: now.Add(time.Second), Kind: CommandPrompt, PaneID: "pane-1",
+			Deadline: now.Add(time.Second), Action: "submit_prompt", PaneID: "pane-1",
 		}}, EffectFunc(func(context.Context, WorkerToken) EffectResult {
 			close(started)
 			<-release
@@ -357,7 +384,7 @@ func TestSchedulerInvalidatesSameIDReplacementGeneration(t *testing.T) {
 		now := time.Now()
 		result, _ := scheduler.ExecuteAdmitted(context.Background(), ScheduleOptions{Command: Command{
 			ID: scheduler.NextCommandID(), RequestID: "queued", ReceivedAt: now,
-			Deadline: now.Add(time.Second), Kind: CommandPrompt, PaneID: "pane-1",
+			Deadline: now.Add(time.Second), Action: "submit_prompt", PaneID: "pane-1",
 		}}, EffectFunc(func(context.Context, WorkerToken) EffectResult {
 			return EffectResult{Result: completed("queued", "prompt", "pane-1", nil)}
 		}), func() { close(admitted) })
@@ -367,7 +394,7 @@ func TestSchedulerInvalidatesSameIDReplacementGeneration(t *testing.T) {
 
 	if !scheduler.ApplyTopology(
 		map[string]bool{"pane-1": true},
-		map[string]uint64{"pane-1": 1},
+		map[string]int64{"pane-1": 1},
 	) {
 		t.Fatal("replacement generation was not applied")
 	}
@@ -378,18 +405,11 @@ func TestSchedulerInvalidatesSameIDReplacementGeneration(t *testing.T) {
 }
 
 func TestSchedulerRejectsOperationAdmittedBeforeReplacementTopology(t *testing.T) {
-	scheduler := NewScheduler(1, testLogger())
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		if err := scheduler.Close(ctx); err != nil {
-			t.Errorf("close scheduler: %v", err)
-		}
-	})
+	scheduler := newTestScheduler(t, 1)
 
 	if !scheduler.ApplyTopology(
 		map[string]bool{"pane-1": true},
-		map[string]uint64{"pane-1": 1},
+		map[string]int64{"pane-1": 1},
 	) {
 		t.Fatal("replacement topology was not applied")
 	}
@@ -400,7 +420,7 @@ func TestSchedulerRejectsOperationAdmittedBeforeReplacementTopology(t *testing.T
 		Command: Command{
 			ID: scheduler.NextCommandID(), RequestID: "stale-admission",
 			ReceivedAt: now, Deadline: now.Add(time.Second),
-			Kind: CommandPrompt, PaneID: "pane-1",
+			Action: "submit_prompt", PaneID: "pane-1",
 		},
 		// The dispatcher captured generation zero before replacement, but its
 		// scheduler ingress was handled after topology advanced to one.

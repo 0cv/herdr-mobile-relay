@@ -18,11 +18,7 @@ func TestKimiPageProjectionMutationDifferential(t *testing.T) {
 	rewrite := string(kimiSample(t, "rewrites/after.jsonl"))
 	answer := "{\"type\":\"context.append_message\",\"message\":{\"role\":\"assistant\",\"content\":\"Stable recent answer\"}}\n"
 	path := kimiFixture(t, root, kimiWorkspaceKey(cwd), id, cwd, "Mutations", 1, []byte(base+answer))
-	browser, err := NewBrowser(NewReader(home), t.TempDir(), DefaultBrowserOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, NewReader(home), DefaultBrowserOptions())
 	referenceReader := NewReader(home)
 	scope := BrowseScope{Provider: "kimi", CWD: cwd, SessionID: id, PaneID: "pane", ProcessIdentity: "1:test"}
 	cursor, cursorRevision := "", ""

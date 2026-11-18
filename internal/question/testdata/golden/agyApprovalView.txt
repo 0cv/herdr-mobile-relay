@@ -1,0 +1,72 @@
+=== agyApprovalView agent=agy
+LayoutHint: false
+Parse: nil
+Classify: {Kind:approval Prompt:▀▀▀▀▀▀▀▀ Gemini 4 Argon (Medium) > run the shell command: touch /tmp/agy-test/approval-probe.txt ● Ran (touch /tmp/agy-test/approval-probe.txt) (ctrl+o to expand) Command Requesting permission for: touch /tmp/agy-test/approval-probe.txt Run this command? 1. Yes, run command 2. Yes, and always allow in this conversation for commands that start with 'touch' 3. Yes, and always allow for commands that start with 'touch' (Persist to settings.json) 4. No, cancel ↑/↓ Navigate · tab Amend · ctrl+g edit/ Command:run the shell command: touch /tmp/agy-test/approval-probe.txt Options:[Yes, run command Yes, and always allow in this conversation for commands that start with 'touch' Yes, and always allow for commands that start with 'touch' (Persist to settings.json) No, cancel] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:
+ ❯ agy
+      ▄▀▀▄        Antigravity CLI 1.4.7
+     ▀▀▀▀▀▀       user@example.com (Google AI Pro)
+    ▀▀▀▀▀▀▀▀      Gemini 4 Argon (Medium)
+────────────────────────────────────────────────────────────
+> run the shell command: touch /tmp/agy-test/approval-probe.txt
+● Ran (touch /tmp/agy-test/approval-probe.txt) (ctrl+o to expand)
+Command
+────────────────────────────────────────────────────────────
+Requesting permission for:
+   touch /tmp/agy-test/approval-probe.txt
+Run this command?
+❯ 1. Yes, run command
+  2. Yes, and always allow in this conversation for commands that start with 'touch'
+  3. Yes, and always allow for commands that start with 'touch' (Persist to settings.json)
+  4. No, cancel}
+Classify.Interaction: nil
+ApprovalFingerprint: "794afdf6a996e0dba364668bdef67c0693d737aebc0b5144e35d4a6461efcc0f"
+=== agyApprovalView agent=hermes
+LayoutHint: false
+Parse: nil
+Classify: {Kind:unknown Prompt:> run the shell command: touch /tmp/agy-test/approval-probe.txt ● Ran (touch /tmp/agy-test/approval-probe.txt) (ctrl+o to expand) Command Requesting permission for: touch /tmp/agy-test/approval-probe.txt Run this command? > 1. Yes, run command 2. Yes, and always allow in this conversation for commands that start with 'touch' 3. Yes, and always allow for commands that start with 'touch' (Persist to settings.json) 4. No, cancel ↑/↓ Navigate · tab Amend · ctrl+g edit/expand command Context [░░░░░░░ Command: Options:[] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:}
+Classify.Interaction: nil
+ApprovalFingerprint: ""
+=== agyApprovalView agent=agy
+LayoutHint: false
+Parse: nil
+Classify: {Kind:approval Prompt:▀▀▀▀▀▀▀▀ Gemini 4 Argon (Medium) > run the shell command: touch /tmp/agy-test/approval-probe.txt ● Ran (touch /tmp/agy-test/approval-probe.txt) (ctrl+o to expand) Command Requesting permission for: touch /tmp/agy-test/approval-probe.txt Run this command? 1. Yes, run command 2. Yes, and always allow in this conversation for commands that start with 'touch' 3. Yes, and always allow for commands that start with 'touch' (Persist to settings.json) 4. No, cancel ↑/↓ Navigate · tab Amend · ctrl+g edit/ Command:run the shell command: touch /tmp/agy-test/approval-probe.txt Options:[Yes, run command Yes, and always allow in this conversation for commands that start with 'touch' Yes, and always allow for commands that start with 'touch' (Persist to settings.json) No, cancel] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:
+ ❯ agy
+      ▄▀▀▄        Antigravity CLI 1.4.7
+     ▀▀▀▀▀▀       user@example.com (Google AI Pro)
+    ▀▀▀▀▀▀▀▀      Gemini 4 Argon (Medium)
+────────────────────────────────────────────────────────────
+> run the shell command: touch /tmp/agy-test/approval-probe.txt
+● Ran (touch /tmp/agy-test/approval-probe.txt) (ctrl+o to expand)
+Command
+────────────────────────────────────────────────────────────
+Requesting permission for:
+   touch /tmp/agy-test/approval-probe.txt
+Run this command?
+❯ 1. Yes, run command
+  2. Yes, and always allow in this conversation for commands that start with 'touch'
+  3. Yes, and always allow for commands that start with 'touch' (Persist to settings.json)
+  4. No, cancel}
+Classify.Interaction: nil
+ApprovalFingerprint: "794afdf6a996e0dba364668bdef67c0693d737aebc0b5144e35d4a6461efcc0f"
+=== agyApprovalView agent=agy crlf
+LayoutHint: false
+Parse: nil
+Classify: {Kind:approval Prompt:▀▀▀▀▀▀▀▀ Gemini 4 Argon (Medium) > run the shell command: touch /tmp/agy-test/approval-probe.txt ● Ran (touch /tmp/agy-test/approval-probe.txt) (ctrl+o to expand) Command Requesting permission for: touch /tmp/agy-test/approval-probe.txt Run this command? 1. Yes, run command 2. Yes, and always allow in this conversation for commands that start with 'touch' 3. Yes, and always allow for commands that start with 'touch' (Persist to settings.json) 4. No, cancel ↑/↓ Navigate · tab Amend · ctrl+g edit/ Command:run the shell command: touch /tmp/agy-test/approval-probe.txt Options:[Yes, run command Yes, and always allow in this conversation for commands that start with 'touch' Yes, and always allow for commands that start with 'touch' (Persist to settings.json) No, cancel] ApprovalFocus:0 Interaction:<nil> ApprovalIdentity: approvalSource:
+ ❯ agy
+      ▄▀▀▄        Antigravity CLI 1.4.7
+     ▀▀▀▀▀▀       user@example.com (Google AI Pro)
+    ▀▀▀▀▀▀▀▀      Gemini 4 Argon (Medium)
+────────────────────────────────────────────────────────────
+> run the shell command: touch /tmp/agy-test/approval-probe.txt
+● Ran (touch /tmp/agy-test/approval-probe.txt) (ctrl+o to expand)
+Command
+────────────────────────────────────────────────────────────
+Requesting permission for:
+   touch /tmp/agy-test/approval-probe.txt
+Run this command?
+❯ 1. Yes, run command
+  2. Yes, and always allow in this conversation for commands that start with 'touch'
+  3. Yes, and always allow for commands that start with 'touch' (Persist to settings.json)
+  4. No, cancel}
+Classify.Interaction: nil
+ApprovalFingerprint: "794afdf6a996e0dba364668bdef67c0693d737aebc0b5144e35d4a6461efcc0f"

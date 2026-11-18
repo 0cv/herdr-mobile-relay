@@ -1,4 +1,4 @@
-import type { E2EECodec, E2EEWireFrame } from '../e2ee';
+import type { E2EEWireFrame } from '../e2ee';
 
 /** Which physical path a transport uses to reach the relay. */
 export type TransportKind = 'websocket' | 'gateway' | 'webrtc';
@@ -71,8 +71,6 @@ export interface TransportHandlers {
  * encrypted-session layer above them is shared by every path.
  */
 export interface FrameChannel {
-  readonly kind: TransportKind;
-  readonly codec: E2EECodec;
   open(): void;
   sendFrame(frame: E2EEWireFrame): void;
   close(): void;

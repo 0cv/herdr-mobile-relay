@@ -314,8 +314,8 @@ func TestSessionCacheCoalescesTerminalLocalPaneUpdates(t *testing.T) {
 			Status:      "working",
 			Revision:    5,
 		}},
-		Agents: []SnapshotAgent{{
-			PaneID: "pane-1",
+		Agents: []Pane{{
+			ID:     "pane-1",
 			Agent:  "codex",
 			Name:   "old title",
 			Status: "working",
@@ -852,4 +852,12 @@ func marshalTestJSONBatch(values ...any) ([]byte, error) {
 		payload = append(payload, '\n')
 	}
 	return payload, nil
+}
+
+func (c *EventClient) SetWorkspaceReorderedProbe(probe func() bool) {
+	c.supportsWorkspaceReordered = probe
+}
+
+func (c *EventClient) subscribe(ctx context.Context) (*EventStream, error) {
+	return c.subscribeWith(ctx, c.shouldSubscribeWorkspaceReordered())
 }

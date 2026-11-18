@@ -1,5 +1,31 @@
 import type { Agent, AttentionKind, QuestionInteraction } from './types';
 import { stripAnsi } from './terminal';
+import { pathBase } from './paths';
+
+export type AgentKind = 'agy' | 'claude' | 'codex' | 'cursor' | 'grok' | 'hermes' | 'kimi' | 'omo' | 'omp' | 'opencode' | 'pi' | 'qoder';
+
+export const AGENT_KIND_ALIASES = new Map<string, AgentKind>([
+  ['claude', 'claude'], ['claudecode', 'claude'],
+  ['codex', 'codex'], ['openaicodex', 'codex'], ['codexcli', 'codex'],
+  ['cursor', 'cursor'], ['cursoragent', 'cursor'],
+  ['grok', 'grok'], ['grokbuild', 'grok'],
+  ['qoder', 'qoder'], ['qodercli', 'qoder'],
+  ['pi', 'pi'], ['picodingagent', 'pi'],
+  ['omp', 'omp'], ['ohmypi', 'omp'], ['ompquestion', 'omp'],
+  ['kimi', 'kimi'], ['kimicode', 'kimi'], ['kimicli', 'kimi'], ['kimicodecli', 'kimi'],
+  ['opencode', 'opencode'],
+  ['omo', 'omo'], ['ohmyopencode', 'omo'],
+  ['hermes', 'hermes'], ['hermesagent', 'hermes'],
+  ['agy', 'agy'], ['antigravity', 'agy'], ['antigravitycli', 'agy'],
+]);
+
+export function normalizeAgentName(name: unknown): string {
+  return String(name || '').trim().toLowerCase().replace(/[\s_-]+/g, '');
+}
+
+export function agentKind(name: unknown): AgentKind | '' {
+  return AGENT_KIND_ALIASES.get(normalizeAgentName(name)) ?? '';
+}
 
 const MENU_LINE_RE = /^\s*[❯›]?\s*\d+\.\s+.+$/;
 const COMMAND_LINE_RE = /^\s*(?:[$>❯›])\s+(.+?)\s*$/;
@@ -79,7 +105,7 @@ export function sessionName(agent: Partial<Agent>): string {
 export function agentContextLabel(agent: Partial<Agent>): string {
   const name = tabName(agent);
   if (name && name !== agent.project) return name;
-  return String(agent.cwd || '').split(/[\\/]/).filter(Boolean).pop() || '';
+  return pathBase(String(agent.cwd || ''));
 }
 
 export function displayName(agent: Partial<Agent>): string {
@@ -93,11 +119,6 @@ export function agentUpdatedAt(agent: Partial<Agent> | null | undefined): number
 
 export function agentLastActiveAt(agent: Partial<Agent> | null | undefined): number {
   const value = Number(agent?.last_active_at);
-  return Number.isFinite(value) && value > 0 ? value : 0;
-}
-
-export function agentLastSeenAt(agent: Partial<Agent> | null | undefined): number {
-  const value = Number(agent?.last_seen_at);
   return Number.isFinite(value) && value > 0 ? value : 0;
 }
 
@@ -149,6 +170,11 @@ export function approvalButtonTone(option: string, index: number, total: number)
   if (index === total - 1 || /\b(no|deny|reject|cancel|exit)\b/.test(value)) return 'deny';
   if (/\b(always|trust|don't ask|dont ask|configure|edit|amend)\b/.test(value)) return 'trust';
   return 'approve';
+}
+
+export function approvalButtonVariant(option: string, index: number, total: number): 'danger' | 'trust' | 'default' {
+  const tone = approvalButtonTone(option, index, total);
+  return tone === 'deny' ? 'danger' : tone === 'trust' ? 'trust' : 'default';
 }
 
 export function approvalPromptPreview(agent: Partial<Agent> | null | undefined): string {
@@ -204,7 +230,6 @@ export function normalizeAgentAttention(agent: Agent, capable: boolean): Agent {
       options: undefined,
       approval_fingerprint: undefined,
       interaction: null,
-      question_layout: false,
     };
   }
   const kind = capable ? attentionKind(agent) || 'unknown' : 'unknown';
@@ -219,7 +244,6 @@ export function normalizeAgentAttention(agent: Agent, capable: boolean): Agent {
   }
   if (kind !== 'question') {
     next.interaction = null;
-    next.question_layout = false;
   }
   return next;
 }
@@ -235,7 +259,6 @@ function retainBlockedDetails(previous: Agent, next: Agent): Agent {
     options: previous.options,
     approval_fingerprint: previous.approval_fingerprint,
     interaction: previous.interaction,
-    question_layout: previous.question_layout,
   };
 }
 
@@ -281,7 +304,6 @@ export function mergeAgentDetails(previous: Agent | undefined, next: Agent): Age
   const blocked = rawBlocked(next);
   const hasAttentionKind = Object.prototype.hasOwnProperty.call(next, 'attention_kind');
   const hasInteraction = Object.prototype.hasOwnProperty.call(next, 'interaction');
-  const hasQuestionLayout = Object.prototype.hasOwnProperty.call(next, 'question_layout');
   return {
     ...previous,
     ...next,
@@ -299,7 +321,6 @@ export function mergeAgentDetails(previous: Agent | undefined, next: Agent): Age
     command: blocked && !hasAttentionKind ? (next.command ?? previous.command) : next.command,
     options: blocked && !hasAttentionKind ? (next.options ?? previous.options) : next.options,
     interaction: blocked && !hasAttentionKind && !hasInteraction ? previous.interaction : next.interaction,
-    question_layout: blocked && !hasAttentionKind && !hasQuestionLayout ? previous.question_layout : next.question_layout,
   };
 }
 

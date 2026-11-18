@@ -9,6 +9,8 @@ import (
 	"io"
 	"sync"
 	"time"
+
+	"github.com/0cv/herdr-mobile-relay/internal/agentkind"
 )
 
 const recentProjectionSchema = 2
@@ -39,10 +41,9 @@ func (key recentProjectionKey) string() string {
 }
 
 type recentProjection struct {
-	Entries      []projectedEntry
-	Diagnostics  BrowseDiagnostics
-	Plan         *OMOTodoState
-	accountedFor int64
+	Entries     []projectedEntry
+	Diagnostics BrowseDiagnostics
+	Plan        *OMOTodoState
 }
 
 type recentProjectionCacheEntry struct {
@@ -107,7 +108,6 @@ func (cache *recentProjectionCache) put(key string, value recentProjection, now 
 	if bytes < 1 || (cache.itemBytes > 0 && bytes > cache.itemBytes) || (cache.totalLimit > 0 && bytes > cache.totalLimit) {
 		return false
 	}
-	copyValue.accountedFor = bytes
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 	if previous, ok := cache.entries[key]; ok {
@@ -178,10 +178,9 @@ func (cache *recentProjectionCache) evictLocked(now time.Time) {
 
 func cloneRecentProjection(value recentProjection) recentProjection {
 	copyValue := recentProjection{
-		Entries:      make([]projectedEntry, len(value.Entries)),
-		Diagnostics:  value.Diagnostics,
-		Plan:         cloneTodo(value.Plan),
-		accountedFor: value.accountedFor,
+		Entries:     make([]projectedEntry, len(value.Entries)),
+		Diagnostics: value.Diagnostics,
+		Plan:        cloneTodo(value.Plan),
 	}
 	for index, entry := range value.Entries {
 		copyValue.Entries[index] = projectedEntry{Offset: entry.Offset, Entry: cloneConversationEntry(entry.Entry)}
@@ -199,7 +198,7 @@ func cloneConversationEntry(entry Entry) Entry {
 
 func (b *Browser) recentProjectionKey(scope BrowseScope, source fileSource, start, end int64, digest string, omo bool) string {
 	return (recentProjectionKey{
-		Schema: recentProjectionSchema, Scope: browseScopeID(scope), Provider: normalizedAgent(scope.Provider),
+		Schema: recentProjectionSchema, Scope: browseScopeID(scope), Provider: agentkind.Of(scope.Provider),
 		SourcePath: source.path, SourceRoot: source.location.Root, SourceIdentity: fileIdentity(source.info),
 		SourceModTime: source.info.ModTime().UnixNano(), SourceChangeToken: fileChangeToken(source.info), SourceSize: source.info.Size(), Revision: source.revision,
 		RangeStart: start, RangeEnd: end, RangeDigest: digest, MaxRecordBytes: b.options.MaxRecordBytes, OMO: omo,

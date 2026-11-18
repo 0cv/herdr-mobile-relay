@@ -1,0 +1,46 @@
+name: mobile-unit-setup
+description: Install the pinned toolchains and test dependencies for the mobile unit jobs
+runs:
+  using: composite
+  steps:
+    - name: Install pinned toolchains
+      id: toolchain
+      uses: ./.github/actions/setup-toolchain
+      with:
+        node: 'true'
+        bun: 'true'
+        go: 'true'
+    - name: Install XML test tools
+      run: |
+        set -euo pipefail
+        sudo sed -i '\|^http://azure[.]archive[.]ubuntu[.]com/ubuntu/|d' /etc/apt/apt-mirrors.txt
+        sudo timeout --kill-after=5s 120s apt-get -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o Acquire::Retries=1 -o APT::Update::Error-Mode=any update
+        sudo timeout --kill-after=5s 120s apt-get -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o Acquire::Retries=1 install -y libxml2-utils
+      shell: bash
+    - name: Assert pinned runtimes and system prerequisites
+      env:
+        BUN_VERSION: ${{ steps.toolchain.outputs.bun }}
+        GO_VERSION: ${{ steps.toolchain.outputs.go }}
+      run: |
+        set -euo pipefail
+        test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+        test "$(bun --version)" = "$BUN_VERSION"
+        test "$(go version | awk '{print $3}')" = "go$GO_VERSION"
+        test "$(go env GOTOOLCHAIN)" = local
+        tar --version | grep -q '^tar (GNU tar)'
+        xmllint --version >/dev/null 2>&1
+      shell: bash
+    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      id: mobile-unit-cache
+      with:
+        path: |
+          frontend/node_modules
+          tests/mobile/node_modules
+        key: mobile-unit-${{ runner.os }}-node-${{ steps.toolchain.outputs.node }}-bun-${{ steps.toolchain.outputs.bun }}-${{ hashFiles('frontend/bun.lock', 'tests/mobile/bun.lock') }}
+    - name: Install mobile unit dependencies
+      id: install-test-dependencies
+      if: steps.mobile-unit-cache.outputs.cache-hit != 'true'
+      run: |
+        bun install --frozen-lockfile --cwd frontend
+        bun install --frozen-lockfile --cwd tests/mobile
+      shell: bash

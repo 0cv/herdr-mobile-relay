@@ -8,73 +8,22 @@ import (
 
 type CommandID uint64
 type OperationID uint64
-type ClientID string
-
-type CommandKind string
-
-const (
-	CommandPrompt       CommandKind = "prompt"
-	CommandKeys         CommandKind = "keys"
-	CommandText         CommandKind = "text"
-	CommandInput        CommandKind = "send_input"
-	CommandTerminalText CommandKind = "send_terminal_text"
-	CommandFilterText   CommandKind = "send_filter_text"
-	CommandSecret       CommandKind = "send_secret"
-	CommandApproval     CommandKind = "approval"
-	CommandQuestion     CommandKind = "question"
-	CommandTabRename    CommandKind = "agent_rename"
-	CommandTabReorder   CommandKind = "tab_reorder"
-	CommandStop         CommandKind = "agent_stop"
-	CommandClear        CommandKind = "agent_clear"
-	CommandStart        CommandKind = "agent_start"
-)
 
 type Command struct {
 	ID         CommandID
-	ClientID   ClientID
 	RequestID  string
 	ReceivedAt time.Time
 	Deadline   time.Time
-	Kind       CommandKind
+	Action     string
 	PaneID     string
-	Payload    any
 }
 
 type WorkerToken struct {
 	OperationID OperationID
 	PaneID      string
-	Generation  uint64
+	Generation  int64
 	AllowAbsent bool
-	Revision    uint64
 	Deadline    time.Time
-}
-
-type EffectKind string
-
-const (
-	EffectPrompt   EffectKind = "prompt"
-	EffectKeys     EffectKind = "keys"
-	EffectText     EffectKind = "text"
-	EffectApproval EffectKind = "approval"
-	EffectQuestion EffectKind = "question"
-	EffectRename   EffectKind = "rename"
-	EffectStop     EffectKind = "stop"
-	EffectClear    EffectKind = "clear"
-	EffectStart    EffectKind = "start"
-)
-
-type EffectInput interface {
-	effectInput()
-}
-
-type Effect struct {
-	Token WorkerToken
-	Kind  EffectKind
-	Input EffectInput
-}
-
-type WorkerEvent interface {
-	workerEvent()
 }
 
 type EffectRunner interface {
@@ -95,7 +44,7 @@ type EffectResult struct {
 
 type EffectContinuation struct {
 	PaneID      string
-	Generation  uint64
+	Generation  int64
 	AllowAbsent bool
 	Deadline    time.Time
 	Runner      EffectRunner
@@ -112,7 +61,7 @@ var (
 type ScheduleOptions struct {
 	Command
 	RelayLevel     bool
-	PaneGeneration uint64
+	PaneGeneration int64
 	AllowAbsent    bool
 	LedgerKey      string
 	PayloadHash    string

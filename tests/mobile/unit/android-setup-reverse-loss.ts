@@ -7,6 +7,7 @@ import { AndroidPlatform } from '../platforms/android';
 import { PhaseBudget } from '../support/budget';
 import { DiagnosticRecorder } from '../support/diagnostics';
 import { AppiumClient, WebDriverError, type SessionOptions } from '../support/webdriver';
+import { FakeClock } from './fake-clock';
 
 const baseline = 'host-17 tcp:44323 tcp:44323\nhost-17 tcp:33251 tcp:33251\nhost-17 tcp:33252 tcp:33252\n';
 type Fence = 'setup' | 'lifecycle' | 'launch' | 'retained' | 'ownership' | 'failure' | 'unusable' | 'fatal' | 'active' | 'marker' | 'marker-path' | 'budget' | 'tail';
@@ -34,8 +35,8 @@ async function replay(test: Replay): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), 'android-reverse-loss-'));
   const saved = { adb: process.env.ADB, marker: process.env.MOBILE_DEVICE_OWNERSHIP_FILE };
   const diagnostics = new DiagnosticRecorder();
-  let now = 0;
-  const budget = new PhaseBudget('setup-reverse-loss', { timeoutMs: 300_000, recoveryLimit: test.cap ? 0 : 4, now: () => now });
+  const clock = new FakeClock();
+  const budget = new PhaseBudget('setup-reverse-loss', { timeoutMs: 300_000, recoveryLimit: test.cap ? 0 : 4, now: clock.now, sleep: clock.sleep });
   const originalDeadline = budget.snapshot().deadline;
   let creates = 0;
   let original: unknown;
@@ -49,8 +50,8 @@ async function replay(test: Replay): Promise<void> {
     if (test.fence && fields[test.fence]) Object.assign(platform, fields[test.fence]);
     if (test.fence === 'marker') unlinkSync(join(root, 'owned'));
     if (test.fence === 'marker-path') process.env.MOBILE_DEVICE_OWNERSHIP_FILE = join(root, 'other-owned');
-    if (test.fence === 'budget') now = 300_001;
-    if (test.fence === 'tail') now = 300_000 - (test.chrome ? 70_000 : 60_000) + 1;
+    if (test.fence === 'budget') clock.elapsed = 300_001;
+    if (test.fence === 'tail') clock.elapsed = 300_000 - (test.chrome ? 70_000 : 60_000) + 1;
   };
   const client = new AppiumClient('http://startup.invalid', 30_000, async (_input, init) => {
     if (init?.method === 'DELETE') return Response.json({ value: null });
@@ -89,7 +90,7 @@ async function replay(test: Replay): Promise<void> {
       throw error;
     }
   };
-  const platform = new AndroidPlatform({ deviceId: 'emulator-5554', origin: 'https://fixture.test', setupUrl: 'https://fixture.test/setup',
+  const platform = new AndroidPlatform({ deviceId: 'emulator-5554', origin: 'https://fixture.test',
     outputDir: root, appiumUrl: 'http://startup.invalid', certificate: '/unused', budget, diagnostics });
   Object.assign(platform, { driver: client, ...(!test.publicEntry ? { setupAttempted: true, lifecycleActive: true } : {}) });
   const setup = platform as unknown as { createSetupSession(options: SessionOptions): Promise<void>; prepareFreshDevice(): Promise<void> };
@@ -123,8 +124,8 @@ async function replay(test: Replay): Promise<void> {
         [ -f "$root/release" ] || exit 2
       fi` : '',
       test.failCommand ? `if [ "$stage" = '${test.failCommand}' ]; then exit 1; fi` : '',
-      'if [ "$stage" = baseline ]; then /bin/cat "$root/before"; /bin/cat "$root/before-stderr" >&2; fi',
-      'if [ "$stage" = inspection ]; then /bin/cat "$root/after"; /bin/cat "$root/after-stderr" >&2; fi',
+      'if [ "$stage" = baseline ]; then /bin/cat "$root/before"; printf "\\n"; /bin/cat "$root/before-stderr" >&2; fi',
+      'if [ "$stage" = inspection ]; then /bin/cat "$root/after"; printf "\\n"; /bin/cat "$root/after-stderr" >&2; fi',
       '',
     ].join('\n'), { mode: 0o700 });
     process.env.ADB = join(root, 'adb');
@@ -211,7 +212,7 @@ const cases: Replay[] = [
     'mixed-owner': `${baseline}host-18 tcp:12 tcp:12\n`, 'non-tcp': `${baseline}host-17 localabstract:socket tcp:12\n`,
   }).map(([name, before]) => ({ name: `baseline ${name}`, before })),
   { name: 'baseline stderr', beforeStderr: 'adb warning' },
-  ...Object.entries({ unchanged: baseline, partial: 'host-17 tcp:44323 tcp:44323\n', conflict: 'host-17 tcp:44323 tcp:1\n', malformed: 'unrecognized output', whitespace: '\n' })
+  ...Object.entries({ unchanged: baseline, partial: 'host-17 tcp:44323 tcp:44323\n', conflict: 'host-17 tcp:44323 tcp:1\n', malformed: 'unrecognized output' })
     .map(([name, after]) => ({ name: `post ${name}`, after })),
   { name: 'post stderr', afterStderr: 'adb warning' },
   ...(['inspection', 'wait', 'restore'] as const).map(failCommand => ({ name: `${failCommand} failure`, failCommand })),

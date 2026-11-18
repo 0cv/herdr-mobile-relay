@@ -1,4 +1,5 @@
 import { base64UrlDecode } from './base64url';
+import { isRecord } from './record';
 
 export const DEVICE_AUTH_STORAGE_KEY = 'herdr_device_auth_v1';
 
@@ -211,7 +212,7 @@ export function createDeviceInvitation<TResult>(
   intent: CreateInvitationIntent,
   send: DeviceIntentHandler<CreateInvitationIntent, TResult>,
 ): Promise<TResult> {
-  if (intent.role !== 'reader' && intent.role !== 'controller') throw new Error('Choose a valid device role.');
+  if (!isDeviceRole(intent.role)) throw new Error('Choose a valid device role.');
   return send({
     relayId: validIdentifier(intent.relayId, 'relay id'),
     name: normalizeDeviceName(intent.name),
@@ -307,38 +308,29 @@ function parseStoredAuthentication(value: unknown): RelayInvitation | RelayDevic
 function validIdentifier(value: unknown, label: string): string {
   if (typeof value !== 'string') throw new Error(`Invalid ${label}.`);
   const id = value.trim();
-  if (!id || id.length > 256 || /[\u0000-\u001f\u007f]/.test(id)) throw new Error(`Invalid ${label}.`);
+  if (!isAuthenticationIdentifier(id)) throw new Error(`Invalid ${label}.`);
   return id;
 }
 
 function validVersion(value: unknown): number {
-  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) {
+  if (!isAuthenticationVersion(value)) {
     throw new Error('Invalid credential version.');
   }
   return value;
 }
 
 function validSecret(value: unknown): string {
-  if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(value)) {
-    throw new Error('Invalid device authentication secret.');
-  }
-  let decoded: Uint8Array;
-  try {
-    decoded = base64UrlDecode(value);
-  } catch {
-    throw new Error('Invalid device authentication secret.');
-  }
-  if (decoded.byteLength !== 32) throw new Error('Invalid device authentication secret.');
+  if (!isAuthenticationSecret(value)) throw new Error('Invalid device authentication secret.');
   return value;
 }
 
 function validRole(value: unknown): DeviceRole {
-  if (value !== 'reader' && value !== 'controller') throw new Error('Invalid device role.');
+  if (!isDeviceRole(value)) throw new Error('Invalid device role.');
   return value;
 }
 
 function validLocale(value: unknown): string {
-  if (typeof value !== 'string' || !/^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/.test(value) || value.length > 35) {
+  if (!isDeviceLocale(value)) {
     throw new Error('Invalid device locale.');
   }
   return value;
@@ -357,6 +349,26 @@ function emptyState(): PersistedDeviceAuthState {
   return { version: 1, relays: {} };
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+export function isAuthenticationIdentifier(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= 256 && !/[\u0000-\u001f\u007f]/.test(value);
+}
+
+export function isAuthenticationVersion(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 1;
+}
+
+export function isAuthenticationSecret(value: unknown): value is string {
+  return typeof value === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value) && base64UrlDecode(value).byteLength === 32;
+}
+
+export function isInvitationId(value: unknown): value is string {
+  return typeof value === 'string' && /^[A-Za-z0-9_-]{16,128}$/.test(value);
+}
+
+export function isDeviceRole(value: unknown): value is DeviceRole {
+  return value === 'reader' || value === 'controller';
+}
+
+export function isDeviceLocale(value: unknown): value is string {
+  return typeof value === 'string' && /^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/.test(value) && value.length <= 35;
 }

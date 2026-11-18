@@ -7,8 +7,6 @@ import (
 	"testing"
 
 	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
-	"github.com/0cv/herdr-mobile-relay/internal/sqliteexec"
-
 	_ "modernc.org/sqlite"
 )
 
@@ -27,29 +25,21 @@ func TestHermesReadUsesNativeBackendWithoutCLI(t *testing.T) {
 	t.Setenv(agentroots.HermesListEnv, root)
 	t.Setenv("HERMES_HOME", "")
 
-	native, err := sqliteexec.Resolve(sqliteexec.BackendNative, filepath.Join(t.TempDir(), "missing-sqlite3"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	t.Setenv("PATH", t.TempDir())
 	reader := NewReader(t.TempDir())
-	reader.hermes.binary = filepath.Join(t.TempDir(), "missing-sqlite3")
-	reader.hermes.executor = native
 
-	page, err := reader.ReadFor("hermes", cwd, sessionID, "", 10)
+	page, err := reader.ReadLatest("hermes", ProjectContext{CWD: cwd}, sessionID, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !page.Available {
-		t.Fatalf("page unavailable: %s %s", page.ReasonCode, page.Reason)
+	if len(page) != 2 {
+		t.Fatalf("entries = %#v", page)
 	}
-	if len(page.Entries) != 2 {
-		t.Fatalf("entries = %#v", page.Entries)
+	if page[0].Role != "user" || page[0].Text != "hello" {
+		t.Fatalf("first entry = %#v", page[0])
 	}
-	if page.Entries[0].Role != "user" || page.Entries[0].Text != "hello" {
-		t.Fatalf("first entry = %#v", page.Entries[0])
-	}
-	if page.Entries[1].Role != "assistant" || page.Entries[1].Text != "world" {
-		t.Fatalf("second entry = %#v", page.Entries[1])
+	if page[1].Role != "assistant" || page[1].Text != "world" {
+		t.Fatalf("second entry = %#v", page[1])
 	}
 }
 

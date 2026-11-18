@@ -149,13 +149,12 @@ func (c *client) mapNATPMP(ctx context.Context, gateway netip.Addr, internalPort
 	}
 
 	return &Mapping{
-		External:  netip.AddrPortFrom(external, result.ExternalPort),
-		Internal:  internalPort,
-		Method:    MethodNATPMP,
-		Lifetime:  granted,
-		ExpiresAt: time.Now().Add(granted),
-		owner:     c,
-		gateway:   gateway,
+		External: netip.AddrPortFrom(external, result.ExternalPort),
+		Internal: internalPort,
+		Method:   MethodNATPMP,
+		Lifetime: granted,
+		owner:    c,
+		gateway:  gateway,
 	}, nil
 }
 

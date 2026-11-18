@@ -38,16 +38,17 @@ func TestKimiBrowserColdWarmMeasurements(t *testing.T) {
 			t.Setenv("KIMI_CODE_HOME", "")
 			cwd, id := "/fixture/kimi-comparison", "session_comparison"
 			kimiFixture(t, root, kimiWorkspaceKey(cwd), id, cwd, "Comparison", 1, wire)
-			browser, err := NewBrowser(NewReader(home), t.TempDir(), DefaultBrowserOptions())
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer browser.Close()
+			browser := newTestBrowser(t, NewReader(home), DefaultBrowserOptions())
 			scope := BrowseScope{Provider: "kimi", CWD: cwd, SessionID: id, PaneID: "pane"}
 			var physical int64
 			replays := 0
-			browser.physicalReadObserver = func(n int64) { physical += n }
-			browser.kimiProjectionObserver = func() { replays++ }
+			setBrowserObserver(browser, "physical_read", func(observation browserObservation) {
+				n := observation.bytes
+				physical += n
+			})
+			setBrowserObserver(browser, "kimi_projection", func(observation browserObservation) {
+				replays++
+			})
 			read := func() BrowsePage {
 				t.Helper()
 				page, err := browser.ReadPage(t.Context(), BrowseRequest{Scope: scope, Limit: 24})

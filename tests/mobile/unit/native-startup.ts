@@ -405,7 +405,7 @@ export const nativeStartupTests: Array<[string, () => Promise<void>]> = [
       await writeFile(join(root, 'adb'), '#!/bin/sh\nif [ "$1" = devices ]; then printf "emulator-5554\\tdevice\\n"; fi\n', { mode: 0o700 });
       process.env.ADB = join(root, 'adb');
       process.env.MOBILE_DEVICE_OWNERSHIP_FILE = join(root, 'owned');
-      const platform = new AndroidPlatform({ deviceId: 'emulator-5554', origin: 'https://example.test', setupUrl: 'https://example.test/setup', outputDir: root, appiumUrl: 'http://127.0.0.1:1', certificate: '/unused' });
+      const platform = new AndroidPlatform({ deviceId: 'emulator-5554', origin: 'https://example.test', outputDir: root, appiumUrl: 'http://127.0.0.1:1', certificate: '/unused' });
       platform.driver.create = async () => { operations.push('first session'); throw new Error('startup session failure'); };
       platform.driver.close = async () => {};
       await assert.rejects(platform.startFreshDevice(), /startup session failure/u);
@@ -451,7 +451,7 @@ export const nativeStartupTests: Array<[string, () => Promise<void>]> = [
         ].join('\n'), { mode: 0o700 });
         process.env.ADB = join(root, 'adb');
         process.env.MOBILE_DEVICE_OWNERSHIP_FILE = join(root, 'owned');
-        const platform = new AndroidPlatform({ deviceId: 'emulator-5554', origin: 'https://example.test', setupUrl: 'https://example.test/setup', outputDir: root, appiumUrl: 'http://127.0.0.1:1', certificate: '/unused' });
+        const platform = new AndroidPlatform({ deviceId: 'emulator-5554', origin: 'https://example.test', outputDir: root, appiumUrl: 'http://127.0.0.1:1', certificate: '/unused' });
         const adbCalls = async () => (await readFile(log, 'utf8')).trim().split('\n');
         const marks: number[] = [];
         platform.driver.create = async () => {
@@ -478,7 +478,7 @@ export const nativeStartupTests: Array<[string, () => Promise<void>]> = [
     }
   }],
   ['Native startup finalizes Android diagnostics when session teardown fails', async () => {
-    const platform = new AndroidPlatform({ deviceId: 'emulator-5554', origin: 'https://example.test', setupUrl: 'https://example.test/setup', outputDir: '/unused', appiumUrl: 'http://127.0.0.1:1', certificate: '/unused' });
+    const platform = new AndroidPlatform({ deviceId: 'emulator-5554', origin: 'https://example.test', outputDir: '/unused', appiumUrl: 'http://127.0.0.1:1', certificate: '/unused' });
     let finalized = false;
     const internals = platform as unknown as { startupLog: { finish(): Promise<void> } };
     internals.startupLog = { async finish() { finalized = true; } };
@@ -525,14 +525,12 @@ export const nativeStartupTests: Array<[string, () => Promise<void>]> = [
       assert.equal(source.split('bun tests/mobile/support/ios-xctest.ts stop').length - 1, 1);
       assert.ok(!source.includes('simctl launch --terminate-running-process'));
       assert.ok(!source.includes("-name 'WebDriverAgentRunner_*.xctestrun' -print -quit"));
-      assert.ok(source.includes('IOS_PLATFORM_VERSION=27.0'));
+      assert.ok(source.includes("jq -r '.ios.runtime | ltrimstr(\"iOS \")' tests/mobile/toolchains.json"));
       assert.match(source, /if \[ "\$(?:WORKFLOW|MOBILE)_PLATFORM" = ios \]; then printf 'MOBILE_TIMING_SCALE=3\\n' >> "\$GITHUB_ENV"; fi/u);
       assert.ok(!source.includes('IOS_PLATFORM_VERSION=18.6'));
       assert.ok(!source.includes('Xcode_16.4'));
-      assert.ok(source.includes('xcode_application=/Applications/Xcode_27.app'));
-      assert.ok(source.includes('expected_xcode_version=27.0'));
-      assert.ok(source.includes('expected_xcode_build=27A266a'));
-      assert.ok(source.includes('IPHONEOS_DEPLOYMENT_TARGET=27.0'));
+      for (const key of ['xcode', 'xcodeVersion', 'xcodeBuild']) assert.ok(source.includes(`jq -r '.ios.${key}' tests/mobile/toolchains.json`));
+      assert.ok(source.includes('IPHONEOS_DEPLOYMENT_TARGET="$IOS_PLATFORM_VERSION"'));
       assert.doesNotMatch(source, /\b18\.[0-9]\b/u);
       assert.ok(source.indexOf('name: Finalize owned XCTest diagnostics') < source.indexOf('name: Sanitize bounded diagnostics'));
     }

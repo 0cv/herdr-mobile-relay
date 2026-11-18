@@ -38,6 +38,7 @@ export interface PhaseBudgetOptions {
   parent?: PhaseBudget;
   reserveParentMs?: number;
   now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
 }
 
 export function parseTimingScale(value: string | undefined): number {
@@ -53,6 +54,7 @@ export const timingScale = parseTimingScale(process.env.MOBILE_TIMING_SCALE);
 export class PhaseBudget {
   private readonly root: PhaseBudget;
   private readonly clock: () => number;
+  private readonly timer: (ms: number) => Promise<void>;
   private readonly startedAtMs: number;
   private readonly deadlineMs: number;
   private recoveryCountValue = 0;
@@ -67,6 +69,7 @@ export class PhaseBudget {
     }
     this.phase = phase;
     this.clock = options.now || options.parent?.clock || (() => Date.now());
+    this.timer = options.sleep || options.parent?.timer || ((ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
     this.startedAtMs = this.clock();
     const requestedDeadline = this.startedAtMs + options.timeoutMs;
     const parent = options.parent;
@@ -77,6 +80,14 @@ export class PhaseBudget {
     this.recoveryLimitValue = Math.max(0, Math.floor(options.recoveryLimit ?? 2));
     if (this.root === this) return;
     this.recoveryLimitValue = this.root.recoveryLimitValue;
+  }
+
+  now(): number {
+    return this.clock();
+  }
+
+  sleep(milliseconds: number): Promise<void> {
+    return this.timer(milliseconds);
   }
 
   get remainingMs(): number {
@@ -117,7 +128,7 @@ export class PhaseBudget {
   async wait(milliseconds: number, operation = 'wait'): Promise<void> {
     this.assertAvailable(operation);
     const duration = Math.min(Math.max(0, milliseconds), this.remainingMs);
-    await new Promise<void>((resolve) => setTimeout(resolve, duration));
+    await this.sleep(duration);
     this.assertAvailable(operation);
   }
 
@@ -132,8 +143,4 @@ export class PhaseBudget {
       exhausted: this.exhausted,
     };
   }
-}
-
-export function phaseBudget(phase: string, timeoutMs: number, recoveryLimit = 2): PhaseBudget {
-  return new PhaseBudget(phase, { timeoutMs, recoveryLimit });
 }

@@ -13,11 +13,10 @@ if [ "${HERDR_TAILSCALE_FULL_UNINSTALL:-}" != 1 ]; then
 fi
 
 LABELS=("$RELAY_SYSTEMD_LABEL")
-[ "$HERDR_RELAY_BACKEND" != herdr ] || LABELS+=("herdr-remote.service")
 
 for label in "${LABELS[@]}"; do
     systemctl --user disable --now "$label" >/dev/null 2>&1 || true
-    rm -f "$HOME/.config/systemd/user/$label"
+    rm -f "$(relay_service_file)"
 done
 systemctl --user daemon-reload
 

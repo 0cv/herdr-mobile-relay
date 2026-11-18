@@ -8,84 +8,26 @@ package coordinator
 import (
 	"context"
 	"errors"
-	"os"
-	"path/filepath"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/profiles"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 )
-
-const paneBusyEnvelope = `{"error":{"code":"agent_pane_busy",` +
-	`"message":"agent target pane wH:p1 is not an available shell"},"id":"cli:agent:start"}`
-
-// busyHerdr answers the workspace-creation calls, then refuses the first
-// refusals invocations of `agent start` exactly as Herdr 0.8.0 does before
-// succeeding. A negative refusals count refuses forever.
-func busyHerdr(t *testing.T, dir, record string, refusals int) string {
-	t.Helper()
-	counter := filepath.Join(dir, "attempts")
-	return writeScript(t, dir, "herdr", "#!/bin/sh\n"+
-		"printf '%s\\n' \"$*\" >> \""+record+"\"\n"+
-		"case \"$1 $2\" in\n"+
-		"  'pane list') printf '%s\\n' '{\"result\":{\"panes\":[]}}' ;;\n"+
-		"  'workspace list') printf '%s\\n' '{\"result\":{\"workspaces\":[]}}' ;;\n"+
-		"  'workspace create') printf '%s\\n' '{\"result\":{\"type\":\"workspace_created\",\"workspace\":{\"workspace_id\":\"workspace-new\"},\"tab\":{\"tab_id\":\"tab-new\",\"workspace_id\":\"workspace-new\"},\"root_pane\":{\"pane_id\":\"pane-new\",\"tab_id\":\"tab-new\",\"workspace_id\":\"workspace-new\"}}}' ;;\n"+
-		"  'tab rename') printf '%s\\n' '{\"result\":{\"tab_id\":\"tab-new\"}}' ;;\n"+
-		"  'agent start')\n"+
-		"    attempts=$(cat \""+counter+"\" 2>/dev/null || printf 0)\n"+
-		"    attempts=$((attempts + 1))\n"+
-		"    printf '%s' \"$attempts\" > \""+counter+"\"\n"+
-		"    if [ "+strconv.Itoa(refusals)+" -lt 0 ] || [ \"$attempts\" -le "+strconv.Itoa(refusals)+" ]; then\n"+
-		"      printf '%s\\n' '"+paneBusyEnvelope+"' >&2\n"+
-		"      exit 1\n"+
-		"    fi\n"+
-		"    printf '%s\\n' '{\"result\":{\"type\":\"agent_started\",\"agent\":{\"pane_id\":\"pane-new\",\"agent\":\"codex\"}}}' ;;\n"+
-		"  *) exit 2 ;;\n"+
-		"esac\n")
-}
 
 // busyLifecycle builds a Lifecycle whose profile resolver discovers a "codex"
 // profile: profiles are discovered from PATH, and the discovered kind is what
 // routes the start through `herdr agent start`.
-func busyLifecycle(t *testing.T, dir, bin string) (*Lifecycle, string) {
+func busyLifecycle(t *testing.T, client *fakeBackend) (*Lifecycle, string) {
 	t.Helper()
-	home := filepath.Join(dir, "home")
-	cwd := filepath.Join(home, "project")
-	if err := os.MkdirAll(cwd, 0o755); err != nil {
-		t.Fatalf("create project directory: %v", err)
-	}
-	pathDir := filepath.Join(dir, "path")
-	if err := os.MkdirAll(pathDir, 0o755); err != nil {
-		t.Fatalf("create path directory: %v", err)
-	}
-	writeScript(t, pathDir, "codex", "#!/bin/sh\nexit 0\n")
-	t.Setenv("PATH", pathDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	socketPath := filepath.Join(testSocketDir(t), "herdr.sock")
-	startInventorySocket(t, socketPath, nil, herdr.Pane{ID: "pane-new", TerminalID: "terminal-new", TabID: "tab-new", WorkspaceID: "workspace-new"})
+	env := newLaunchEnv(t, "codex")
 	return &Lifecycle{
-		herdr:    herdr.NewClient(bin, socketPath),
-		profiles: profiles.NewResolver(filepath.Join(dir, "config"), nil),
-		home:     home,
-	}, cwd
-}
-
-func startInvocations(t *testing.T, record string) []string {
-	t.Helper()
-	data, err := os.ReadFile(record)
-	if err != nil {
-		t.Fatalf("read invocations: %v", err)
-	}
-	var starts []string
-	for _, line := range strings.Split(string(data), "\n") {
-		if strings.HasPrefix(line, "agent start ") {
-			starts = append(starts, line)
-		}
-	}
-	return starts
+		herdr:    client,
+		profiles: profiles.NewResolver(env.config, nil),
+		home:     env.home,
+	}, env.cwd
 }
 
 func stopAfterRefusals(lifecycle *Lifecycle, count int) {
@@ -98,10 +40,15 @@ func stopAfterRefusals(lifecycle *Lifecycle, count int) {
 	}
 }
 
+func busyClient(refusals int) *fakeBackend {
+	client := newLaunchFake()
+	client.setHook("StartAgent", refuseStarts(refusals))
+	return client
+}
+
 func TestAgentStartRetriesWhileHerdrRefusesTheNewPane(t *testing.T) {
-	dir := t.TempDir()
-	record := filepath.Join(dir, "invocations.log")
-	lifecycle, cwd := busyLifecycle(t, dir, busyHerdr(t, dir, record, 2))
+	client := busyClient(2)
+	lifecycle, cwd := busyLifecycle(t, client)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -117,14 +64,11 @@ func TestAgentStartRetriesWhileHerdrRefusesTheNewPane(t *testing.T) {
 		t.Fatalf("Start() pane_id = %q, want pane-new", result.PaneID)
 	}
 
-	starts := startInvocations(t, record)
-	if len(starts) != 3 {
-		t.Fatalf("agent start invocations = %d, want 3 (two refusals then success):\n%s",
-			len(starts), strings.Join(starts, "\n"))
+	if starts := client.count("StartAgent"); starts != 3 {
+		t.Fatalf("agent start invocations = %d, want 3 (two refusals then success)", starts)
 	}
-	data, _ := os.ReadFile(record)
-	if strings.Contains(string(data), "pane close") {
-		t.Fatalf("target was closed during the retry:\n%s", data)
+	if client.count("StopPane") != 0 {
+		t.Fatalf("target was closed during the retry: %+v", client.recorded())
 	}
 }
 
@@ -132,9 +76,8 @@ func TestAgentStartRetriesWhileHerdrRefusesTheNewPane(t *testing.T) {
 // remaining budget. A fixed --timeout would let the first attempt consume the
 // whole window once Herdr learns to honour it, and no retry would ever run.
 func TestAgentStartPassesTheRemainingBudgetAsTimeout(t *testing.T) {
-	dir := t.TempDir()
-	record := filepath.Join(dir, "invocations.log")
-	lifecycle, cwd := busyLifecycle(t, dir, busyHerdr(t, dir, record, 1))
+	client := busyClient(1)
+	lifecycle, cwd := busyLifecycle(t, client)
 
 	// startupDeadline is this deadline minus agentStartResponseReserve, so
 	// every attempt must report well under 3s of remaining budget.
@@ -148,22 +91,13 @@ func TestAgentStartPassesTheRemainingBudgetAsTimeout(t *testing.T) {
 		t.Fatalf("Start() error = %v", err)
 	}
 
-	starts := startInvocations(t, record)
+	starts := client.callsTo("StartAgent")
 	if len(starts) != 2 {
-		t.Fatalf("agent start invocations = %d, want 2:\n%s", len(starts), strings.Join(starts, "\n"))
+		t.Fatalf("agent start invocations = %d, want 2: %+v", len(starts), starts)
 	}
 	for _, start := range starts {
-		fields := strings.Fields(start)
-		index := len(fields) - 1
-		if index < 1 || fields[index-1] != "--timeout" {
-			t.Fatalf("invocation has no trailing --timeout value: %q", start)
-		}
-		timeout, err := strconv.Atoi(fields[index])
-		if err != nil {
-			t.Fatalf("--timeout value %q is not a number: %v", fields[index], err)
-		}
-		if timeout <= 0 || timeout > 3000 {
-			t.Fatalf("--timeout = %d, want the remaining budget (0 < t <= 3000): %q", timeout, start)
+		if timeout := start.Args[3].(int); timeout <= 0 || timeout > 3000 {
+			t.Fatalf("--timeout = %d, want the remaining budget (0 < t <= 3000): %+v", timeout, start)
 		}
 	}
 }
@@ -172,9 +106,8 @@ func TestAgentStartPassesTheRemainingBudgetAsTimeout(t *testing.T) {
 // so the user lost the workspace Herdr had just created and had nothing to
 // retry into.
 func TestAgentStartKeepsTheTargetWhenHerdrKeepsRefusing(t *testing.T) {
-	dir := t.TempDir()
-	record := filepath.Join(dir, "invocations.log")
-	lifecycle, cwd := busyLifecycle(t, dir, busyHerdr(t, dir, record, -1))
+	client := busyClient(-1)
+	lifecycle, cwd := busyLifecycle(t, client)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -193,47 +126,30 @@ func TestAgentStartKeepsTheTargetWhenHerdrKeepsRefusing(t *testing.T) {
 		if errors.As(err, &outcome) {
 			outcomeStarted = strconv.FormatBool(outcome.Started)
 		}
-		recorded, _ := os.ReadFile(record)
-		startCount := 0
-		for _, line := range strings.Split(string(recorded), "\n") {
-			if strings.HasPrefix(line, "agent start ") {
-				startCount++
-			}
-		}
 		t.Fatalf("Start() error = %v, want the refusal preserved for a safe-retry classification"+
 			" (not_started=%t dispatched_unknown=%t deadline_exceeded=%t outcome_started=%s agent_start_invocations=%d)",
 			err, errors.Is(err, herdr.ErrNotStarted), errors.Is(err, herdr.ErrDispatchedUnknown),
-			errors.Is(err, context.DeadlineExceeded), outcomeStarted, startCount)
+			errors.Is(err, context.DeadlineExceeded), outcomeStarted, client.count("StartAgent"))
 	}
 	if result.PaneID != "pane-new" {
 		t.Fatalf("Start() pane_id = %q, want the kept target pane-new", result.PaneID)
 	}
-	data, _ := os.ReadFile(record)
-	if strings.Contains(string(data), "pane close") {
-		t.Fatalf("failed start destroyed the target Herdr created:\n%s", data)
+	if client.count("StopPane") != 0 {
+		t.Fatalf("failed start destroyed the target Herdr created: %+v", client.recorded())
 	}
-	if starts := startInvocations(t, record); len(starts) < 2 {
-		t.Fatalf("agent start invocations = %d, want the refusal retried at least once", len(starts))
+	if starts := client.count("StartAgent"); starts < 2 {
+		t.Fatalf("agent start invocations = %d, want the refusal retried at least once", starts)
 	}
 }
 
 // The kept pane is only useful if the phone learns about it: the failure must
 // carry the pane id and the topology must be published.
 func TestAgentStartFailureSurfacesTheKeptPane(t *testing.T) {
-	dir := t.TempDir()
-	record := filepath.Join(dir, "invocations.log")
-	bin := busyHerdr(t, dir, record, -1)
-	lifecycle, cwd := busyLifecycle(t, dir, bin)
+	client := busyClient(-1)
+	lifecycle, cwd := busyLifecycle(t, client)
 
 	state := NewState(testLogger())
-	d := NewDispatcher(herdr.NewClient(bin, filepath.Join(dir, "herdr.sock")), state, nil, testLogger())
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		if err := d.Close(ctx); err != nil {
-			t.Fatalf("close dispatcher: %v", err)
-		}
-	})
+	d := newTestDispatcher(t, client, state)
 	d.profiles = lifecycle.profiles
 	d.lifecycle = lifecycle
 	before := state.TopologyGeneration()
@@ -241,11 +157,11 @@ func TestAgentStartFailureSurfacesTheKeptPane(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	stopAfterRefusals(lifecycle, 2)
-	result := d.handleAgentStart(ctx, time.Now(), "request-1", map[string]any{
-		"profile_id": "codex",
-		"name":       "project-codex",
-		"cwd":        cwd,
-	})
+	result := d.handleAgentStart(ctx, d.newCommandRequest(time.Now(), "request-1", "", protocol.Inbound{
+		ProfileID: "codex",
+		Name:      "project-codex",
+		Cwd:       cwd,
+	}, nil))
 	if result.OK {
 		t.Fatal("agent_start reported success against a permanently refusing Herdr")
 	}

@@ -3,6 +3,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TEMP="$(mktemp -d)"
 trap 'rm -rf "$TEMP"' EXIT
+# shellcheck source=lib.sh
+. "$ROOT/tests/lib.sh"
+ensure_relay_test_binary "$TEMP"
+export HERDR_RELAY_BIN="$HERDR_TEST_RELAY_BIN"
 export HOME="$TEMP/home"
 export PI_CODING_AGENT_DIR="$TEMP/custom-agent"
 mkdir -p "$PI_CODING_AGENT_DIR/extensions"

@@ -68,7 +68,7 @@ func TestCapacityAdmissionAllocationAndDedup(t *testing.T) {
 			}
 			defer sourceFile.Close()
 			source := fileSource{file: sourceFile, revision: "new", end: 2}
-			job, page := b.createJob(BrowseScope{Provider: "claude", SessionID: "private-id"}, source, 0, 2, 2, "digest", false, "", 0)
+			job, page := b.createJob(BrowseScope{Provider: "claude", SessionID: "private-id"}, source, capturedRange{end: 2, boundary: 2, digest: "digest"}, claudeChainJobBinding{})
 			if page != nil || job == nil || !victim.retired {
 				t.Fatalf("job=%v page=%+v retired=%v", job, page, victim.retired)
 			}
@@ -76,7 +76,7 @@ func TestCapacityAdmissionAllocationAndDedup(t *testing.T) {
 			b.capacityMu.Lock()
 			b.options.AggregateQuota = b.aggregateCacheBytes()
 			b.unlockCapacity()
-			duplicate, page := b.createJob(job.scope, source, 0, 2, 2, "digest", false, "", 0)
+			duplicate, page := b.createJob(job.scope, source, capturedRange{end: 2, boundary: 2, digest: "digest"}, claudeChainJobBinding{})
 			if page != nil || duplicate != job {
 				t.Fatalf("dedup at capacity: job=%v page=%+v", duplicate, page)
 			}
@@ -408,7 +408,7 @@ func TestCacheUsageDisappearedEntry(t *testing.T) {
 func TestCapacityAdmissionClosing(t *testing.T) {
 	b := capacityTestBrowser(t)
 	b.closing = true
-	job, page := b.createJob(BrowseScope{}, fileSource{}, 0, 0, 0, "", false, "", 0)
+	job, page := b.createJob(BrowseScope{}, fileSource{}, capturedRange{}, claudeChainJobBinding{})
 	if job != nil || page == nil || page.Reason != "Older history preparation is shutting down." || page.ReasonCode != "index_failed" || page.Error == nil || !page.Error.Retryable {
 		t.Fatalf("job=%v page=%+v", job, page)
 	}
@@ -432,11 +432,7 @@ func TestCapacityOMOTraversals(t *testing.T) {
 	writeRows(t, path, rows...)
 	options := DefaultBrowserOptions()
 	options.RecentBytes = 1
-	b, err := NewBrowser(NewReader(home), t.TempDir(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer b.Close()
+	b := newTestBrowser(t, NewReader(home), options)
 	scope := BrowseScope{Provider: "omo", CWD: cwd, SessionID: sessionID}
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
@@ -492,11 +488,7 @@ func TestCapacityAppendTraversals(t *testing.T) {
 	path := filepath.Join(home, ".claude", "projects", "-work", testSessionID+".jsonl")
 	options := DefaultBrowserOptions()
 	options.RecentBytes = 1
-	browser, err := NewBrowser(reader, t.TempDir(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
+	browser := newTestBrowser(t, reader, options)
 	scope := BrowseScope{Provider: "claude", CWD: "/work", SessionID: testSessionID}
 	var rows []map[string]any
 	for i := 0; i < 100; i++ {

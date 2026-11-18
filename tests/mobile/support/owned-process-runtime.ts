@@ -4,7 +4,6 @@ import { EventEmitter } from 'node:events';
 import { Socket } from 'node:net';
 import { constants as osConstants } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { isAbsolute } from 'node:path';
 import { createRequire } from 'node:module';
 import { Buffer } from 'node:buffer';
 import { StringDecoder } from 'node:string_decoder';
@@ -16,13 +15,6 @@ interface LaunchRequest {
   executionDeadlineNs: string;
   hardDeadlineNs: string;
   killDelayMs: number;
-  terminalTransport?: boolean;
-  terminalTarget?: TerminalTarget;
-}
-
-interface TerminalTarget {
-  cwd: string;
-  env: Record<string, string>;
 }
 
 type RecordValue = Record<string, unknown>;
@@ -103,31 +95,6 @@ export function createOwnedGroupPollOwner(options: {
       if (previous?.handle !== undefined) options.cancel(previous.handle);
     },
   };
-}
-
-function terminalTargetConfig(value: unknown): TerminalTarget | undefined {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
-  const targetPrototype = Object.getPrototypeOf(value);
-  if (targetPrototype !== Object.prototype && targetPrototype !== null) return undefined;
-  const targetKeys = Reflect.ownKeys(value);
-  if (targetKeys.length !== 2 || !targetKeys.includes('cwd') || !targetKeys.includes('env')) return undefined;
-  const cwdDescriptor = Object.getOwnPropertyDescriptor(value, 'cwd');
-  const envDescriptor = Object.getOwnPropertyDescriptor(value, 'env');
-  if (!cwdDescriptor || !('value' in cwdDescriptor) || !envDescriptor || !('value' in envDescriptor)) return undefined;
-  const cwd: unknown = cwdDescriptor.value;
-  const environment: unknown = envDescriptor.value;
-  if (typeof cwd !== 'string' || !cwd || !isAbsolute(cwd) || cwd.includes('\0')
-    || !environment || typeof environment !== 'object' || Array.isArray(environment)) return undefined;
-  const environmentPrototype = Object.getPrototypeOf(environment);
-  if (environmentPrototype !== Object.prototype && environmentPrototype !== null) return undefined;
-  const env: Record<string, string> = Object.create(null) as Record<string, string>;
-  for (const key of Reflect.ownKeys(environment)) {
-    if (typeof key !== 'string' || !key || key.includes('=') || key.includes('\0')) return undefined;
-    const descriptor = Object.getOwnPropertyDescriptor(environment, key);
-    if (!descriptor || !('value' in descriptor) || typeof descriptor.value !== 'string' || descriptor.value.includes('\0')) return undefined;
-    env[key] = descriptor.value;
-  }
-  return { cwd, env };
 }
 
 const closedDescriptors = new Set<number>();
@@ -721,900 +688,1210 @@ function armGroupDeadline(deadline: string | undefined, callback: () => void): A
   return scheduleAt(deadline, callback);
 }
 
-async function runAnchorGuardian(): Promise<void> {
-  const control = controlChannel(3);
-  const startupDeadlineValue = process.argv[3] || '';
-  const startupHardDeadlineNs = /^\d+$/u.test(startupDeadlineValue) ? BigInt(startupDeadlineValue) : 0n;
-  const expectedAnchorPID = Number(process.argv[4]);
-  const expectedSession = Number(process.argv[5]);
-  let native: NativeRuntime | undefined;
-  let groupID: number | undefined;
-  let groupEstablished = false;
-  let deadlinesArmed = false;
-  let stopping = false;
-  let startupExpired = false;
-  let executionDeadlineNs = '';
-  let hardDeadlineNs = '';
-  let killDelayMs = 250;
-  let groupKillTimer: ReturnType<typeof setTimeout> | undefined;
-  let executionTimer: AbsoluteDeadlineTimer | undefined;
-  let hardTimer: AbsoluteDeadlineTimer | undefined;
-  const startup = { timer: undefined as AbsoluteDeadlineTimer | undefined };
+interface GuardianState {
+  control: ControlChannel;
+  startupHardDeadlineNs: bigint;
+  expectedAnchorPID: number;
+  expectedSession: number;
+  native: NativeRuntime | undefined;
+  groupID: number | undefined;
+  groupEstablished: boolean;
+  deadlinesArmed: boolean;
+  stopping: boolean;
+  startupExpired: boolean;
+  executionDeadlineNs: string;
+  hardDeadlineNs: string;
+  killDelayMs: number;
+  groupKillTimer: ReturnType<typeof setTimeout> | undefined;
+  startupTimer: AbsoluteDeadlineTimer | undefined;
+  executionTimer: AbsoluteDeadlineTimer | undefined;
+  hardTimer: AbsoluteDeadlineTimer | undefined;
+}
 
-  const sendControl = (value: RecordValue) => send(control, value);
-  const clearDeadlines = () => {
-    startup.timer?.cancel();
-    executionTimer?.cancel();
-    hardTimer?.cancel();
+interface GuardianIdentity {
+  guardianPID: number;
+  guardianParentPID: number;
+  sessionID: number;
+}
+
+function createGuardianState(): GuardianState {
+  const startupDeadlineValue = process.argv[3] || '';
+  return {
+    control: controlChannel(3),
+    startupHardDeadlineNs: /^\d+$/u.test(startupDeadlineValue) ? BigInt(startupDeadlineValue) : 0n,
+    expectedAnchorPID: Number(process.argv[4]),
+    expectedSession: Number(process.argv[5]),
+    native: undefined,
+    groupID: undefined,
+    groupEstablished: false,
+    deadlinesArmed: false,
+    stopping: false,
+    startupExpired: false,
+    executionDeadlineNs: '',
+    hardDeadlineNs: '',
+    killDelayMs: 250,
+    groupKillTimer: undefined,
+    startupTimer: undefined,
+    executionTimer: undefined,
+    hardTimer: undefined,
   };
-  const killGroup = (signal: NodeJS.Signals): boolean => {
-    if (!groupEstablished) return false;
-    const failure = signalOwnedProcessGroup(native, groupID, expectedSession, signal);
-    if (failure) sendControl({ type: 'guardian-group-signal-refused', signal, groupID, guardianPID: process.pid, reason: failure });
-    return !failure;
-  };
-  const scheduleGroupKill = () => {
-    const hardRemaining = Math.max(0, Number(((hardDeadlineNs ? BigInt(hardDeadlineNs) : startupHardDeadlineNs) - nowNs()) / 1_000_000n));
-    const delay = Math.min(killDelayMs, hardRemaining);
-    if (groupKillTimer) clearTimeout(groupKillTimer);
-    groupKillTimer = setTimeout(() => killGroup('SIGKILL'), delay);
-  };
-  const stopGroup = (reason: string, killNow = false) => {
-    if (!groupEstablished) {
-      startupExpired = true;
-      clearDeadlines();
-      sendControl({ type: 'guardian-stopping', reason });
-      control.destroy();
-      process.exitCode = 1;
-      return;
-    }
-    if (stopping && !killNow) return;
-    stopping = true;
-    startup.timer?.cancel();
-    executionTimer?.cancel();
-    sendControl({ type: 'guardian-stopping', reason });
-    if (killNow) {
-      hardTimer?.cancel();
-      if (groupKillTimer) clearTimeout(groupKillTimer);
-      killGroup('SIGKILL');
-      return;
-    }
-    if (!killGroup('SIGTERM')) return;
-    scheduleGroupKill();
-  };
-  const onTermination = () => {
-    if (!groupEstablished) return stopGroup('anchor-termination');
-    if (stopping) return;
-    stopping = true;
-    startup.timer?.cancel();
-    executionTimer?.cancel();
-    sendControl({ type: 'guardian-stopping', reason: 'group-termination' });
-    scheduleGroupKill();
-  };
-  control.on('error', () => stopGroup('anchor-control-failed'));
-  control.on('end', () => stopGroup('anchor-control-lost'));
-  startup.timer = scheduleAt(startupHardDeadlineNs.toString(), () => {
-    if (groupEstablished) stopGroup('guardian-startup-hard-deadline', true);
+}
+
+function guardianSendControl(state: GuardianState, value: RecordValue) {
+  send(state.control, value);
+}
+
+function guardianClearDeadlines(state: GuardianState) {
+  state.startupTimer?.cancel();
+  state.executionTimer?.cancel();
+  state.hardTimer?.cancel();
+}
+
+function guardianKillGroup(state: GuardianState, signal: NodeJS.Signals): boolean {
+  if (!state.groupEstablished) return false;
+  const failure = signalOwnedProcessGroup(state.native, state.groupID, state.expectedSession, signal);
+  if (failure) guardianSendControl(state, { type: 'guardian-group-signal-refused', signal, groupID: state.groupID, guardianPID: process.pid, reason: failure });
+  return !failure;
+}
+
+function guardianScheduleGroupKill(state: GuardianState) {
+  const hardRemaining = Math.max(0, Number(((state.hardDeadlineNs ? BigInt(state.hardDeadlineNs) : state.startupHardDeadlineNs) - nowNs()) / 1_000_000n));
+  const delay = Math.min(state.killDelayMs, hardRemaining);
+  if (state.groupKillTimer) clearTimeout(state.groupKillTimer);
+  state.groupKillTimer = setTimeout(() => guardianKillGroup(state, 'SIGKILL'), delay);
+}
+
+function guardianStopGroup(state: GuardianState, reason: string, killNow = false) {
+  if (!state.groupEstablished) {
+    state.startupExpired = true;
+    guardianClearDeadlines(state);
+    guardianSendControl(state, { type: 'guardian-stopping', reason });
+    state.control.destroy();
+    process.exitCode = 1;
+    return;
+  }
+  if (state.stopping && !killNow) return;
+  state.stopping = true;
+  state.startupTimer?.cancel();
+  state.executionTimer?.cancel();
+  guardianSendControl(state, { type: 'guardian-stopping', reason });
+  if (killNow) {
+    state.hardTimer?.cancel();
+    if (state.groupKillTimer) clearTimeout(state.groupKillTimer);
+    guardianKillGroup(state, 'SIGKILL');
+    return;
+  }
+  if (!guardianKillGroup(state, 'SIGTERM')) return;
+  guardianScheduleGroupKill(state);
+}
+
+function guardianOnTermination(state: GuardianState) {
+  if (!state.groupEstablished) return guardianStopGroup(state, 'anchor-termination');
+  if (state.stopping) return;
+  state.stopping = true;
+  state.startupTimer?.cancel();
+  state.executionTimer?.cancel();
+  guardianSendControl(state, { type: 'guardian-stopping', reason: 'group-termination' });
+  guardianScheduleGroupKill(state);
+}
+
+function guardianWatchStartup(state: GuardianState) {
+  state.control.on('error', () => guardianStopGroup(state, 'anchor-control-failed'));
+  state.control.on('end', () => guardianStopGroup(state, 'anchor-control-lost'));
+  state.startupTimer = scheduleAt(state.startupHardDeadlineNs.toString(), () => {
+    if (state.groupEstablished) guardianStopGroup(state, 'guardian-startup-hard-deadline', true);
     else {
-      startupExpired = true;
-      clearDeadlines();
-      sendControl({ type: 'guardian-stopping', reason: 'guardian-startup-hard-deadline' });
-      control.destroy();
+      state.startupExpired = true;
+      guardianClearDeadlines(state);
+      guardianSendControl(state, { type: 'guardian-stopping', reason: 'guardian-startup-hard-deadline' });
+      state.control.destroy();
       process.exitCode = 1;
     }
   });
+}
 
+function guardianVerifyIdentity(state: GuardianState, native: NativeRuntime): GuardianIdentity | undefined {
+  const { symbols } = native;
+  const guardianPID = symbols.getpid();
+  const guardianParentPID = symbols.getppid();
+  state.groupID = symbols.getpgid(0);
+  const sessionID = symbols.getsid(0);
+  if (guardianPID <= 0 || state.expectedAnchorPID <= 0 || guardianParentPID !== state.expectedAnchorPID
+    || state.groupID !== state.expectedAnchorPID || sessionID !== state.expectedSession
+    || symbols.getpgid(state.expectedAnchorPID) !== state.expectedAnchorPID || symbols.getsid(state.expectedAnchorPID) !== state.expectedSession) {
+    state.startupTimer?.cancel();
+    guardianSendControl(state, { type: 'guardian-bootstrap-error', message: 'guardian parent, process-group, or session identity did not match its anchor' });
+    state.control.destroy();
+    process.exitCode = 1;
+    return undefined;
+  }
+  return { guardianPID, guardianParentPID, sessionID };
+}
+
+function guardianConfigure(state: GuardianState, identity: GuardianIdentity, message: RecordValue) {
+  if (state.stopping || state.startupExpired) {
+    guardianSendControl(state, { type: 'guardian-configuration-refused', reason: 'guardian was already stopping before configuration' });
+    return;
+  }
+  if (message.type !== 'configure-guardian' || state.deadlinesArmed || typeof message.executionDeadlineNs !== 'string'
+    || !/^\d+$/u.test(message.executionDeadlineNs) || typeof message.hardDeadlineNs !== 'string'
+    || !/^\d+$/u.test(message.hardDeadlineNs) || typeof message.killDelayMs !== 'number'
+    || !Number.isSafeInteger(message.killDelayMs) || message.killDelayMs < 0) {
+    guardianStopGroup(state, 'invalid-guardian-deadlines');
+    return;
+  }
+  state.executionDeadlineNs = message.executionDeadlineNs;
+  state.hardDeadlineNs = message.hardDeadlineNs;
+  state.killDelayMs = message.killDelayMs;
+  if (BigInt(state.executionDeadlineNs) >= BigInt(state.hardDeadlineNs) || BigInt(state.hardDeadlineNs) > state.startupHardDeadlineNs
+    || nowNs() >= BigInt(state.hardDeadlineNs)) {
+    guardianStopGroup(state, 'invalid-guardian-deadlines');
+    return;
+  }
+  state.deadlinesArmed = true;
+  state.startupTimer?.cancel();
+  state.executionTimer = armGroupDeadline(state.executionDeadlineNs, () => guardianStopGroup(state, 'timeout'));
+  state.hardTimer = armGroupDeadline(state.hardDeadlineNs, () => guardianStopGroup(state, 'hard-deadline', true));
+  guardianSendControl(state, { type: 'guardian-ready', ...identity, groupID: state.groupID,
+    executionDeadlineNs: state.executionDeadlineNs, hardDeadlineNs: state.hardDeadlineNs, killDelayMs: state.killDelayMs });
+}
+
+function guardianAdmit(state: GuardianState, identity: GuardianIdentity) {
+  state.groupEstablished = true;
+  const onTermination = () => guardianOnTermination(state);
+  process.on('SIGTERM', onTermination);
+  process.on('SIGHUP', onTermination);
+  process.on('SIGINT', onTermination);
+  if (state.startupExpired || nowNs() >= state.startupHardDeadlineNs) {
+    guardianStopGroup(state, 'guardian-startup-hard-deadline', true);
+    return;
+  }
+  guardianSendControl(state, { type: 'guardian-native-ready', ...identity, groupID: state.groupID, clockNs: nowNs().toString() });
+  parseLines(state.control, message => {
+    if (message.type === 'stop' || message.type === 'kill-group') {
+      guardianStopGroup(state, typeof message.reason === 'string' ? message.reason : 'anchor-request', message.type === 'kill-group');
+      return;
+    }
+    guardianConfigure(state, identity, message);
+  });
+}
+
+function guardianFailBootstrap(state: GuardianState, error: unknown) {
+  guardianSendControl(state, { type: 'guardian-bootstrap-error', message: error instanceof Error ? error.message.slice(0, 1_000) : 'guardian initialization failed' });
+  guardianClearDeadlines(state);
+  if (state.groupEstablished) guardianStopGroup(state, 'guardian-bootstrap-error');
+  else {
+    state.control.destroy();
+    process.exitCode = 1;
+  }
+}
+
+async function runAnchorGuardian(): Promise<void> {
+  const state = createGuardianState();
+  guardianWatchStartup(state);
   try {
-    native = await loadNativeRuntime();
-    const { symbols } = native;
-    const guardianPID = symbols.getpid();
-    const guardianParentPID = symbols.getppid();
-    groupID = symbols.getpgid(0);
-    const sessionID = symbols.getsid(0);
-    if (guardianPID <= 0 || expectedAnchorPID <= 0 || guardianParentPID !== expectedAnchorPID
-      || groupID !== expectedAnchorPID || sessionID !== expectedSession
-      || symbols.getpgid(expectedAnchorPID) !== expectedAnchorPID || symbols.getsid(expectedAnchorPID) !== expectedSession) {
-      startup.timer?.cancel();
-      sendControl({ type: 'guardian-bootstrap-error', message: 'guardian parent, process-group, or session identity did not match its anchor' });
-      control.destroy();
-      process.exitCode = 1;
-      return;
-    }
-    groupEstablished = true;
-    process.on('SIGTERM', onTermination);
-    process.on('SIGHUP', onTermination);
-    process.on('SIGINT', onTermination);
-    if (startupExpired || nowNs() >= startupHardDeadlineNs) {
-      stopGroup('guardian-startup-hard-deadline', true);
-      return;
-    }
-    sendControl({ type: 'guardian-native-ready', guardianPID, guardianParentPID, groupID, sessionID, clockNs: nowNs().toString() });
-    parseLines(control, message => {
-      if (message.type === 'stop' || message.type === 'kill-group') {
-        stopGroup(typeof message.reason === 'string' ? message.reason : 'anchor-request', message.type === 'kill-group');
-        return;
-      }
-      if (stopping || startupExpired) {
-        sendControl({ type: 'guardian-configuration-refused', reason: 'guardian was already stopping before configuration' });
-        return;
-      }
-      if (message.type !== 'configure-guardian' || deadlinesArmed || typeof message.executionDeadlineNs !== 'string'
-        || !/^\d+$/u.test(message.executionDeadlineNs) || typeof message.hardDeadlineNs !== 'string'
-        || !/^\d+$/u.test(message.hardDeadlineNs) || typeof message.killDelayMs !== 'number'
-        || !Number.isSafeInteger(message.killDelayMs) || message.killDelayMs < 0) {
-        stopGroup('invalid-guardian-deadlines');
-        return;
-      }
-      executionDeadlineNs = message.executionDeadlineNs;
-      hardDeadlineNs = message.hardDeadlineNs;
-      killDelayMs = message.killDelayMs;
-      if (BigInt(executionDeadlineNs) >= BigInt(hardDeadlineNs) || BigInt(hardDeadlineNs) > startupHardDeadlineNs
-        || nowNs() >= BigInt(hardDeadlineNs)) {
-        stopGroup('invalid-guardian-deadlines');
-        return;
-      }
-      deadlinesArmed = true;
-      startup.timer?.cancel();
-      executionTimer = armGroupDeadline(executionDeadlineNs, () => stopGroup('timeout'));
-      hardTimer = armGroupDeadline(hardDeadlineNs, () => stopGroup('hard-deadline', true));
-      sendControl({ type: 'guardian-ready', guardianPID, guardianParentPID, groupID, sessionID,
-        executionDeadlineNs, hardDeadlineNs, killDelayMs });
-    });
+    state.native = await loadNativeRuntime();
+    const identity = guardianVerifyIdentity(state, state.native);
+    if (!identity) return;
+    guardianAdmit(state, identity);
   } catch (error) {
-    sendControl({ type: 'guardian-bootstrap-error', message: error instanceof Error ? error.message.slice(0, 1_000) : 'guardian initialization failed' });
-    clearDeadlines();
-    if (groupEstablished) stopGroup('guardian-bootstrap-error');
+    guardianFailBootstrap(state, error);
+  }
+}
+
+interface AnchorState {
+  control: ControlChannel;
+  startupHardDeadlineNs: bigint;
+  expectedParent: number;
+  expectedSession: number;
+  native: NativeRuntime | undefined;
+  anchorPID: number | undefined;
+  spawnParentPID: number | undefined;
+  groupID: number | undefined;
+  sessionID: number | undefined;
+  guardian: ChildProcess | undefined;
+  guardianControl: Duplex | undefined;
+  guardianPID: number | undefined;
+  guardianNativeReady: boolean;
+  guardianConfigured: boolean;
+  guardianClosed: boolean;
+  resolveGuardianStartup: () => void;
+  rejectGuardianStartup: (error: Error) => void;
+  pendingAnchorReady: RecordValue | undefined;
+  groupEstablished: boolean;
+  deadlinesArmed: boolean;
+  stopping: boolean;
+  startupExpired: boolean;
+  executionDeadlineNs: string;
+  hardDeadlineNs: string;
+  killDelayMs: number;
+  groupKillTimer: ReturnType<typeof setTimeout> | undefined;
+  startupTimer: AbsoluteDeadlineTimer | undefined;
+  executionTimer: AbsoluteDeadlineTimer | undefined;
+  hardTimer: AbsoluteDeadlineTimer | undefined;
+}
+
+function createAnchorState(): AnchorState {
+  const startupDeadlineValue = process.argv[3] || '';
+  return {
+    control: controlChannel(3),
+    startupHardDeadlineNs: /^\d+$/u.test(startupDeadlineValue) ? BigInt(startupDeadlineValue) : 0n,
+    expectedParent: Number(process.argv[4]),
+    expectedSession: Number(process.argv[5]),
+    native: undefined,
+    anchorPID: undefined,
+    spawnParentPID: undefined,
+    groupID: undefined,
+    sessionID: undefined,
+    guardian: undefined,
+    guardianControl: undefined,
+    guardianPID: undefined,
+    guardianNativeReady: false,
+    guardianConfigured: false,
+    guardianClosed: false,
+    resolveGuardianStartup: () => undefined,
+    rejectGuardianStartup: () => undefined,
+    pendingAnchorReady: undefined,
+    groupEstablished: false,
+    deadlinesArmed: false,
+    stopping: false,
+    startupExpired: false,
+    executionDeadlineNs: '',
+    hardDeadlineNs: '',
+    killDelayMs: 250,
+    groupKillTimer: undefined,
+    startupTimer: undefined,
+    executionTimer: undefined,
+    hardTimer: undefined,
+  };
+}
+
+function anchorSendControl(state: AnchorState, value: RecordValue) {
+  send(state.control, value);
+}
+
+function anchorClearDeadlines(state: AnchorState) {
+  state.startupTimer?.cancel();
+  state.executionTimer?.cancel();
+  state.hardTimer?.cancel();
+}
+
+function anchorKillGroup(state: AnchorState, signal: NodeJS.Signals): boolean {
+  if (!state.groupEstablished) return false;
+  const failure = signalOwnedProcessGroup(state.native, state.groupID, state.expectedSession, signal);
+  if (failure) anchorSendControl(state, { type: 'anchor-group-signal-refused', signal, groupID: state.groupID, anchorPID: state.anchorPID, reason: failure });
+  return !failure;
+}
+
+function anchorScheduleGroupKill(state: AnchorState) {
+  const hardRemaining = Math.max(0, Number(((state.hardDeadlineNs ? BigInt(state.hardDeadlineNs) : state.startupHardDeadlineNs) - nowNs()) / 1_000_000n));
+  const delay = Math.min(state.killDelayMs, hardRemaining);
+  if (state.groupKillTimer) clearTimeout(state.groupKillTimer);
+  state.groupKillTimer = setTimeout(() => anchorKillGroup(state, 'SIGKILL'), delay);
+}
+
+function anchorStopGroup(state: AnchorState, reason: string, killNow = false) {
+  if (!state.groupEstablished) {
+    state.startupExpired = true;
+    anchorClearDeadlines(state);
+    anchorSendControl(state, { type: 'anchor-stopping', reason });
+    state.control.destroy();
+    process.exitCode = 1;
+    return;
+  }
+  if (state.stopping && !killNow) return;
+  state.stopping = true;
+  state.startupTimer?.cancel();
+  state.executionTimer?.cancel();
+  anchorSendControl(state, { type: 'anchor-stopping', reason });
+  if (killNow) {
+    state.hardTimer?.cancel();
+    if (state.groupKillTimer) clearTimeout(state.groupKillTimer);
+    anchorKillGroup(state, 'SIGKILL');
+    return;
+  }
+  if (!anchorKillGroup(state, 'SIGTERM')) return;
+  anchorScheduleGroupKill(state);
+}
+
+function anchorOnTermination(state: AnchorState) {
+  if (!state.groupEstablished) return anchorStopGroup(state, 'supervisor-request');
+  if (state.stopping) return;
+  state.stopping = true;
+  state.startupTimer?.cancel();
+  state.executionTimer?.cancel();
+  anchorSendControl(state, { type: 'anchor-stopping', reason: 'group-termination' });
+  anchorScheduleGroupKill(state);
+}
+
+function anchorWatchStartup(state: AnchorState) {
+  state.control.on('error', () => anchorStopGroup(state, 'supervisor-control-failed'));
+  state.control.on('end', () => anchorStopGroup(state, 'supervisor-control-lost'));
+  state.startupTimer = scheduleAt(state.startupHardDeadlineNs.toString(), () => {
+    if (state.groupEstablished) anchorStopGroup(state, 'startup-hard-deadline', true);
     else {
-      control.destroy();
+      state.startupExpired = true;
+      anchorClearDeadlines(state);
+      anchorSendControl(state, { type: 'anchor-stopping', reason: 'startup-hard-deadline' });
+      state.control.destroy();
       process.exitCode = 1;
     }
+  });
+}
+
+function anchorEstablishGroup(state: AnchorState, native: NativeRuntime): boolean {
+  const { symbols } = native;
+  state.anchorPID = symbols.getpid();
+  state.spawnParentPID = symbols.getppid();
+  if (symbols.setpgid(0, 0) !== 0) {
+    anchorSendControl(state, { type: 'anchor-bootstrap-error', message: 'setpgid failed' });
+    process.exitCode = 1;
+    return false;
+  }
+  state.groupID = symbols.getpgid(0);
+  state.sessionID = symbols.getsid(0);
+  if (state.anchorPID <= 0 || state.spawnParentPID !== state.expectedParent || state.groupID !== state.anchorPID || state.sessionID !== state.expectedSession) {
+    anchorSendControl(state, { type: 'anchor-bootstrap-error', message: 'anchor process-group or session identity did not match the supervisor' });
+    process.exitCode = 1;
+    return false;
+  }
+  state.groupEstablished = true;
+  const onTermination = () => anchorOnTermination(state);
+  process.on('SIGTERM', onTermination);
+  process.on('SIGHUP', onTermination);
+  process.on('SIGINT', onTermination);
+  if (state.startupExpired || nowNs() >= state.startupHardDeadlineNs) {
+    anchorStopGroup(state, 'startup-hard-deadline', true);
+    return false;
+  }
+  return true;
+}
+
+function anchorAdmitGuardianNative(state: AnchorState, message: RecordValue) {
+  const candidatePID = Number(message.guardianPID);
+  const clock = typeof message.clockNs === 'string' && /^\d+$/u.test(message.clockNs) ? BigInt(message.clockNs) : undefined;
+  if (state.guardianNativeReady || candidatePID !== state.guardian!.pid || Number(message.guardianParentPID) !== state.anchorPID
+    || Number(message.groupID) !== state.groupID || Number(message.sessionID) !== state.sessionID || clock === undefined
+    || state.native!.symbols.getpgid(candidatePID) !== state.groupID || state.native!.symbols.getsid(candidatePID) !== state.sessionID) {
+    const error = new Error('anchor guardian identity or clock did not match its live group member');
+    state.rejectGuardianStartup(error);
+    anchorStopGroup(state, 'anchor-guardian-admission-failed', true);
+    return;
+  }
+  state.guardianPID = candidatePID;
+  state.guardianNativeReady = true;
+  state.resolveGuardianStartup();
+}
+
+function anchorAdmitGuardianReady(state: AnchorState, message: RecordValue) {
+  if (!state.guardianNativeReady || state.guardianConfigured || state.stopping || state.startupExpired || !state.pendingAnchorReady
+    || Number(message.guardianPID) !== state.guardianPID || Number(message.guardianParentPID) !== state.anchorPID
+    || Number(message.groupID) !== state.groupID || Number(message.sessionID) !== state.sessionID
+    || message.executionDeadlineNs !== state.executionDeadlineNs || message.hardDeadlineNs !== state.hardDeadlineNs
+    || message.killDelayMs !== state.killDelayMs || state.native!.symbols.getpgid(state.guardianPID!) !== state.groupID
+    || state.native!.symbols.getsid(state.guardianPID!) !== state.sessionID) {
+    anchorStopGroup(state, 'anchor-guardian-readiness-invalid', true);
+    return;
+  }
+  state.guardianConfigured = true;
+  anchorSendControl(state, state.pendingAnchorReady);
+  state.pendingAnchorReady = undefined;
+}
+
+function anchorHandleGuardianMessage(state: AnchorState, message: RecordValue) {
+  if (message.type === 'guardian-native-ready') {
+    anchorAdmitGuardianNative(state, message);
+    return;
+  }
+  if (message.type === 'guardian-ready') {
+    anchorAdmitGuardianReady(state, message);
+    return;
+  }
+  if (message.type === 'guardian-configuration-refused') {
+    const failure = new Error(String(message.reason || 'anchor guardian was already stopping'));
+    anchorSendControl(state, { type: 'anchor-guardian-failure', reason: message.type, message: failure.message });
+    anchorStopGroup(state, 'anchor-guardian-configuration-refused', true);
+    return;
+  }
+  if (message.type === 'guardian-bootstrap-error' || message.type === 'guardian-group-signal-refused') {
+    const failure = new Error(String(message.message || message.reason || 'anchor guardian failed'));
+    if (!state.guardianNativeReady) state.rejectGuardianStartup(failure);
+    anchorSendControl(state, { type: 'anchor-guardian-failure', reason: message.type, message: failure.message });
+    anchorStopGroup(state, 'anchor-guardian-failed');
+    return;
+  }
+  if (message.type === 'guardian-stopping') {
+    state.stopping = true;
+    state.startupTimer?.cancel();
+    state.executionTimer?.cancel();
+    const reason = typeof message.reason === 'string' ? message.reason : 'guardian-stopping';
+    anchorSendControl(state, { type: 'anchor-stopping', reason });
+    anchorScheduleGroupKill(state);
+    return;
+  }
+  anchorStopGroup(state, 'invalid-anchor-guardian-message', true);
+}
+
+function anchorStartGuardian(state: AnchorState): Promise<void> {
+  const guardianStartup = new Promise<void>((resolve, reject) => {
+    state.resolveGuardianStartup = resolve;
+    state.rejectGuardianStartup = reject;
+  });
+  const guardian = spawn(process.execPath, ['--no-env-file', '--experimental-strip-types', fileURLToPath(import.meta.url),
+    '--anchor-guardian', state.startupHardDeadlineNs.toString(), String(state.anchorPID), String(state.sessionID)], {
+    detached: false,
+    stdio: ['ignore', 'ignore', 'ignore', 'pipe'], cwd: process.cwd(), env: process.env,
+  });
+  state.guardian = guardian;
+  if (guardian.pid === undefined) throw new Error('anchor guardian did not receive a process ID');
+  const guardianControl = controlStream(guardian);
+  state.guardianControl = guardianControl;
+  guardianControl.on('error', error => {
+    if (!state.guardianNativeReady) state.rejectGuardianStartup(error instanceof Error ? error : new Error('anchor guardian control failed'));
+    else anchorStopGroup(state, 'anchor-guardian-control-failed');
+  });
+  parseLines(guardianControl, message => anchorHandleGuardianMessage(state, message), error => {
+    if (!state.guardianNativeReady) state.rejectGuardianStartup(error);
+    else anchorStopGroup(state, 'anchor-guardian-protocol-failed');
+  });
+  guardian.once('error', error => {
+    if (!state.guardianNativeReady) state.rejectGuardianStartup(error);
+    else anchorStopGroup(state, 'anchor-guardian-launch-failed');
+  });
+  guardian.once('close', () => {
+    state.guardianClosed = true;
+    if (!state.guardianNativeReady) state.rejectGuardianStartup(new Error('anchor guardian closed before identity admission'));
+    else if (!state.stopping && !state.startupExpired) anchorStopGroup(state, 'anchor-guardian-closed');
+  });
+  return guardianStartup;
+}
+
+function anchorHandleControlMessage(state: AnchorState, guardianIdentity: RecordValue, message: RecordValue) {
+  if (message.type === 'stop' || message.type === 'kill-group') {
+    anchorStopGroup(state, typeof message.reason === 'string' ? message.reason : 'supervisor-request', message.type === 'kill-group');
+    return;
+  }
+  if (message.type !== 'configure-anchor') {
+    anchorStopGroup(state, 'invalid-anchor-configuration');
+    return;
+  }
+  if (state.stopping || state.startupExpired) {
+    anchorSendControl(state, { type: 'anchor-configuration-refused', reason: 'anchor was already stopping before configuration' });
+    anchorStopGroup(state, 'anchor-configuration-after-stopping', true);
+    return;
+  }
+  if (state.deadlinesArmed || typeof message.executionDeadlineNs !== 'string'
+    || typeof message.hardDeadlineNs !== 'string' || typeof message.killDelayMs !== 'number') {
+    anchorStopGroup(state, 'invalid-anchor-deadlines');
+    return;
+  }
+  state.executionDeadlineNs = message.executionDeadlineNs;
+  state.hardDeadlineNs = message.hardDeadlineNs;
+  state.killDelayMs = Number.isSafeInteger(message.killDelayMs) ? Math.max(0, message.killDelayMs) : 50;
+  if (nowNs() >= state.startupHardDeadlineNs) {
+    anchorStopGroup(state, 'startup-hard-deadline', true);
+    return;
+  }
+  if (nowNs() >= BigInt(state.hardDeadlineNs)) {
+    anchorStopGroup(state, 'hard-deadline', true);
+    return;
+  }
+  if (!state.guardianControl || state.guardianClosed) {
+    anchorStopGroup(state, 'anchor-guardian-control-unavailable', true);
+    return;
+  }
+  state.deadlinesArmed = true;
+  state.startupTimer?.cancel();
+  state.executionTimer = armGroupDeadline(state.executionDeadlineNs, () => anchorStopGroup(state, 'timeout'));
+  state.hardTimer = armGroupDeadline(state.hardDeadlineNs, () => anchorStopGroup(state, 'hard-deadline', true));
+  state.pendingAnchorReady = { type: 'anchor-ready', anchorPID: state.anchorPID, spawnParentPID: state.spawnParentPID,
+    groupID: state.groupID, sessionID: state.sessionID, ...guardianIdentity };
+  send(state.guardianControl, { type: 'configure-guardian', executionDeadlineNs: state.executionDeadlineNs,
+    hardDeadlineNs: state.hardDeadlineNs, killDelayMs: state.killDelayMs });
+}
+
+function anchorServeControl(state: AnchorState, guardianPID: number) {
+  const guardianIdentity = { guardianPID, guardianParentPID: state.anchorPID, guardianGroupID: state.groupID, guardianSessionID: state.sessionID };
+  anchorSendControl(state, { type: 'anchor-native-ready', anchorPID: state.anchorPID, spawnParentPID: state.spawnParentPID,
+    groupID: state.groupID, sessionID: state.sessionID, ...guardianIdentity, clockNs: nowNs().toString() });
+  parseLines(state.control, message => anchorHandleControlMessage(state, guardianIdentity, message));
+}
+
+function anchorFailBootstrap(state: AnchorState, error: unknown) {
+  anchorSendControl(state, { type: 'anchor-bootstrap-error', message: error instanceof Error ? error.message.slice(0, 1_000) : 'anchor initialization failed' });
+  anchorClearDeadlines(state);
+  if (state.groupEstablished) anchorStopGroup(state, 'anchor-bootstrap-error');
+  else {
+    state.control.destroy();
+    process.exitCode = 1;
   }
 }
 
 async function runAnchor(): Promise<void> {
-  const control = controlChannel(3);
-  const startupDeadlineValue = process.argv[3] || '';
-  const startupHardDeadlineNs = /^\d+$/u.test(startupDeadlineValue) ? BigInt(startupDeadlineValue) : 0n;
-  const expectedParent = Number(process.argv[4]);
-  const expectedSession = Number(process.argv[5]);
-  let native: NativeRuntime | undefined;
-  let anchorPID: number | undefined;
-  let groupID: number | undefined;
-  let sessionID: number | undefined;
-  let guardian: ChildProcess | undefined;
-  let guardianControl: Duplex | undefined;
-  let guardianPID: number | undefined;
-  let guardianNativeReady = false;
-  let guardianConfigured = false;
-  let guardianClosed = false;
-  let pendingAnchorReady: RecordValue | undefined;
-  let groupEstablished = false;
-  let deadlinesArmed = false;
-  let stopping = false;
-  let startupExpired = false;
-  let executionDeadlineNs = '';
-  let hardDeadlineNs = '';
-  let killDelayMs = 250;
-  let groupKillTimer: ReturnType<typeof setTimeout> | undefined;
-  let executionTimer: AbsoluteDeadlineTimer | undefined;
-  let hardTimer: AbsoluteDeadlineTimer | undefined;
-  const startup = { timer: undefined as AbsoluteDeadlineTimer | undefined };
-
-  const sendControl = (value: RecordValue) => send(control, value);
-  const clearDeadlines = () => {
-    startup.timer?.cancel();
-    executionTimer?.cancel();
-    hardTimer?.cancel();
-  };
-  const killGroup = (signal: NodeJS.Signals): boolean => {
-    if (!groupEstablished) return false;
-    const failure = signalOwnedProcessGroup(native, groupID, expectedSession, signal);
-    if (failure) sendControl({ type: 'anchor-group-signal-refused', signal, groupID, anchorPID, reason: failure });
-    return !failure;
-  };
-  const scheduleGroupKill = () => {
-    const hardRemaining = Math.max(0, Number(((hardDeadlineNs ? BigInt(hardDeadlineNs) : startupHardDeadlineNs) - nowNs()) / 1_000_000n));
-    const delay = Math.min(killDelayMs, hardRemaining);
-    if (groupKillTimer) clearTimeout(groupKillTimer);
-    groupKillTimer = setTimeout(() => killGroup('SIGKILL'), delay);
-  };
-  const stopGroup = (reason: string, killNow = false) => {
-    if (!groupEstablished) {
-      startupExpired = true;
-      clearDeadlines();
-      sendControl({ type: 'anchor-stopping', reason });
-      control.destroy();
-      process.exitCode = 1;
-      return;
-    }
-    if (stopping && !killNow) return;
-    stopping = true;
-    startup.timer?.cancel();
-    executionTimer?.cancel();
-    sendControl({ type: 'anchor-stopping', reason });
-    if (killNow) {
-      hardTimer?.cancel();
-      if (groupKillTimer) clearTimeout(groupKillTimer);
-      killGroup('SIGKILL');
-      return;
-    }
-    if (!killGroup('SIGTERM')) return;
-    scheduleGroupKill();
-  };
-  const onTermination = () => {
-    if (!groupEstablished) return stopGroup('supervisor-request');
-    if (stopping) return;
-    stopping = true;
-    startup.timer?.cancel();
-    executionTimer?.cancel();
-    sendControl({ type: 'anchor-stopping', reason: 'group-termination' });
-    scheduleGroupKill();
-  };
-  control.on('error', () => stopGroup('supervisor-control-failed'));
-  control.on('end', () => stopGroup('supervisor-control-lost'));
-  startup.timer = scheduleAt(startupHardDeadlineNs.toString(), () => {
-    if (groupEstablished) stopGroup('startup-hard-deadline', true);
-    else {
-      startupExpired = true;
-      clearDeadlines();
-      sendControl({ type: 'anchor-stopping', reason: 'startup-hard-deadline' });
-      control.destroy();
-      process.exitCode = 1;
-    }
-  });
-
+  const state = createAnchorState();
+  anchorWatchStartup(state);
   try {
-    native = await loadNativeRuntime();
-    const { symbols } = native;
-    anchorPID = symbols.getpid();
-    const anchorParent = symbols.getppid();
-    if (symbols.setpgid(0, 0) !== 0) {
-      sendControl({ type: 'anchor-bootstrap-error', message: 'setpgid failed' });
-      process.exitCode = 1;
+    state.native = await loadNativeRuntime();
+    if (!anchorEstablishGroup(state, state.native)) return;
+    await anchorStartGuardian(state);
+    if (state.startupExpired || state.stopping || nowNs() >= state.startupHardDeadlineNs || state.guardianPID === undefined) {
+      anchorStopGroup(state, 'anchor-guardian-startup-expired', true);
       return;
     }
-    groupID = symbols.getpgid(0);
-    sessionID = symbols.getsid(0);
-    if (anchorPID <= 0 || anchorParent !== expectedParent || groupID !== anchorPID || sessionID !== expectedSession) {
-      sendControl({ type: 'anchor-bootstrap-error', message: 'anchor process-group or session identity did not match the supervisor' });
-      process.exitCode = 1;
-      return;
-    }
-    groupEstablished = true;
-    process.on('SIGTERM', onTermination);
-    process.on('SIGHUP', onTermination);
-    process.on('SIGINT', onTermination);
-    if (startupExpired || nowNs() >= startupHardDeadlineNs) {
-      stopGroup('startup-hard-deadline', true);
-      return;
-    }
-
-    let resolveGuardianStartup!: () => void;
-    let rejectGuardianStartup!: (error: Error) => void;
-    const guardianStartup = new Promise<void>((resolve, reject) => {
-      resolveGuardianStartup = resolve;
-      rejectGuardianStartup = reject;
-    });
-    guardian = spawn(process.execPath, ['--no-env-file', '--experimental-strip-types', fileURLToPath(import.meta.url),
-      '--anchor-guardian', startupHardDeadlineNs.toString(), String(anchorPID), String(sessionID)], {
-      detached: false,
-      stdio: ['ignore', 'ignore', 'ignore', 'pipe'], cwd: process.cwd(), env: process.env,
-    });
-    if (guardian.pid === undefined) throw new Error('anchor guardian did not receive a process ID');
-    guardianControl = controlStream(guardian);
-    guardianControl.on('error', error => {
-      if (!guardianNativeReady) rejectGuardianStartup(error instanceof Error ? error : new Error('anchor guardian control failed'));
-      else stopGroup('anchor-guardian-control-failed');
-    });
-    parseLines(guardianControl, message => {
-      if (message.type === 'guardian-native-ready') {
-        const candidatePID = Number(message.guardianPID);
-        const clock = typeof message.clockNs === 'string' && /^\d+$/u.test(message.clockNs) ? BigInt(message.clockNs) : undefined;
-        if (guardianNativeReady || candidatePID !== guardian!.pid || Number(message.guardianParentPID) !== anchorPID
-          || Number(message.groupID) !== groupID || Number(message.sessionID) !== sessionID || clock === undefined
-          || native!.symbols.getpgid(candidatePID) !== groupID || native!.symbols.getsid(candidatePID) !== sessionID) {
-          const error = new Error('anchor guardian identity or clock did not match its live group member');
-          rejectGuardianStartup(error);
-          stopGroup('anchor-guardian-admission-failed', true);
-          return;
-        }
-        guardianPID = candidatePID;
-        guardianNativeReady = true;
-        resolveGuardianStartup();
-        return;
-      }
-      if (message.type === 'guardian-ready') {
-        if (!guardianNativeReady || guardianConfigured || stopping || startupExpired || !pendingAnchorReady
-          || Number(message.guardianPID) !== guardianPID || Number(message.guardianParentPID) !== anchorPID
-          || Number(message.groupID) !== groupID || Number(message.sessionID) !== sessionID
-          || message.executionDeadlineNs !== executionDeadlineNs || message.hardDeadlineNs !== hardDeadlineNs
-          || message.killDelayMs !== killDelayMs || native!.symbols.getpgid(guardianPID!) !== groupID
-          || native!.symbols.getsid(guardianPID!) !== sessionID) {
-          stopGroup('anchor-guardian-readiness-invalid', true);
-          return;
-        }
-        guardianConfigured = true;
-        sendControl(pendingAnchorReady);
-        pendingAnchorReady = undefined;
-        return;
-      }
-      if (message.type === 'guardian-configuration-refused') {
-        const failure = new Error(String(message.reason || 'anchor guardian was already stopping'));
-        sendControl({ type: 'anchor-guardian-failure', reason: message.type, message: failure.message });
-        stopGroup('anchor-guardian-configuration-refused', true);
-        return;
-      }
-      if (message.type === 'guardian-bootstrap-error' || message.type === 'guardian-group-signal-refused') {
-        const failure = new Error(String(message.message || message.reason || 'anchor guardian failed'));
-        if (!guardianNativeReady) rejectGuardianStartup(failure);
-        sendControl({ type: 'anchor-guardian-failure', reason: message.type, message: failure.message });
-        stopGroup('anchor-guardian-failed');
-        return;
-      }
-      if (message.type === 'guardian-stopping') {
-        stopping = true;
-        startup.timer?.cancel();
-        executionTimer?.cancel();
-        const reason = typeof message.reason === 'string' ? message.reason : 'guardian-stopping';
-        sendControl({ type: 'anchor-stopping', reason });
-        scheduleGroupKill();
-        return;
-      }
-      stopGroup('invalid-anchor-guardian-message', true);
-    }, error => {
-      if (!guardianNativeReady) rejectGuardianStartup(error);
-      else stopGroup('anchor-guardian-protocol-failed');
-    });
-    guardian.once('error', error => {
-      if (!guardianNativeReady) rejectGuardianStartup(error);
-      else stopGroup('anchor-guardian-launch-failed');
-    });
-    guardian.once('close', () => {
-      guardianClosed = true;
-      if (!guardianNativeReady) rejectGuardianStartup(new Error('anchor guardian closed before identity admission'));
-      else if (!stopping && !startupExpired) stopGroup('anchor-guardian-closed');
-    });
-    await guardianStartup;
-    if (startupExpired || stopping || nowNs() >= startupHardDeadlineNs || guardianPID === undefined) {
-      stopGroup('anchor-guardian-startup-expired', true);
-      return;
-    }
-    const guardianIdentity = { guardianPID, guardianParentPID: anchorPID, guardianGroupID: groupID, guardianSessionID: sessionID };
-    sendControl({ type: 'anchor-native-ready', anchorPID, spawnParentPID: anchorParent,
-      groupID, sessionID, ...guardianIdentity, clockNs: nowNs().toString() });
-    parseLines(control, message => {
-      if (message.type === 'stop' || message.type === 'kill-group') {
-        stopGroup(typeof message.reason === 'string' ? message.reason : 'supervisor-request', message.type === 'kill-group');
-        return;
-      }
-      if (message.type !== 'configure-anchor') {
-        stopGroup('invalid-anchor-configuration');
-        return;
-      }
-      if (stopping || startupExpired) {
-        sendControl({ type: 'anchor-configuration-refused', reason: 'anchor was already stopping before configuration' });
-        stopGroup('anchor-configuration-after-stopping', true);
-        return;
-      }
-      if (deadlinesArmed || typeof message.executionDeadlineNs !== 'string'
-        || typeof message.hardDeadlineNs !== 'string' || typeof message.killDelayMs !== 'number') {
-        stopGroup('invalid-anchor-deadlines');
-        return;
-      }
-      executionDeadlineNs = message.executionDeadlineNs;
-      hardDeadlineNs = message.hardDeadlineNs;
-      killDelayMs = Number.isSafeInteger(message.killDelayMs) ? Math.max(0, message.killDelayMs) : 50;
-      if (nowNs() >= startupHardDeadlineNs) {
-        stopGroup('startup-hard-deadline', true);
-        return;
-      }
-      if (nowNs() >= BigInt(hardDeadlineNs)) {
-        stopGroup('hard-deadline', true);
-        return;
-      }
-      if (!guardianControl || guardianClosed) {
-        stopGroup('anchor-guardian-control-unavailable', true);
-        return;
-      }
-      deadlinesArmed = true;
-      startup.timer?.cancel();
-      executionTimer = armGroupDeadline(executionDeadlineNs, () => stopGroup('timeout'));
-      hardTimer = armGroupDeadline(hardDeadlineNs, () => stopGroup('hard-deadline', true));
-      pendingAnchorReady = { type: 'anchor-ready', anchorPID, spawnParentPID: anchorParent, groupID, sessionID, ...guardianIdentity };
-      send(guardianControl, { type: 'configure-guardian', executionDeadlineNs, hardDeadlineNs, killDelayMs });
-    });
+    anchorServeControl(state, state.guardianPID);
   } catch (error) {
-    sendControl({ type: 'anchor-bootstrap-error', message: error instanceof Error ? error.message.slice(0, 1_000) : 'anchor initialization failed' });
-    clearDeadlines();
-    if (groupEstablished) stopGroup('anchor-bootstrap-error');
-    else {
-      control.destroy();
-      process.exitCode = 1;
-    }
+    anchorFailBootstrap(state, error);
   }
 }
 
-function runAnchorManager(): void {
+type ExitValue = { code: number | null; signal: NodeJS.Signals | null };
+
+interface ManagerOutputState {
+  bytes: number;
+  finished: boolean;
+  acknowledged: boolean;
+  descriptorClosed: boolean;
+  streamClosed: boolean;
+  finalAcknowledged: boolean;
+}
+
+interface ManagerState {
+  control: ControlChannel;
+  stdout: ReturnType<typeof writer>;
+  stderr: ReturnType<typeof writer>;
+  input: ReturnType<typeof reader>;
+  inputObservation: ReturnType<typeof observeInputPipe>;
+  startupHardDeadlineNs: string;
+  supervisorPID: number;
+  anchor: ChildProcess | undefined;
+  anchorControl: Duplex | undefined;
+  target: ChildProcess | undefined;
+  anchorPID: number | undefined;
+  groupID: number | undefined;
+  anchorReady: boolean;
+  anchorClosed: boolean;
+  targetSpawned: boolean;
+  targetExecConfirmed: boolean;
+  targetClosed: boolean;
+  targetLaunchErrorSent: boolean;
+  pendingExit: ExitValue | undefined;
+  pendingClose: ExitValue | undefined;
+  targetExecutionDeadlineNs: string;
+  firstFailure: string | undefined;
+  stopping: boolean;
+  closing: boolean;
+  targetOutputRelayed: boolean;
+  targetOutputRelayHealthy: boolean;
+  targetStdoutEnded: boolean;
+  targetStdoutClosed: boolean;
+  targetStderrEnded: boolean;
+  targetStderrClosed: boolean;
+  targetNoChildSent: boolean;
+  writerEndRequested: boolean;
+  stdoutClosed: boolean;
+  stderrClosed: boolean;
+  outputRelayFailed: boolean;
+  outputStates: { stdout: ManagerOutputState; stderr: ManagerOutputState };
+  pendingAnchorMessages: RecordValue[];
+  inputStopObserved: boolean;
+}
+
+function createManagerState(): ManagerState {
   const control = controlChannel(3);
   const stdout = writer(4, false);
   const stderr = writer(5, false);
   const input = reader(6);
-  const startupHardDeadlineNs = process.argv[3] || '';
-  const supervisorPID = Number(process.argv[4]);
-  const terminalTransportEnabled = process.argv[5] === '--terminal-transport';
-  const runtime = fileURLToPath(import.meta.url);
-  let anchor: ChildProcess | undefined;
-  let anchorControl: Duplex | undefined;
-  let target: ChildProcess | undefined;
-  let anchorPID: number | undefined;
-  let groupID: number | undefined;
-  let anchorReady = false;
-  let anchorClosed = false;
-  let targetSpawned = false;
-  let targetExecConfirmed = false;
-  let targetClosed = false;
-  let targetLaunchErrorSent = false;
-  let pendingExit: { code: number | null; signal: NodeJS.Signals | null } | undefined;
-  let pendingClose: { code: number | null; signal: NodeJS.Signals | null } | undefined;
-  let targetExecutionDeadlineNs = '';
-  let firstFailure: string | undefined;
-  let stopping = false;
-  let closing = false;
-  let targetOutputRelayed = false;
-  let targetOutputRelayHealthy = true;
-  let targetStdoutEnded = false;
-  let targetStdoutClosed = false;
-  let targetStderrEnded = false;
-  let targetStderrClosed = false;
-  let targetNoChildSent = false;
-  let writerEndRequested = false;
-  let stdoutClosed = false;
-  let stderrClosed = false;
-  let outputRelayFailed = false;
-  const outputStates = {
-    stdout: { bytes: 0, finished: false, acknowledged: false, descriptorClosed: false, streamClosed: false, finalAcknowledged: false },
-    stderr: { bytes: 0, finished: false, acknowledged: false, descriptorClosed: false, streamClosed: false, finalAcknowledged: false },
+  const newOutputState = (): ManagerOutputState => ({ bytes: 0, finished: false, acknowledged: false,
+    descriptorClosed: false, streamClosed: false, finalAcknowledged: false });
+  return {
+    control,
+    stdout,
+    stderr,
+    input,
+    inputObservation: observeInputPipe(input, (event, summary) => send(control, { type: 'manager-input-observation', event, summary })),
+    startupHardDeadlineNs: process.argv[3] || '',
+    supervisorPID: Number(process.argv[4]),
+    anchor: undefined,
+    anchorControl: undefined,
+    target: undefined,
+    anchorPID: undefined,
+    groupID: undefined,
+    anchorReady: false,
+    anchorClosed: false,
+    targetSpawned: false,
+    targetExecConfirmed: false,
+    targetClosed: false,
+    targetLaunchErrorSent: false,
+    pendingExit: undefined,
+    pendingClose: undefined,
+    targetExecutionDeadlineNs: '',
+    firstFailure: undefined,
+    stopping: false,
+    closing: false,
+    targetOutputRelayed: false,
+    targetOutputRelayHealthy: true,
+    targetStdoutEnded: false,
+    targetStdoutClosed: false,
+    targetStderrEnded: false,
+    targetStderrClosed: false,
+    targetNoChildSent: false,
+    writerEndRequested: false,
+    stdoutClosed: false,
+    stderrClosed: false,
+    outputRelayFailed: false,
+    outputStates: { stdout: newOutputState(), stderr: newOutputState() },
+    pendingAnchorMessages: [],
+    inputStopObserved: false,
   };
-  const pendingAnchorMessages: RecordValue[] = [];
+}
 
-  const sendSupervisor = (value: RecordValue) => send(control, value);
-  const inputObservation = observeInputPipe(input, (event, summary) => sendSupervisor({ type: 'manager-input-observation', event, summary }));
-  let inputStopObserved = false;
-  const observeInputStop = () => {
-    if (inputStopObserved) return;
-    inputStopObserved = true;
-    sendSupervisor({ type: 'manager-input-observation', event: 'stop', summary: inputObservation.snapshot() });
-  };
-  let terminalDescriptorsClosed = false;
-  const closeTerminalDescriptors = () => {
-    if (!terminalTransportEnabled || terminalDescriptorsClosed) return;
-    terminalDescriptorsClosed = true;
-    closeDescriptor(7);
-    closeDescriptor(8);
-  };
-  if (terminalTransportEnabled) {
-    try {
-      if (!fstatSync(7).isSocket() || !fstatSync(8).isSocket()) throw new Error('terminal transport descriptors are unavailable');
-    } catch {
-      sendSupervisor({ type: 'terminal-transport-unavailable', reason: 'descriptor-unavailable' });
-      closeTerminalDescriptors();
-      input.destroy();
-      stdout.destroy();
-      stderr.destroy();
-      closeDescriptor(4);
-      closeDescriptor(5);
-      closeDescriptor(6);
-      control.destroy();
-      process.exitCode = 1;
-      return;
-    }
+function managerSendSupervisor(state: ManagerState, value: RecordValue) {
+  send(state.control, value);
+}
+
+function managerObserveInputStop(state: ManagerState) {
+  if (state.inputStopObserved) return;
+  state.inputStopObserved = true;
+  managerSendSupervisor(state, { type: 'manager-input-observation', event: 'stop', summary: state.inputObservation.snapshot() });
+}
+
+function managerSendAnchor(state: ManagerState, value: RecordValue) {
+  if (!state.anchorControl) state.pendingAnchorMessages.push(value);
+  else send(state.anchorControl, value);
+}
+
+function managerCloseOutputDescriptor(state: ManagerState, stream: 'stdout' | 'stderr') {
+  if (state.outputStates[stream].descriptorClosed) return;
+  const destination = stream === 'stdout' ? state.stdout : state.stderr;
+  if (!destination.destroyed) destination.destroy();
+}
+
+function managerAbortOutputRelay(state: ManagerState, reason: string) {
+  if (state.outputRelayFailed) return;
+  state.outputRelayFailed = true;
+  state.targetOutputRelayHealthy = false;
+  state.firstFailure ||= reason;
+  state.target?.stdout?.unpipe(state.stdout);
+  state.target?.stderr?.unpipe(state.stderr);
+  state.target?.stdout?.resume();
+  state.target?.stderr?.resume();
+  managerCloseOutputDescriptor(state, 'stdout');
+  managerCloseOutputDescriptor(state, 'stderr');
+}
+
+function managerStop(state: ManagerState, reason: string, failure?: string, stream?: 'stdout' | 'stderr') {
+  if (failure) {
+    state.firstFailure ||= failure;
+    managerSendSupervisor(state, { type: 'failure', reason, stream, message: state.firstFailure });
   }
-  const sendAnchor = (value: RecordValue) => {
-    if (!anchorControl) pendingAnchorMessages.push(value);
-    else send(anchorControl, value);
-  };
-  const closeOutputDescriptor = (stream: 'stdout' | 'stderr') => {
-    if (outputStates[stream].descriptorClosed) return;
-    const destination = stream === 'stdout' ? stdout : stderr;
-    if (!destination.destroyed) destination.destroy();
-  };
-  const abortOutputRelay = (reason: string) => {
-    if (outputRelayFailed) return;
-    outputRelayFailed = true;
-    targetOutputRelayHealthy = false;
-    firstFailure ||= reason;
-    target?.stdout?.unpipe(stdout);
-    target?.stderr?.unpipe(stderr);
-    target?.stdout?.resume();
-    target?.stderr?.resume();
-    closeOutputDescriptor('stdout');
-    closeOutputDescriptor('stderr');
-  };
-  const stop = (reason: string, failure?: string, stream?: 'stdout' | 'stderr') => {
-    if (failure) {
-      firstFailure ||= failure;
-      sendSupervisor({ type: 'failure', reason, stream, message: firstFailure });
-    }
-    stopping = true;
-    observeInputStop();
-    if (!targetSpawned) input.resume();
-    sendAnchor({ type: 'stop', reason });
-  };
-  const handleManagerSignal = () => stop('anchor-manager-signal');
-  process.on('SIGTERM', handleManagerSignal);
-  process.on('SIGHUP', handleManagerSignal);
-  process.on('SIGINT', handleManagerSignal);
-  const outputRetired = (stream: 'stdout' | 'stderr') => {
-    const state = outputStates[stream];
-    return state.streamClosed && state.descriptorClosed && (outputRelayFailed || (state.finished && state.finalAcknowledged));
-  };
-  const closeIfRetired = () => {
-    if (closing || !anchorClosed || (targetSpawned && !targetClosed)) return;
-    if (!targetOutputRelayed && !writerEndRequested && !outputRelayFailed) {
-      writerEndRequested = true;
-      stdout.end();
-      stderr.end();
-    }
-    if ((!outputStates.stdout.finished && !stdoutClosed) || (!outputStates.stderr.finished && !stderrClosed)) return;
-    if (targetOutputRelayed && (!targetStdoutEnded || !targetStdoutClosed || !targetStderrEnded || !targetStderrClosed)) return;
-    if (!outputRetired('stdout') || !outputRetired('stderr')) return;
-    closing = true;
-    sendSupervisor({ type: 'manager-input-observation', event: 'teardown', summary: inputObservation.snapshot() });
-    sendSupervisor({ type: 'manager-teardown-started', anchorClosed, targetSpawned, targetClosed });
-    closeTerminalDescriptors();
-    input.destroy();
-    anchorControl?.destroy();
-    control.destroy();
-  };
-  const outputFailure = (stream: 'stdout' | 'stderr', error: unknown) => {
-    if (outputRelayFailed) return;
-    const message = error instanceof Error ? error.message : `owned manager ${stream} output failed`;
-    abortOutputRelay(message);
-    stop('manager-output-failed', message, stream);
-    closeIfRetired();
-  };
-  const outputFinished = (stream: 'stdout' | 'stderr') => {
-    const state = outputStates[stream];
-    state.finished = true;
-    if (!outputRelayFailed) sendSupervisor({ type: 'manager-output-finished', stream, bytes: state.bytes });
-    closeIfRetired();
-  };
-  stdout.once('finish', () => outputFinished('stdout'));
-  stderr.once('finish', () => outputFinished('stderr'));
-  stdout.once('error', error => outputFailure('stdout', error));
-  stderr.once('error', error => outputFailure('stderr', error));
-  stdout.once('close', () => {
-    stdoutClosed = true;
-    outputStates.stdout.streamClosed = true;
-    outputStates.stdout.descriptorClosed = true;
-    if ((!outputStates.stdout.finished || !outputStates.stdout.acknowledged) && !outputRelayFailed) {
-      outputFailure('stdout', new Error('owned manager stdout closed before its byte acknowledgement'));
-    }
-    closeIfRetired();
-  });
-  stderr.once('close', () => {
-    stderrClosed = true;
-    outputStates.stderr.streamClosed = true;
-    outputStates.stderr.descriptorClosed = true;
-    if ((!outputStates.stderr.finished || !outputStates.stderr.acknowledged) && !outputRelayFailed) {
-      outputFailure('stderr', new Error('owned manager stderr closed before its byte acknowledgement'));
-    }
-    closeIfRetired();
-  });
-  const sendTargetLaunchError = (message: string, value?: { code: number | null; signal: NodeJS.Signals | null }) => {
-    firstFailure ||= message;
-    if (targetLaunchErrorSent) return;
-    targetLaunchErrorSent = true;
-    const observedExit = value ?? pendingExit ?? (target && (target.exitCode !== null || target.signalCode !== null)
-      ? { code: target.exitCode, signal: target.signalCode } : undefined);
-    sendSupervisor({ type: 'target-launch-error', message,
-      code: observedExit?.code ?? null, signal: observedExit?.signal ?? null });
-  };
-  const deliverTargetExit = (value: { code: number | null; signal: NodeJS.Signals | null }) => {
-    if (!targetExecConfirmed) return;
-    sendSupervisor({ type: 'target-exit', code: value.code, signal: value.signal });
-  };
-  const deliverTargetClose = (value: { code: number | null; signal: NodeJS.Signals | null }) => {
-    targetClosed = true;
-    if (targetExecConfirmed) sendSupervisor({ type: 'target-close', code: value.code, signal: value.signal });
-    else sendSupervisor({ type: 'target-unconfirmed-close', code: value.code, signal: value.signal,
-      ...(targetLaunchErrorSent && firstFailure ? { launchError: firstFailure } : {}) });
-    closeIfRetired();
-  };
-  const confirmTargetSpawn = (child: ChildProcess) => {
-    if (targetExecConfirmed || child.pid === undefined) return;
-    targetExecConfirmed = true;
-    sendSupervisor({ type: 'target-started', targetPID: child.pid, spawnParentPID: process.pid,
-      groupID, anchorPID, ...(terminalTransportEnabled ? { callback: 'spawn' } : {}) });
-    if (pendingExit) deliverTargetExit(pendingExit);
-    if (pendingClose) deliverTargetClose(pendingClose);
-  };
-  const sendNoChild = () => {
-    if (target || targetNoChildSent) return;
-    targetNoChildSent = true;
-    sendSupervisor({ type: 'target-no-child', launchRequestReceived: true, spawnParentPID: process.pid, groupID, anchorPID });
-  };
-  const relayTargetOutput = (source: NodeJS.ReadableStream, destination: ReturnType<typeof writer>, stream: 'stdout' | 'stderr') => {
-    let sourceEnded = false;
-    const failRelay = (reason: string, message: string) => {
-      if (!targetOutputRelayHealthy) return;
-      targetOutputRelayHealthy = false;
-      source.unpipe(destination);
-      source.resume();
-      abortOutputRelay(message);
-      stop(reason, message, stream);
-    };
-    source.on('data', chunk => {
-      const bytes = Buffer.isBuffer(chunk) ? chunk.byteLength : Buffer.byteLength(String(chunk));
-      const state = outputStates[stream];
-      if (!Number.isSafeInteger(state.bytes + bytes)) {
-        failRelay('target-output-failed', `${stream} relay byte count exceeded its safe bound`);
-        return;
-      }
-      state.bytes += bytes;
-    });
-    source.once('end', () => {
-      sourceEnded = true;
-      if (stream === 'stdout') targetStdoutEnded = true;
-      else targetStderrEnded = true;
-      sendSupervisor({ type: 'target-source-end', stream });
-      closeIfRetired();
-    });
-    source.once('close', () => {
-      if (stream === 'stdout') targetStdoutClosed = true;
-      else targetStderrClosed = true;
-      sendSupervisor({ type: 'target-source-close', stream, naturalEnd: sourceEnded });
-      closeIfRetired();
-    });
-    destination.once('finish', () => {
-      if (!sourceEnded) failRelay('target-output-failed', `${stream} relay finished before target source EOF`);
-    });
-    destination.once('error', error => {
-      failRelay('target-output-failed', error instanceof Error ? error.message : `${stream} relay failed`);
-    });
-    destination.once('close', () => {
-      if (!destination.writableFinished || !sourceEnded) {
-        failRelay('target-output-failed', `${stream} relay closed before target source EOF and writer finish`);
-      }
-    });
-    source.once('error', error => failRelay('target-stream-error', error instanceof Error ? error.message : `${stream} stream failed`));
-    source.pipe(destination);
-  };
-  const launchTarget = async (message: RecordValue) => {
-    const terminalTargetSupplied = Object.hasOwn(message, 'terminalTarget');
-    const terminalTarget = terminalTargetSupplied ? terminalTargetConfig(message.terminalTarget) : undefined;
-    if (targetSpawned || !anchorReady || groupID === undefined || typeof message.binary !== 'string'
-      || !Array.isArray(message.args) || message.args.some(value => typeof value !== 'string')
-      || typeof message.executionDeadlineNs !== 'string' || !/^\d+$/u.test(message.executionDeadlineNs)
-      || (terminalTargetSupplied && (!terminalTransportEnabled || !terminalTarget))) {
-      sendTargetLaunchError('invalid target launch request or terminal target configuration');
-      sendNoChild();
-      stop('invalid-target-launch', 'invalid target launch request from supervisor');
-      return;
-    }
-    targetExecutionDeadlineNs = message.executionDeadlineNs;
-    if (stopping || nowNs() >= BigInt(targetExecutionDeadlineNs)) {
-      sendNoChild();
-      stop('timeout');
-      return;
-    }
-    const binary = message.binary;
-    const args = message.args as string[];
-    let managerGroupRestoreFailed: boolean;
-    try {
-      const native = await loadNativeRuntime();
-      if (stopping || nowNs() >= BigInt(targetExecutionDeadlineNs)) {
-        sendNoChild();
-        stop('timeout');
-        return;
-      }
-      if (native.symbols.getpgid(0) !== supervisorPID || native.symbols.getsid(0) !== supervisorPID) {
-        throw new Error('anchor manager process group or session changed before target launch');
-      }
-      const spawnTargetInGroup = () => {
-        if (native.symbols.setpgid(0, groupID!) !== 0) throw new Error('anchor manager could not enter the target process group');
-        let spawnFailure: unknown;
-        try {
-          if (terminalTargetSupplied && !terminalTarget) throw new Error('invalid terminal target configuration');
-          target = spawn(binary, args, {
-            detached: false,
-            stdio: terminalTransportEnabled ? ['pipe', 'pipe', 'pipe', 7, 8] : ['pipe', 'pipe', 'pipe'],
-            cwd: terminalTarget ? terminalTarget.cwd : process.cwd(),
-            env: terminalTarget ? terminalTarget.env : process.env,
-          });
-        } catch (error) {
-          spawnFailure = error;
-        } finally {
-          closeTerminalDescriptors();
-        }
-        const restoreFailed = native.symbols.setpgid(0, supervisorPID) !== 0;
-        if (spawnFailure) throw spawnFailure;
-        return restoreFailed;
-      };
-      managerGroupRestoreFailed = spawnTargetInGroup();
-    } catch (error) {
-      sendTargetLaunchError(error instanceof Error ? error.message : 'target process could not be spawned');
-      sendNoChild();
-      stop('target-launch-error');
-      closeIfRetired();
-      return;
-    }
-    const targetProcess = target;
-    if (!targetProcess) {
-      sendTargetLaunchError('target process was not created');
-      sendNoChild();
-      stop('target-launch-error');
-      closeIfRetired();
-      return;
-    }
-    targetSpawned = true;
-    const targetPID = targetProcess.pid;
-    if (targetPID !== undefined) {
-      sendSupervisor({ type: 'target-process-started', processID: targetPID, spawnParentPID: process.pid, groupID, anchorPID });
-      targetOutputRelayed = true;
-    } else {
-      sendSupervisor({ type: 'target-process-unconfirmed', processID: null, spawnParentPID: process.pid, groupID, anchorPID });
-    }
-    if (targetPID !== undefined) {
-      relayTargetOutput(targetProcess.stdout!, stdout, 'stdout');
-      relayTargetOutput(targetProcess.stderr!, stderr, 'stderr');
-      const targetInput = targetProcess.stdin!;
-      targetInput.on('error', error => {
-        const failure = error instanceof Error ? error.message : 'owned target input pipe failed';
-        input.unpipe(targetInput);
-        input.resume();
-        stop((error as NodeJS.ErrnoException).code === 'EPIPE' ? 'target-input-closed' : 'target-input-failed', failure);
-      });
-      input.on('error', error => stop('caller-input-failed', error.message));
-      input.pipe(targetInput);
-      inputObservation.connected(targetInput);
-    } else {
-      targetProcess.stdout?.resume();
-      targetProcess.stderr?.resume();
-    }
-    targetProcess.once('spawn', () => confirmTargetSpawn(targetProcess));
-    targetProcess.once('error', error => {
-      if (!targetExecConfirmed) {
-        sendTargetLaunchError(error.message);
-        stop('target-launch-error', error.message);
-      } else stop('target-process-error', error.message);
-    });
-    targetProcess.once('exit', (code, signal) => {
-      const value = { code, signal };
-      if (targetExecConfirmed) deliverTargetExit(value);
-      else pendingExit = value;
-    });
-    targetProcess.once('close', (code, signal) => {
-      pendingClose = { code, signal };
-      if (targetPID !== undefined) input.unpipe(targetProcess.stdin!);
-      if (!targetExecConfirmed && !targetLaunchErrorSent) {
-        const failure = 'target process closed before successful spawn was confirmed';
-        sendTargetLaunchError(failure, pendingClose);
-        stop('target-spawn-unproved', failure);
-      }
-      if (targetClosed) return;
-      deliverTargetClose(pendingClose);
-    });
-    if (managerGroupRestoreFailed) {
-      stop('anchor-manager-group-restore-failed', 'anchor manager could not leave the target process group');
-    }
-    if (targetPID === undefined) stop('target-launch-error');
-  };
+  state.stopping = true;
+  managerObserveInputStop(state);
+  if (!state.targetSpawned) state.input.resume();
+  managerSendAnchor(state, { type: 'stop', reason });
+}
 
-  control.on('error', () => {
-    if (!closing) abortOutputRelay('supervisor control channel failed');
-    stop('supervisor-control-failed');
-    closeIfRetired();
-  });
-  control.on('end', () => {
-    if (closing) return;
-    abortOutputRelay('supervisor control channel was lost');
-    if (anchorClosed && (!targetSpawned || targetClosed)) closeIfRetired();
-    else stop('supervisor-control-lost');
-  });
-  parseLines(control, message => {
-    if (message.type === 'manager-output-abort') {
-      if (typeof message.reason !== 'string') throw new Error('invalid supervisor output-relay abort request');
-      abortOutputRelay(message.reason);
-      stop('supervisor-output-relay-aborted', message.reason);
-      closeIfRetired();
-      return;
-    }
-    if (message.type === 'manager-output-received' || message.type === 'manager-output-retired') {
-      const stream = message.stream;
-      if (stream !== 'stdout' && stream !== 'stderr') throw new Error('output-relay acknowledgement named an unknown stream');
-      const state = outputStates[stream];
-      if (!Number.isSafeInteger(message.bytes) || Number(message.bytes) < 0 || Number(message.bytes) !== state.bytes) {
-        throw new Error(`output-relay acknowledgement byte count did not match ${stream}`);
-      }
-      if (message.type === 'manager-output-received') {
-        if (!state.finished || state.acknowledged || state.descriptorClosed || outputRelayFailed) {
-          throw new Error(`output-relay byte acknowledgement was duplicate or premature for ${stream}`);
-        }
-        state.acknowledged = true;
-        closeOutputDescriptor(stream);
-        return;
-      }
-      if (!state.acknowledged || !(stream === 'stdout' ? stdout : stderr).destroyed || state.finalAcknowledged
-        || message.naturalEnd !== true || message.closeObserved !== true) {
-        throw new Error(`output-relay final acknowledgement was duplicate or unproved for ${stream}`);
-      }
-      state.finalAcknowledged = true;
-      closeIfRetired();
-      return;
-    }
-    if (message.type === 'configure-anchor' || message.type === 'stop' || message.type === 'kill-group') {
-      sendAnchor(message);
-      return;
-    }
-    if (message.type === 'launch-target') {
-      launchTarget(message);
-      return;
-    }
-    if (message.type === 'release') {
-      if (anchorClosed && (!targetSpawned || targetClosed)) closeIfRetired();
-      return;
-    }
-    stop('invalid-manager-command', 'invalid anchor manager request');
-  }, error => stop('manager-control-handler-failed', error.message));
+function managerOutputRetired(state: ManagerState, stream: 'stdout' | 'stderr') {
+  const output = state.outputStates[stream];
+  return output.streamClosed && output.descriptorClosed && (state.outputRelayFailed || (output.finished && output.finalAcknowledged));
+}
 
+function managerCloseIfRetired(state: ManagerState) {
+  if (state.closing || !state.anchorClosed || (state.targetSpawned && !state.targetClosed)) return;
+  if (!state.targetOutputRelayed && !state.writerEndRequested && !state.outputRelayFailed) {
+    state.writerEndRequested = true;
+    state.stdout.end();
+    state.stderr.end();
+  }
+  if ((!state.outputStates.stdout.finished && !state.stdoutClosed) || (!state.outputStates.stderr.finished && !state.stderrClosed)) return;
+  if (state.targetOutputRelayed && (!state.targetStdoutEnded || !state.targetStdoutClosed || !state.targetStderrEnded || !state.targetStderrClosed)) return;
+  if (!managerOutputRetired(state, 'stdout') || !managerOutputRetired(state, 'stderr')) return;
+  state.closing = true;
+  managerSendSupervisor(state, { type: 'manager-input-observation', event: 'teardown', summary: state.inputObservation.snapshot() });
+  managerSendSupervisor(state, { type: 'manager-teardown-started', anchorClosed: state.anchorClosed, targetSpawned: state.targetSpawned, targetClosed: state.targetClosed });
+  state.input.destroy();
+  state.anchorControl?.destroy();
+  state.control.destroy();
+}
+
+function managerOutputFailure(state: ManagerState, stream: 'stdout' | 'stderr', error: unknown) {
+  if (state.outputRelayFailed) return;
+  const message = error instanceof Error ? error.message : `owned manager ${stream} output failed`;
+  managerAbortOutputRelay(state, message);
+  managerStop(state, 'manager-output-failed', message, stream);
+  managerCloseIfRetired(state);
+}
+
+function managerOutputFinished(state: ManagerState, stream: 'stdout' | 'stderr') {
+  const output = state.outputStates[stream];
+  output.finished = true;
+  if (!state.outputRelayFailed) managerSendSupervisor(state, { type: 'manager-output-finished', stream, bytes: output.bytes });
+  managerCloseIfRetired(state);
+}
+
+function managerSendTargetLaunchError(state: ManagerState, message: string, value?: ExitValue) {
+  state.firstFailure ||= message;
+  if (state.targetLaunchErrorSent) return;
+  state.targetLaunchErrorSent = true;
+  const observedExit = value ?? state.pendingExit ?? (state.target && (state.target.exitCode !== null || state.target.signalCode !== null)
+    ? { code: state.target.exitCode, signal: state.target.signalCode } : undefined);
+  managerSendSupervisor(state, { type: 'target-launch-error', message,
+    code: observedExit?.code ?? null, signal: observedExit?.signal ?? null });
+}
+
+function managerDeliverTargetExit(state: ManagerState, value: ExitValue) {
+  if (!state.targetExecConfirmed) return;
+  managerSendSupervisor(state, { type: 'target-exit', code: value.code, signal: value.signal });
+}
+
+function managerDeliverTargetClose(state: ManagerState, value: ExitValue) {
+  state.targetClosed = true;
+  if (state.targetExecConfirmed) managerSendSupervisor(state, { type: 'target-close', code: value.code, signal: value.signal });
+  else managerSendSupervisor(state, { type: 'target-unconfirmed-close', code: value.code, signal: value.signal,
+    ...(state.targetLaunchErrorSent && state.firstFailure ? { launchError: state.firstFailure } : {}) });
+  managerCloseIfRetired(state);
+}
+
+function managerConfirmTargetSpawn(state: ManagerState, child: ChildProcess) {
+  if (state.targetExecConfirmed || child.pid === undefined) return;
+  state.targetExecConfirmed = true;
+  managerSendSupervisor(state, { type: 'target-started', targetPID: child.pid, spawnParentPID: process.pid,
+    groupID: state.groupID, anchorPID: state.anchorPID });
+  if (state.pendingExit) managerDeliverTargetExit(state, state.pendingExit);
+  if (state.pendingClose) managerDeliverTargetClose(state, state.pendingClose);
+}
+
+function managerSendNoChild(state: ManagerState) {
+  if (state.target || state.targetNoChildSent) return;
+  state.targetNoChildSent = true;
+  managerSendSupervisor(state, { type: 'target-no-child', launchRequestReceived: true, spawnParentPID: process.pid, groupID: state.groupID, anchorPID: state.anchorPID });
+}
+
+function managerRelayTargetOutput(state: ManagerState, source: NodeJS.ReadableStream, destination: ReturnType<typeof writer>, stream: 'stdout' | 'stderr') {
+  let sourceEnded = false;
+  const failRelay = (reason: string, message: string) => {
+    if (!state.targetOutputRelayHealthy) return;
+    state.targetOutputRelayHealthy = false;
+    source.unpipe(destination);
+    source.resume();
+    managerAbortOutputRelay(state, message);
+    managerStop(state, reason, message, stream);
+  };
+  source.on('data', chunk => {
+    const bytes = Buffer.isBuffer(chunk) ? chunk.byteLength : Buffer.byteLength(String(chunk));
+    const output = state.outputStates[stream];
+    if (!Number.isSafeInteger(output.bytes + bytes)) {
+      failRelay('target-output-failed', `${stream} relay byte count exceeded its safe bound`);
+      return;
+    }
+    output.bytes += bytes;
+  });
+  source.once('end', () => {
+    sourceEnded = true;
+    if (stream === 'stdout') state.targetStdoutEnded = true;
+    else state.targetStderrEnded = true;
+    managerSendSupervisor(state, { type: 'target-source-end', stream });
+    managerCloseIfRetired(state);
+  });
+  source.once('close', () => {
+    if (stream === 'stdout') state.targetStdoutClosed = true;
+    else state.targetStderrClosed = true;
+    managerSendSupervisor(state, { type: 'target-source-close', stream, naturalEnd: sourceEnded });
+    managerCloseIfRetired(state);
+  });
+  destination.once('finish', () => {
+    if (!sourceEnded) failRelay('target-output-failed', `${stream} relay finished before target source EOF`);
+  });
+  destination.once('error', error => {
+    failRelay('target-output-failed', error instanceof Error ? error.message : `${stream} relay failed`);
+  });
+  destination.once('close', () => {
+    if (!destination.writableFinished || !sourceEnded) {
+      failRelay('target-output-failed', `${stream} relay closed before target source EOF and writer finish`);
+    }
+  });
+  source.once('error', error => failRelay('target-stream-error', error instanceof Error ? error.message : `${stream} stream failed`));
+  source.pipe(destination);
+}
+
+function managerWatchOutputs(state: ManagerState) {
+  state.stdout.once('finish', () => managerOutputFinished(state, 'stdout'));
+  state.stderr.once('finish', () => managerOutputFinished(state, 'stderr'));
+  state.stdout.once('error', error => managerOutputFailure(state, 'stdout', error));
+  state.stderr.once('error', error => managerOutputFailure(state, 'stderr', error));
+  state.stdout.once('close', () => {
+    state.stdoutClosed = true;
+    state.outputStates.stdout.streamClosed = true;
+    state.outputStates.stdout.descriptorClosed = true;
+    if ((!state.outputStates.stdout.finished || !state.outputStates.stdout.acknowledged) && !state.outputRelayFailed) {
+      managerOutputFailure(state, 'stdout', new Error('owned manager stdout closed before its byte acknowledgement'));
+    }
+    managerCloseIfRetired(state);
+  });
+  state.stderr.once('close', () => {
+    state.stderrClosed = true;
+    state.outputStates.stderr.streamClosed = true;
+    state.outputStates.stderr.descriptorClosed = true;
+    if ((!state.outputStates.stderr.finished || !state.outputStates.stderr.acknowledged) && !state.outputRelayFailed) {
+      managerOutputFailure(state, 'stderr', new Error('owned manager stderr closed before its byte acknowledgement'));
+    }
+    managerCloseIfRetired(state);
+  });
+}
+
+function managerSpawnInGroup(state: ManagerState, native: NativeRuntime, binary: string, args: string[]): boolean {
+  if (native.symbols.setpgid(0, state.groupID!) !== 0) throw new Error('anchor manager could not enter the target process group');
+  let spawnFailure: unknown;
   try {
-    anchor = spawn('bun', ['--no-env-file', '--experimental-strip-types', runtime, '--anchor', startupHardDeadlineNs,
-      String(process.pid), String(supervisorPID)], {
+    state.target = spawn(binary, args, {
+      detached: false,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      cwd: process.cwd(),
+      env: process.env,
+    });
+  } catch (error) {
+    spawnFailure = error;
+  }
+  const restoreFailed = native.symbols.setpgid(0, state.supervisorPID) !== 0;
+  if (spawnFailure) throw spawnFailure;
+  return restoreFailed;
+}
+
+function managerReportTargetLaunchFailure(state: ManagerState, error: unknown) {
+  managerSendTargetLaunchError(state, error instanceof Error ? error.message : 'target process could not be spawned');
+  managerSendNoChild(state);
+  managerStop(state, 'target-launch-error');
+  managerCloseIfRetired(state);
+}
+
+// Undefined means the launch failed and was already reported; otherwise whether leaving the target process group failed.
+function managerSpawnTarget(state: ManagerState, native: NativeRuntime, binary: string, args: string[]): boolean | undefined {
+  try {
+    if (state.stopping || nowNs() >= BigInt(state.targetExecutionDeadlineNs)) {
+      managerSendNoChild(state);
+      managerStop(state, 'timeout');
+      return undefined;
+    }
+    if (native.symbols.getpgid(0) !== state.supervisorPID || native.symbols.getsid(0) !== state.supervisorPID) {
+      throw new Error('anchor manager process group or session changed before target launch');
+    }
+    return managerSpawnInGroup(state, native, binary, args);
+  } catch (error) {
+    managerReportTargetLaunchFailure(state, error);
+    return undefined;
+  }
+}
+
+function managerConnectTargetStreams(state: ManagerState, targetProcess: ChildProcess) {
+  managerRelayTargetOutput(state, targetProcess.stdout!, state.stdout, 'stdout');
+  managerRelayTargetOutput(state, targetProcess.stderr!, state.stderr, 'stderr');
+  const targetInput = targetProcess.stdin!;
+  targetInput.on('error', error => {
+    const failure = error instanceof Error ? error.message : 'owned target input pipe failed';
+    state.input.unpipe(targetInput);
+    state.input.resume();
+    managerStop(state, (error as NodeJS.ErrnoException).code === 'EPIPE' ? 'target-input-closed' : 'target-input-failed', failure);
+  });
+  state.input.on('error', error => managerStop(state, 'caller-input-failed', error.message));
+  state.input.pipe(targetInput);
+  state.inputObservation.connected(targetInput);
+}
+
+function managerWatchTarget(state: ManagerState, targetProcess: ChildProcess, targetPID: number | undefined) {
+  targetProcess.once('spawn', () => managerConfirmTargetSpawn(state, targetProcess));
+  targetProcess.once('error', error => {
+    if (!state.targetExecConfirmed) {
+      managerSendTargetLaunchError(state, error.message);
+      managerStop(state, 'target-launch-error', error.message);
+    } else managerStop(state, 'target-process-error', error.message);
+  });
+  targetProcess.once('exit', (code, signal) => {
+    const value = { code, signal };
+    if (state.targetExecConfirmed) managerDeliverTargetExit(state, value);
+    else state.pendingExit = value;
+  });
+  targetProcess.once('close', (code, signal) => {
+    state.pendingClose = { code, signal };
+    if (targetPID !== undefined) state.input.unpipe(targetProcess.stdin!);
+    if (!state.targetExecConfirmed && !state.targetLaunchErrorSent) {
+      const failure = 'target process closed before successful spawn was confirmed';
+      managerSendTargetLaunchError(state, failure, state.pendingClose);
+      managerStop(state, 'target-spawn-unproved', failure);
+    }
+    if (state.targetClosed) return;
+    managerDeliverTargetClose(state, state.pendingClose);
+  });
+}
+
+async function managerLaunchTarget(state: ManagerState, message: RecordValue) {
+  if (state.targetSpawned || !state.anchorReady || state.groupID === undefined || typeof message.binary !== 'string'
+    || !Array.isArray(message.args) || message.args.some(value => typeof value !== 'string')
+    || typeof message.executionDeadlineNs !== 'string' || !/^\d+$/u.test(message.executionDeadlineNs)) {
+    managerSendTargetLaunchError(state, 'invalid target launch request');
+    managerSendNoChild(state);
+    managerStop(state, 'invalid-target-launch', 'invalid target launch request from supervisor');
+    return;
+  }
+  state.targetExecutionDeadlineNs = message.executionDeadlineNs;
+  if (state.stopping || nowNs() >= BigInt(state.targetExecutionDeadlineNs)) {
+    managerSendNoChild(state);
+    managerStop(state, 'timeout');
+    return;
+  }
+  let native: NativeRuntime;
+  try {
+    native = await loadNativeRuntime();
+  } catch (error) {
+    managerReportTargetLaunchFailure(state, error);
+    return;
+  }
+  // Spawn and attach the target's listeners in the same tick so its spawn event cannot be missed.
+  const managerGroupRestoreFailed = managerSpawnTarget(state, native, message.binary, message.args as string[]);
+  if (managerGroupRestoreFailed === undefined) return;
+  const targetProcess = state.target;
+  if (!targetProcess) {
+    managerSendTargetLaunchError(state, 'target process was not created');
+    managerSendNoChild(state);
+    managerStop(state, 'target-launch-error');
+    managerCloseIfRetired(state);
+    return;
+  }
+  state.targetSpawned = true;
+  const targetPID = targetProcess.pid;
+  if (targetPID !== undefined) {
+    managerSendSupervisor(state, { type: 'target-process-started', processID: targetPID, spawnParentPID: process.pid, groupID: state.groupID, anchorPID: state.anchorPID });
+    state.targetOutputRelayed = true;
+    managerConnectTargetStreams(state, targetProcess);
+  } else {
+    managerSendSupervisor(state, { type: 'target-process-unconfirmed', processID: null, spawnParentPID: process.pid, groupID: state.groupID, anchorPID: state.anchorPID });
+    targetProcess.stdout?.resume();
+    targetProcess.stderr?.resume();
+  }
+  managerWatchTarget(state, targetProcess, targetPID);
+  if (managerGroupRestoreFailed) {
+    managerStop(state, 'anchor-manager-group-restore-failed', 'anchor manager could not leave the target process group');
+  }
+  if (targetPID === undefined) managerStop(state, 'target-launch-error');
+}
+
+function managerReceiveOutputAcknowledgement(state: ManagerState, message: RecordValue) {
+  const stream = message.stream;
+  if (stream !== 'stdout' && stream !== 'stderr') throw new Error('output-relay acknowledgement named an unknown stream');
+  const output = state.outputStates[stream];
+  if (!Number.isSafeInteger(message.bytes) || Number(message.bytes) < 0 || Number(message.bytes) !== output.bytes) {
+    throw new Error(`output-relay acknowledgement byte count did not match ${stream}`);
+  }
+  if (message.type === 'manager-output-received') {
+    if (!output.finished || output.acknowledged || output.descriptorClosed || state.outputRelayFailed) {
+      throw new Error(`output-relay byte acknowledgement was duplicate or premature for ${stream}`);
+    }
+    output.acknowledged = true;
+    managerCloseOutputDescriptor(state, stream);
+    return;
+  }
+  if (!output.acknowledged || !(stream === 'stdout' ? state.stdout : state.stderr).destroyed || output.finalAcknowledged
+    || message.naturalEnd !== true || message.closeObserved !== true) {
+    throw new Error(`output-relay final acknowledgement was duplicate or unproved for ${stream}`);
+  }
+  output.finalAcknowledged = true;
+  managerCloseIfRetired(state);
+}
+
+function managerHandleSupervisorMessage(state: ManagerState, message: RecordValue) {
+  if (message.type === 'manager-output-abort') {
+    if (typeof message.reason !== 'string') throw new Error('invalid supervisor output-relay abort request');
+    managerAbortOutputRelay(state, message.reason);
+    managerStop(state, 'supervisor-output-relay-aborted', message.reason);
+    managerCloseIfRetired(state);
+    return;
+  }
+  if (message.type === 'manager-output-received' || message.type === 'manager-output-retired') {
+    managerReceiveOutputAcknowledgement(state, message);
+    return;
+  }
+  if (message.type === 'configure-anchor' || message.type === 'stop' || message.type === 'kill-group') {
+    managerSendAnchor(state, message);
+    return;
+  }
+  if (message.type === 'launch-target') {
+    void managerLaunchTarget(state, message);
+    return;
+  }
+  if (message.type === 'release') {
+    if (state.anchorClosed && (!state.targetSpawned || state.targetClosed)) managerCloseIfRetired(state);
+    return;
+  }
+  managerStop(state, 'invalid-manager-command', 'invalid anchor manager request');
+}
+
+function managerWatchSupervisor(state: ManagerState) {
+  const onSignal = () => managerStop(state, 'anchor-manager-signal');
+  process.on('SIGTERM', onSignal);
+  process.on('SIGHUP', onSignal);
+  process.on('SIGINT', onSignal);
+  managerWatchOutputs(state);
+  state.control.on('error', () => {
+    if (!state.closing) managerAbortOutputRelay(state, 'supervisor control channel failed');
+    managerStop(state, 'supervisor-control-failed');
+    managerCloseIfRetired(state);
+  });
+  state.control.on('end', () => {
+    if (state.closing) return;
+    managerAbortOutputRelay(state, 'supervisor control channel was lost');
+    if (state.anchorClosed && (!state.targetSpawned || state.targetClosed)) managerCloseIfRetired(state);
+    else managerStop(state, 'supervisor-control-lost');
+  });
+  parseLines(state.control, message => managerHandleSupervisorMessage(state, message),
+    error => managerStop(state, 'manager-control-handler-failed', error.message));
+}
+
+function managerSpawnAnchor(state: ManagerState): ChildProcess | undefined {
+  try {
+    state.anchor = spawn('bun', ['--no-env-file', '--experimental-strip-types', fileURLToPath(import.meta.url), '--anchor',
+      state.startupHardDeadlineNs, String(process.pid), String(state.supervisorPID)], {
       detached: false,
       stdio: ['ignore', 'ignore', 'ignore', 'pipe'], cwd: process.cwd(), env: process.env,
     });
   } catch (error) {
-    sendSupervisor({ type: 'anchor-bootstrap-error', message: error instanceof Error ? error.message : 'anchor could not be launched' });
-    anchorClosed = true;
-    closeIfRetired();
-    return;
+    managerSendSupervisor(state, { type: 'anchor-bootstrap-error', message: error instanceof Error ? error.message : 'anchor could not be launched' });
+    state.anchorClosed = true;
+    managerCloseIfRetired(state);
+    return undefined;
   }
-  if (anchor.pid === undefined) {
-    sendSupervisor({ type: 'anchor-bootstrap-error', message: 'anchor did not receive a process ID' });
-    anchorClosed = true;
-    closeIfRetired();
-    return;
+  if (state.anchor.pid === undefined) {
+    managerSendSupervisor(state, { type: 'anchor-bootstrap-error', message: 'anchor did not receive a process ID' });
+    state.anchorClosed = true;
+    managerCloseIfRetired(state);
+    return undefined;
   }
-  const childControl = controlStream(anchor);
-  anchorControl = childControl;
-  sendSupervisor({ type: 'anchor-process-started', processID: anchor.pid, spawnParentPID: process.pid,
-    sessionID: supervisorPID, startupDeadlineNs: startupHardDeadlineNs });
-  for (const message of pendingAnchorMessages.splice(0)) send(childControl, message);
-  childControl.on('error', error => stop('anchor-control-failed', error.message));
-  parseLines(childControl, message => {
-    if (message.type === 'anchor-stopping') {
-      stopping = true;
-      observeInputStop();
-      if (!targetSpawned) input.resume();
-      sendSupervisor(message);
-      return;
-    }
-    if (message.type === 'anchor-native-ready') {
-      anchorPID = Number(message.anchorPID);
-      groupID = Number(message.groupID);
-    }
-    if (message.type === 'anchor-ready') anchorReady = true;
-    sendSupervisor(message);
-  }, error => stop('anchor-control-handler-failed', error.message));
-  anchor.once('error', error => {
-    sendSupervisor({ type: 'anchor-bootstrap-error', message: error.message });
-    stop('anchor-launch-error', error.message);
-  });
-  anchor.once('exit', (code, signal) => sendSupervisor({ type: 'anchor-exit', code, signal }));
-  anchor.once('close', (code, signal) => {
-    anchorClosed = true;
-    anchorControl?.destroy();
-    anchorControl = undefined;
-    sendSupervisor({ type: 'anchor-close', code, signal });
-    closeIfRetired();
-  });
-  input.on('error', error => stop('caller-input-failed', error.message));
+  return state.anchor;
 }
 
-function runSupervisor(): void {
-  const startupExecutionDeadlineNs = process.argv[3] || '';
-  const startupHardDeadlineNs = process.argv[4] || '';
+function managerHandleAnchorMessage(state: ManagerState, message: RecordValue) {
+  if (message.type === 'anchor-stopping') {
+    state.stopping = true;
+    managerObserveInputStop(state);
+    if (!state.targetSpawned) state.input.resume();
+    managerSendSupervisor(state, message);
+    return;
+  }
+  if (message.type === 'anchor-native-ready') {
+    state.anchorPID = Number(message.anchorPID);
+    state.groupID = Number(message.groupID);
+  }
+  if (message.type === 'anchor-ready') state.anchorReady = true;
+  managerSendSupervisor(state, message);
+}
+
+function managerWatchAnchor(state: ManagerState, anchor: ChildProcess) {
+  const childControl = controlStream(anchor);
+  state.anchorControl = childControl;
+  managerSendSupervisor(state, { type: 'anchor-process-started', processID: anchor.pid, spawnParentPID: process.pid,
+    sessionID: state.supervisorPID, startupDeadlineNs: state.startupHardDeadlineNs });
+  for (const message of state.pendingAnchorMessages.splice(0)) send(childControl, message);
+  childControl.on('error', error => managerStop(state, 'anchor-control-failed', error.message));
+  parseLines(childControl, message => managerHandleAnchorMessage(state, message),
+    error => managerStop(state, 'anchor-control-handler-failed', error.message));
+  anchor.once('error', error => {
+    managerSendSupervisor(state, { type: 'anchor-bootstrap-error', message: error.message });
+    managerStop(state, 'anchor-launch-error', error.message);
+  });
+  anchor.once('exit', (code, signal) => managerSendSupervisor(state, { type: 'anchor-exit', code, signal }));
+  anchor.once('close', (code, signal) => {
+    state.anchorClosed = true;
+    state.anchorControl?.destroy();
+    state.anchorControl = undefined;
+    managerSendSupervisor(state, { type: 'anchor-close', code, signal });
+    managerCloseIfRetired(state);
+  });
+  state.input.on('error', error => managerStop(state, 'caller-input-failed', error.message));
+}
+
+function runAnchorManager(): void {
+  const state = createManagerState();
+  managerWatchSupervisor(state);
+  const anchor = managerSpawnAnchor(state);
+  if (!anchor) return;
+  managerWatchAnchor(state, anchor);
+}
+
+interface ManagerRelayState {
+  received: number;
+  expected: number | undefined;
+  receivedAckSent: boolean;
+  finalAckSent: boolean;
+  relayFailed: boolean;
+  sourceEnded: boolean;
+  sourceClosed: boolean;
+}
+
+interface SupervisorState {
+  startupExecutionDeadlineNs: string;
+  startupHardDeadlineNs: string;
+  observer: ReturnType<typeof supervisorObserver>;
+  control: ControlChannel;
+  lease: ReturnType<typeof reader>;
+  stdout: ReturnType<typeof writer>;
+  stderr: ReturnType<typeof writer>;
+  input: ReturnType<typeof reader>;
+  observeStdout: ReturnType<typeof writer>;
+  observeStderr: ReturnType<typeof writer>;
+  inputObservation: ReturnType<typeof observeInputPipe>;
+  groupPollOwner: OwnedGroupPollOwner;
+  executionDeadlineNs: string;
+  hardDeadlineNs: string;
+  config: LaunchRequest | undefined;
+  anchor: ChildProcess | undefined;
+  anchorControl: Duplex | undefined;
+  anchorManagerPID: number | undefined;
+  anchorStartupDeadlineNs: string;
+  anchorExecutionDeadlineNs: string;
+  anchorPID: number | undefined;
+  guardianPID: number | undefined;
+  groupID: number | undefined;
+  anchorLaunchFailed: boolean;
+  anchorClosed: boolean;
+  anchorExited: boolean;
+  anchorManagerClosed: boolean;
+  targetExecConfirmed: boolean;
+  targetLaunchRequested: boolean;
+  targetProcessCreated: boolean;
+  targetNoChildObserved: boolean;
+  targetProcessPID: number | undefined;
+  targetExit: boolean;
+  targetClose: boolean;
+  targetUnconfirmedClose: boolean;
+  targetStdoutEnded: boolean;
+  targetStdoutClosed: boolean;
+  targetStderrEnded: boolean;
+  targetStderrClosed: boolean;
+  managerStdoutEnded: boolean;
+  managerStdoutClosed: boolean;
+  managerStderrEnded: boolean;
+  managerStderrClosed: boolean;
+  managerOutputStates: { stdout: ManagerRelayState; stderr: ManagerRelayState };
+  managerInputSummary: RecordValue | undefined;
+  supervisorStdoutFinished: boolean;
+  supervisorStdoutClosed: boolean;
+  supervisorStderrFinished: boolean;
+  supervisorStderrClosed: boolean;
+  targetOutputRelayHealthy: boolean;
+  retirementOutputEndsRequested: boolean;
+  inputClosed: boolean;
+  groupAbsent: boolean;
+  stopReason: string | undefined;
+  firstFailure: string | undefined;
+  releaseRequested: boolean;
+  leaseLost: boolean;
+  retirementSent: boolean;
+  unprovedSent: boolean;
+  supervisorEnded: boolean;
+  targetSpawned: boolean;
+  executionTimer: AbsoluteDeadlineTimer | undefined;
+  hardTimer: AbsoluteDeadlineTimer | undefined;
+  controlBroken: boolean;
+}
+
+function createSupervisorState(): SupervisorState {
   const observer = supervisorObserver(9);
   observer.record({ type: 'supervisor-runtime-started', pid: process.pid, clockNs: nowNs().toString(), observerSink: observer.sink });
   const control = supervisorControlChannel(3);
@@ -1624,811 +1901,870 @@ function runSupervisor(): void {
   const input = reader(6);
   const observeStdout = writer(7);
   const observeStderr = writer(8);
-  let executionDeadlineNs = '';
-  let hardDeadlineNs = '';
-  let config: LaunchRequest | undefined;
-  let anchor: ChildProcess | undefined;
-  let anchorControl: Duplex | undefined;
-  let anchorManagerPID: number | undefined;
-  let anchorExecutionDeadlineNs = '';
-  let anchorPID: number | undefined;
-  let guardianPID: number | undefined;
-  let groupID: number | undefined;
-  let anchorLaunchFailed = false;
-  let anchorClosed = false;
-  let anchorExited = false;
-  let anchorManagerClosed = false;
-  let targetExecConfirmed = false;
-  let terminalTargetCallbackObserved = false;
-  let targetLaunchRequested = false;
-  let targetProcessCreated = false;
-  let targetNoChildObserved = false;
-  let targetProcessPID: number | undefined;
-  let targetExit = false;
-  let targetClose = false;
-  let targetUnconfirmedClose = false;
-  let targetStdoutEnded = false;
-  let targetStdoutClosed = false;
-  let targetStderrEnded = false;
-  let targetStderrClosed = false;
-  let managerStdoutEnded = false;
-  let managerStdoutClosed = false;
-  let managerStderrEnded = false;
-  let managerStderrClosed = false;
-  const managerOutputStates = {
-    stdout: { received: 0, expected: undefined as number | undefined, receivedAckSent: false, finalAckSent: false, relayFailed: false, sourceEnded: false, sourceClosed: false },
-    stderr: { received: 0, expected: undefined as number | undefined, receivedAckSent: false, finalAckSent: false, relayFailed: false, sourceEnded: false, sourceClosed: false },
+  const newManagerRelayState = (): ManagerRelayState => ({ received: 0, expected: undefined, receivedAckSent: false,
+    finalAckSent: false, relayFailed: false, sourceEnded: false, sourceClosed: false });
+  const state: SupervisorState = {
+    startupExecutionDeadlineNs: process.argv[3] || '',
+    startupHardDeadlineNs: process.argv[4] || '',
+    observer,
+    control,
+    lease,
+    stdout,
+    stderr,
+    input,
+    observeStdout,
+    observeStderr,
+    inputObservation: observeInputPipe(input, (event, summary) => supervisorRecordObserver(state, { type: 'supervisor-input-observation', event, summary })),
+    groupPollOwner: createOwnedGroupPollOwner({
+      schedule: (callback, delayMs) => setTimeout(callback, delayMs),
+      cancel: handle => clearTimeout(handle),
+      probe: () => state.groupID !== undefined && supervisorGroupExists(state.groupID),
+      observe: (present, _phase, isCurrent) => {
+        if (!isCurrent() || state.supervisorEnded) return;
+        state.groupAbsent = !present;
+        if (present) return;
+        supervisorRecordObserver(state, { type: 'supervisor-group-absent', groupID: state.groupID });
+        if (!isCurrent() || state.supervisorEnded) return;
+        supervisorNotifyRetirement(state);
+      },
+    }),
+    executionDeadlineNs: '',
+    hardDeadlineNs: '',
+    config: undefined,
+    anchor: undefined,
+    anchorControl: undefined,
+    anchorManagerPID: undefined,
+    anchorStartupDeadlineNs: '',
+    anchorExecutionDeadlineNs: '',
+    anchorPID: undefined,
+    guardianPID: undefined,
+    groupID: undefined,
+    anchorLaunchFailed: false,
+    anchorClosed: false,
+    anchorExited: false,
+    anchorManagerClosed: false,
+    targetExecConfirmed: false,
+    targetLaunchRequested: false,
+    targetProcessCreated: false,
+    targetNoChildObserved: false,
+    targetProcessPID: undefined,
+    targetExit: false,
+    targetClose: false,
+    targetUnconfirmedClose: false,
+    targetStdoutEnded: false,
+    targetStdoutClosed: false,
+    targetStderrEnded: false,
+    targetStderrClosed: false,
+    managerStdoutEnded: false,
+    managerStdoutClosed: false,
+    managerStderrEnded: false,
+    managerStderrClosed: false,
+    managerOutputStates: { stdout: newManagerRelayState(), stderr: newManagerRelayState() },
+    managerInputSummary: undefined,
+    supervisorStdoutFinished: false,
+    supervisorStdoutClosed: false,
+    supervisorStderrFinished: false,
+    supervisorStderrClosed: false,
+    targetOutputRelayHealthy: true,
+    retirementOutputEndsRequested: false,
+    inputClosed: false,
+    groupAbsent: false,
+    stopReason: undefined,
+    firstFailure: undefined,
+    releaseRequested: false,
+    leaseLost: false,
+    retirementSent: false,
+    unprovedSent: false,
+    supervisorEnded: false,
+    targetSpawned: false,
+    executionTimer: undefined,
+    hardTimer: undefined,
+    controlBroken: false,
   };
-  let supervisorStdoutFinished = false;
-  let supervisorStdoutClosed = false;
-  let supervisorStderrFinished = false;
-  let supervisorStderrClosed = false;
-  let targetOutputRelayHealthy = true;
-  let retirementOutputEndsRequested = false;
-  let inputClosed = false;
-  let groupAbsent = false;
-  let stopReason: string | undefined;
-  let firstFailure: string | undefined;
-  let releaseRequested = false;
-  let leaseLost = false;
-  let retirementSent = false;
-  let unprovedSent = false;
-  let supervisorEnded = false;
-  let targetSpawned = false;
-  let executionTimer: AbsoluteDeadlineTimer | undefined;
-  let hardTimer: AbsoluteDeadlineTimer | undefined;
-  let controlBroken = false;
+  return state;
+}
 
-  const sendControl = (value: RecordValue) => {
-    if (!controlBroken) {
-      try { control.write(encode(value)); } catch { controlBroken = true; }
-    }
+function supervisorSendControl(state: SupervisorState, value: RecordValue) {
+  if (!state.controlBroken) {
+    try { state.control.write(encode(value)); } catch { state.controlBroken = true; }
+  }
+}
+
+function supervisorRecordObserver(state: SupervisorState, value: RecordValue) { return state.observer.record(value); }
+
+function supervisorEvidence(state: SupervisorState) {
+  const targetOutputSource = state.targetProcessCreated && state.targetProcessPID !== undefined;
+  const managerOutputSource = state.anchorManagerPID !== undefined;
+  const stdoutNaturalEnd = targetOutputSource ? state.targetStdoutEnded
+    : managerOutputSource ? state.managerStdoutEnded : state.supervisorStdoutFinished;
+  const stdoutCloseObserved = targetOutputSource ? state.targetStdoutClosed
+    : managerOutputSource ? state.managerStdoutClosed : state.supervisorStdoutClosed;
+  const stderrNaturalEnd = targetOutputSource ? state.targetStderrEnded
+    : managerOutputSource ? state.managerStderrEnded : state.supervisorStderrFinished;
+  const stderrCloseObserved = targetOutputSource ? state.targetStderrClosed
+    : managerOutputSource ? state.managerStderrClosed : state.supervisorStderrClosed;
+  return {
+    targetExitObserved: state.targetExit, targetCloseObserved: state.targetClose,
+    targetPIDObserved: state.targetProcessPID !== undefined,
+    anchorExitObserved: state.anchorExited, anchorCloseObserved: state.anchorClosed, groupAbsent: state.groupAbsent,
+    inputClosedObserved: state.inputClosed,
+    stdoutNaturalEnd, stdoutCloseObserved, stderrNaturalEnd, stderrCloseObserved,
+    targetStdoutNaturalEnd: state.targetStdoutEnded, targetStdoutCloseObserved: state.targetStdoutClosed,
+    targetStderrNaturalEnd: state.targetStderrEnded, targetStderrCloseObserved: state.targetStderrClosed,
+    managerStdoutNaturalEnd: state.managerStdoutEnded, managerStdoutCloseObserved: state.managerStdoutClosed,
+    managerStderrNaturalEnd: state.managerStderrEnded, managerStderrCloseObserved: state.managerStderrClosed,
+    supervisorStdoutFinished: state.supervisorStdoutFinished, supervisorStdoutCloseObserved: state.supervisorStdoutClosed,
+    supervisorStderrFinished: state.supervisorStderrFinished, supervisorStderrCloseObserved: state.supervisorStderrClosed,
+    callerStdoutNaturalEnd: false, callerStdoutCloseObserved: false,
+    callerStderrNaturalEnd: false, callerStderrCloseObserved: false,
+    managerProcessCreated: state.anchorManagerPID !== undefined,
+    targetDispatchRequested: state.targetLaunchRequested, targetProcessCreated: state.targetProcessCreated, targetNoChildObserved: state.targetNoChildObserved,
+    targetExecConfirmed: state.targetExecConfirmed, targetUnconfirmedCloseObserved: state.targetUnconfirmedClose,
+    targetOutputRelayHealthy: state.targetOutputRelayHealthy,
+    firstFailure: state.firstFailure, stopReason: state.stopReason,
   };
-  const recordObserver = (value: RecordValue) => observer.record(value);
-  const inputObservation = observeInputPipe(input, (event, summary) => recordObserver({ type: 'supervisor-input-observation', event, summary }));
-  let managerInputSummary: RecordValue | undefined;
-  const evidence = () => {
-    const targetOutputSource = targetProcessCreated && targetProcessPID !== undefined;
-    const managerOutputSource = anchorManagerPID !== undefined;
-    const stdoutNaturalEnd = targetOutputSource ? targetStdoutEnded
-      : managerOutputSource ? managerStdoutEnded : supervisorStdoutFinished;
-    const stdoutCloseObserved = targetOutputSource ? targetStdoutClosed
-      : managerOutputSource ? managerStdoutClosed : supervisorStdoutClosed;
-    const stderrNaturalEnd = targetOutputSource ? targetStderrEnded
-      : managerOutputSource ? managerStderrEnded : supervisorStderrFinished;
-    const stderrCloseObserved = targetOutputSource ? targetStderrClosed
-      : managerOutputSource ? managerStderrClosed : supervisorStderrClosed;
-    return {
-      targetExitObserved: targetExit, targetCloseObserved: targetClose,
-      targetPIDObserved: targetProcessPID !== undefined,
-      anchorExitObserved: anchorExited, anchorCloseObserved: anchorClosed, groupAbsent,
-      inputClosedObserved: inputClosed,
-      stdoutNaturalEnd, stdoutCloseObserved, stderrNaturalEnd, stderrCloseObserved,
-      targetStdoutNaturalEnd: targetStdoutEnded, targetStdoutCloseObserved: targetStdoutClosed,
-      targetStderrNaturalEnd: targetStderrEnded, targetStderrCloseObserved: targetStderrClosed,
-      managerStdoutNaturalEnd: managerStdoutEnded, managerStdoutCloseObserved: managerStdoutClosed,
-      managerStderrNaturalEnd: managerStderrEnded, managerStderrCloseObserved: managerStderrClosed,
-      supervisorStdoutFinished, supervisorStdoutCloseObserved: supervisorStdoutClosed,
-      supervisorStderrFinished, supervisorStderrCloseObserved: supervisorStderrClosed,
-      callerStdoutNaturalEnd: false, callerStdoutCloseObserved: false,
-      callerStderrNaturalEnd: false, callerStderrCloseObserved: false,
-      managerProcessCreated: anchorManagerPID !== undefined,
-      targetDispatchRequested: targetLaunchRequested, targetProcessCreated, targetNoChildObserved,
-      targetExecConfirmed, targetUnconfirmedCloseObserved: targetUnconfirmedClose,
-      targetOutputRelayHealthy,
-      firstFailure, stopReason,
-    };
-  };
-  const groupExists = (id: number): boolean => {
-    try { process.kill(-id, 0); return true; } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === 'ESRCH') return false;
-      return true;
-    }
-  };
-  const finalizeIfReleased = (force = false) => {
-    if (supervisorEnded || (!force && !retirementSent) || (!force && !releaseRequested && !leaseLost)) return;
-    if (force && !retirementSent) {
-      process.exitCode = 1;
-      firstFailure ||= 'owned process retirement was not proved before the hard deadline';
-    }
-    supervisorEnded = true;
-    groupPollOwner?.finalize();
-    recordObserver({ type: 'supervisor-teardown-started', clockNs: nowNs().toString(),
-      input: inputObservation.snapshot(), managerInput: managerInputSummary,
-      unmetRetirementPrerequisites: unmetRetirementPrerequisites() });
-    executionTimer?.cancel();
-    hardTimer?.cancel();
-    if (force) {
-      input.destroy();
-      lease.destroy();
-      if (anchorControl && !anchorControl.destroyed) anchorControl.destroy();
-      control.destroy();
-      closeDescriptor(0);
-      closeDescriptor(3);
-      closeDescriptor(6);
-      stdout.destroy();
-      stderr.destroy();
-      observeStdout.destroy();
-      observeStderr.destroy();
-      closeDescriptor(4);
-      closeDescriptor(5);
-      closeDescriptor(7);
-      closeDescriptor(8);
-    } else {
-      control.destroy();
-      stdout.end();
-      stderr.end();
-      observeStdout.end();
-      observeStderr.end();
-    }
-    if (config?.terminalTransport) {
-      closeDescriptor(10);
-      closeDescriptor(11);
-    }
-    observer.close();
-  };
-  const retirementPrerequisites = () => {
-    const sourceStreamsRetired = targetStdoutEnded && targetStdoutClosed && targetStderrEnded && targetStderrClosed;
-    const targetSettled = targetLaunchRequested
-      ? targetNoChildObserved || (targetProcessCreated && (targetExecConfirmed
-        ? targetExit && targetClose && sourceStreamsRetired
-        : targetUnconfirmedClose && (!targetSpawned || sourceStreamsRetired)))
-      : !targetProcessCreated && !targetNoChildObserved;
-    const terminalCallbackSettled = !config?.terminalTransport || !targetExecConfirmed || terminalTargetCallbackObserved;
-    const managerRelayRetired = anchorManagerPID === undefined
-      || (managerStdoutEnded && managerStdoutClosed && managerStderrEnded && managerStderrClosed
-        && managerOutputStates.stdout.finalAckSent && managerOutputStates.stderr.finalAckSent
-        && managerOutputStates.stdout.received === managerOutputStates.stdout.expected
-        && managerOutputStates.stderr.received === managerOutputStates.stderr.expected
-        && !managerOutputStates.stdout.relayFailed && !managerOutputStates.stderr.relayFailed);
-    return { anchorClosed, anchorManagerClosed, groupAbsent, inputClosed, targetSettled, terminalCallbackSettled, managerRelayRetired,
-      stdoutRetired: supervisorStdoutClosed && (supervisorStdoutFinished || !targetOutputRelayHealthy),
-      stderrRetired: supervisorStderrClosed && (supervisorStderrFinished || !targetOutputRelayHealthy) };
-  };
-  const unmetRetirementPrerequisites = () => Object.entries(retirementPrerequisites()).filter(([, met]) => !met).map(([name]) => name);
-  const notifyRetirement = () => {
-    const prerequisites = retirementPrerequisites();
-    if (!prerequisites.anchorClosed || !prerequisites.anchorManagerClosed || !prerequisites.groupAbsent || !prerequisites.inputClosed
-      || !prerequisites.targetSettled || !prerequisites.terminalCallbackSettled || !prerequisites.managerRelayRetired || retirementSent) return;
-    if (!retirementOutputEndsRequested) {
-      retirementOutputEndsRequested = true;
-      stdout.end();
-      stderr.end();
-      observeStdout.end();
-      observeStderr.end();
-    }
-    const stdoutRetired = supervisorStdoutClosed && (supervisorStdoutFinished || !targetOutputRelayHealthy);
-    const stderrRetired = supervisorStderrClosed && (supervisorStderrFinished || !targetOutputRelayHealthy);
-    if (!stdoutRetired || !stderrRetired) return;
-    recordObserver({ type: 'supervisor-retirement-ready', evidence: evidence() });
-    retirementSent = true;
-    sendControl({ type: 'retirement-ready', evidence: evidence() });
-    finalizeIfReleased();
-  };
-  const groupPollOwner = createOwnedGroupPollOwner({
-    schedule: (callback, delayMs) => setTimeout(callback, delayMs),
-    cancel: handle => clearTimeout(handle),
-    probe: () => groupID !== undefined && groupExists(groupID),
-    observe: (present, _phase, isCurrent) => {
-      if (!isCurrent() || supervisorEnded) return;
-      groupAbsent = !present;
-      if (present) return;
-      recordObserver({ type: 'supervisor-group-absent', groupID });
-      if (!isCurrent() || supervisorEnded) return;
-      notifyRetirement();
-    },
-  });
-  const inspectGroup = (phase: GroupPollPhase) => {
-    if (groupID === undefined || !anchorClosed) return true;
-    return groupPollOwner?.inspect(phase) ?? false;
-  };
-  const outputFailure = (stream: 'stdout' | 'stderr', message: string) => {
-    targetOutputRelayHealthy = false;
-    firstFailure ||= message;
-    stop('caller-output-failed', `${stream}: ${firstFailure}`);
-  };
-  stdout.once('finish', () => { supervisorStdoutFinished = true; notifyRetirement(); });
-  stdout.once('close', () => {
-    supervisorStdoutClosed = true;
-    if (!supervisorStdoutFinished) outputFailure('stdout', 'caller-facing stdout closed before writer finish');
-    notifyRetirement();
-  });
-  stdout.once('error', error => outputFailure('stdout', error instanceof Error ? error.message : 'caller-facing stdout failed'));
-  stderr.once('finish', () => { supervisorStderrFinished = true; notifyRetirement(); });
-  stderr.once('close', () => {
-    supervisorStderrClosed = true;
-    if (!supervisorStderrFinished) outputFailure('stderr', 'caller-facing stderr closed before writer finish');
-    notifyRetirement();
-  });
-  stderr.once('error', error => outputFailure('stderr', error instanceof Error ? error.message : 'caller-facing stderr failed'));
-  const managerControlWritable = () => Boolean(anchor && anchorControl && !anchorManagerClosed
-    && anchor.exitCode === null && anchor.signalCode === null
-    && !anchorControl.destroyed && anchorControl.writable && !anchorControl.writableEnded);
-  const stop = (reason: string, failure?: string) => {
-    if (supervisorEnded) return;
-    recordObserver({ type: 'supervisor-stopping', reason, failure, anchorClosed, anchorManagerClosed, groupAbsent,
-      inputClosed, targetSpawned, targetProcessPID, targetExecConfirmed, targetExit, targetClose, targetStdoutEnded, targetStdoutClosed,
-      targetStderrEnded, targetStderrClosed, clockNs: nowNs().toString(), input: inputObservation.snapshot(), managerInput: managerInputSummary,
-      unmetRetirementPrerequisites: unmetRetirementPrerequisites() });
-    const previousStopReason = stopReason;
-    if (!stopReason) stopReason = reason;
-    if (!firstFailure && failure) firstFailure = failure;
-    sendControl({ type: 'stopping', reason: stopReason, failure: firstFailure });
-    if (!targetSpawned && !inputClosed) input.resume();
-    const executionExpired = /^\d+$/u.test(executionDeadlineNs) && nowNs() >= BigInt(executionDeadlineNs);
-    const anchorOwnsTimeout = reason === 'timeout' || previousStopReason === 'timeout' || executionExpired;
-    if (!previousStopReason && !anchorOwnsTimeout && managerControlWritable()) send(anchorControl!, { type: 'stop', reason: stopReason });
-    else if (!previousStopReason && !anchorOwnsTimeout && anchor && !anchorManagerClosed
-      && anchor.exitCode === null && anchor.signalCode === null) {
-      try {
-        if (!anchor.kill('SIGTERM')) firstFailure ||= 'owned anchor manager rejected SIGTERM';
-      } catch (error) {
-        firstFailure ||= error instanceof Error ? error.message : 'owned anchor manager could not be signaled';
-      }
-    } else if (!previousStopReason && !anchorOwnsTimeout && groupID !== undefined) {
-      firstFailure ||= 'owned process group stop refused because its live anchor control is unavailable';
-      recordObserver({ type: 'supervisor-group-signal-refused', signal: 'SIGTERM', groupID, anchorPID, anchorClosed, anchorManagerClosed });
-    }
-    if (!anchor && !retirementSent) {
-      groupAbsent = true;
-      anchorClosed = true;
-      anchorExited = true;
-      anchorManagerClosed = true;
-      if (inputClosed && !targetSpawned) notifyRetirement();
-    }
-  };
-  const failManagerOutputRelay = (reason: string) => {
-    targetOutputRelayHealthy = false;
-    firstFailure ||= reason;
-    managerOutputStates.stdout.relayFailed = true;
-    managerOutputStates.stderr.relayFailed = true;
-    recordObserver({ type: 'supervisor-manager-output-protocol-error', reason });
-    if (managerControlWritable()) send(anchorControl!, { type: 'manager-output-abort', reason });
-    stop('manager-output-protocol-invalid', reason);
-  };
-  const acknowledgeReceivedManagerOutput = (stream: 'stdout' | 'stderr') => {
-    const state = managerOutputStates[stream];
-    if (state.relayFailed || state.expected === undefined || state.receivedAckSent) return;
-    if (state.received > state.expected) {
-      failManagerOutputRelay(`${stream} manager relay exceeded its advertised byte count`);
-      return;
-    }
-    if (state.received !== state.expected) return;
-    if (state.sourceEnded || state.sourceClosed) {
-      failManagerOutputRelay(`${stream} manager relay reached EOF before its byte acknowledgement`);
-      return;
-    }
-    state.receivedAckSent = true;
-    send(anchorControl!, { type: 'manager-output-received', stream, bytes: state.expected });
-  };
-  const receiveManagerOutputFinished = (message: RecordValue) => {
-    const stream = message.stream;
-    if ((stream !== 'stdout' && stream !== 'stderr') || anchorManagerPID === undefined
-      || !Number.isSafeInteger(message.bytes) || Number(message.bytes) < 0) {
-      failManagerOutputRelay('manager output completion named an unknown stream or invalid byte count');
-      return;
-    }
-    const state = managerOutputStates[stream];
-    if (state.expected !== undefined || state.sourceEnded || state.sourceClosed || state.relayFailed) {
-      failManagerOutputRelay(`duplicate or late ${stream} manager output completion`);
-      return;
-    }
-    state.expected = Number(message.bytes);
-    acknowledgeReceivedManagerOutput(stream);
-  };
-  const markLeaseLost = () => {
-    if (leaseLost) return;
-    leaseLost = true;
-    releaseRequested = true;
-    stop('lease-lost');
-    finalizeIfReleased();
-  };
-  const relay = (source: NodeJS.ReadableStream, destination: Writable, observer: Writable | undefined,
-    streamName: 'stdout' | 'stderr', onEnd: () => void, onClose: () => void) => {
-    let destinationBroken = false;
-    let observerBroken = false;
-    let destinationBlocked = false;
-    let observerBlocked = false;
-    let sourceEnded = false;
-    const resume = () => {
-      if (!destinationBlocked && !observerBlocked) source.resume();
-    };
-    const breakDestination = (error?: NodeJS.ErrnoException) => {
-      if (destinationBroken) return;
-      destinationBroken = true;
-      destinationBlocked = false;
-      if (error?.code === 'EPIPE') recordObserver({ type: 'downstream-epipe', stream: streamName });
-      targetOutputRelayHealthy = false;
-      const message = error instanceof Error ? error.message : `${streamName} caller-facing relay closed early`;
-      firstFailure ||= message;
-      stop('caller-output-failed', `${streamName}: ${firstFailure}`);
-      resume();
-    };
-    const breakObserver = () => { observerBroken = true; observerBlocked = false; resume(); };
-    destination.on('error', breakDestination);
-    destination.once('close', () => {
-      if (!destination.writableFinished) breakDestination();
-    });
-    observer?.on('error', breakObserver);
-    observer?.on('close', breakObserver);
-    source.on('data', (chunk: Buffer) => {
-      const outputState = managerOutputStates[streamName];
-      const nextReceived = outputState.received + chunk.byteLength;
-      if (!Number.isSafeInteger(nextReceived)) {
-        failManagerOutputRelay(`${streamName} manager relay byte count exceeded its safe bound`);
-        return;
-      }
-      outputState.received = nextReceived;
-      acknowledgeReceivedManagerOutput(streamName);
-      if (!destinationBroken && !destination.write(chunk)) {
-        destinationBlocked = true;
-        source.pause();
-        destination.once('drain', () => { destinationBlocked = false; resume(); });
-      }
-      if (observer && !observerBroken && !observer.write(chunk)) {
-        observerBlocked = true;
-        source.pause();
-        observer.once('drain', () => { observerBlocked = false; resume(); });
-      }
-    });
-    source.once('end', () => {
-      sourceEnded = true;
-      const outputState = managerOutputStates[streamName];
-      outputState.sourceEnded = true;
-      recordObserver({ type: 'supervisor-manager-relay-end', stream: streamName });
-      if (outputState.expected === undefined || outputState.received !== outputState.expected || !outputState.receivedAckSent) {
-        failManagerOutputRelay(`${streamName} manager relay ended without an exact byte handoff`);
-      }
-      onEnd();
-      destination.end();
-      observer?.end();
-    });
-    source.once('close', () => {
-      const outputState = managerOutputStates[streamName];
-      outputState.sourceClosed = true;
-      recordObserver({ type: 'supervisor-manager-relay-close', stream: streamName, naturalEnd: sourceEnded });
-      if (!sourceEnded || outputState.expected === undefined || outputState.received !== outputState.expected
-        || !outputState.receivedAckSent || outputState.relayFailed) {
-        failManagerOutputRelay(`${streamName} manager relay closed without a proven byte handoff and natural EOF`);
-      } else if (!outputState.finalAckSent) {
-        outputState.finalAckSent = true;
-        send(anchorControl!, { type: 'manager-output-retired', stream: streamName, bytes: outputState.expected,
-          naturalEnd: true, closeObserved: true });
-      }
-      onClose();
-      notifyRetirement();
-    });
-    source.on('error', error => {
-      const outputState = managerOutputStates[streamName];
-      outputState.relayFailed = true;
-      failManagerOutputRelay(error instanceof Error ? error.message : 'manager relay stream failed');
-      stop('manager-relay-error', firstFailure);
-    });
-  };
-  const receiveTargetSourceEvent = (message: RecordValue) => {
-    const stream = message.stream;
-    if (!targetLaunchRequested || !targetProcessCreated || targetNoChildObserved
-      || (stream !== 'stdout' && stream !== 'stderr')) {
-      targetOutputRelayHealthy = false;
-      stop('target-source-protocol-invalid', 'target source event did not match a created target and known stream');
-      return;
-    }
-    const ended = stream === 'stdout' ? targetStdoutEnded : targetStderrEnded;
-    const closed = stream === 'stdout' ? targetStdoutClosed : targetStderrClosed;
-    if (message.type === 'target-source-end') {
-      if (ended || closed) {
-        targetOutputRelayHealthy = false;
-        stop('target-source-protocol-invalid', `duplicate or late ${stream} source end`);
-        return;
-      }
-      if (stream === 'stdout') targetStdoutEnded = true;
-      else targetStderrEnded = true;
-      recordObserver({ type: 'supervisor-target-source-end', stream });
-      notifyRetirement();
-      return;
-    }
-    if (closed || message.naturalEnd !== ended) {
-      targetOutputRelayHealthy = false;
-      stop('target-source-protocol-invalid', `invalid or duplicate ${stream} source close`);
-      return;
-    }
-    if (stream === 'stdout') targetStdoutClosed = true;
-    else targetStderrClosed = true;
-    if (!ended) {
-      targetOutputRelayHealthy = false;
-      stop('target-source-closed-before-end', `${stream} target source closed without natural EOF`);
-    }
-    recordObserver({ type: 'supervisor-target-source-close', stream, naturalEnd: ended });
-    notifyRetirement();
-  };
-  const startAnchor = () => {
-    if (!config || anchor || leaseLost || stopReason) return;
-    sendControl({ type: 'supervisor-progress', stage: 'anchor-launch-requested' });
-    if (nowNs() >= BigInt(config.executionDeadlineNs)) { stop('timeout'); return; }
-    const cleanupAllowanceNs = BigInt(config.hardDeadlineNs) - BigInt(config.executionDeadlineNs);
-    const startupReserveNs = cleanupAllowanceNs > 0n
-      ? cleanupAllowanceNs / 2n < 500_000_000n ? cleanupAllowanceNs / 2n : 500_000_000n
-      : 0n;
-    const anchorStartupDeadlineNs = (BigInt(config.hardDeadlineNs) - startupReserveNs).toString();
+}
+
+function supervisorGroupExists(id: number): boolean {
+  try { process.kill(-id, 0); return true; } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ESRCH') return false;
+    return true;
+  }
+}
+
+function supervisorFinalizeIfReleased(state: SupervisorState, force = false) {
+  if (state.supervisorEnded || (!force && !state.retirementSent) || (!force && !state.releaseRequested && !state.leaseLost)) return;
+  if (force && !state.retirementSent) {
+    process.exitCode = 1;
+    state.firstFailure ||= 'owned process retirement was not proved before the hard deadline';
+  }
+  state.supervisorEnded = true;
+  state.groupPollOwner.finalize();
+  supervisorRecordObserver(state, { type: 'supervisor-teardown-started', clockNs: nowNs().toString(),
+    input: state.inputObservation.snapshot(), managerInput: state.managerInputSummary,
+    unmetRetirementPrerequisites: supervisorUnmetRetirementPrerequisites(state) });
+  state.executionTimer?.cancel();
+  state.hardTimer?.cancel();
+  if (force) {
+    state.input.destroy();
+    state.lease.destroy();
+    if (state.anchorControl && !state.anchorControl.destroyed) state.anchorControl.destroy();
+    state.control.destroy();
+    closeDescriptor(0);
+    closeDescriptor(3);
+    closeDescriptor(6);
+    state.stdout.destroy();
+    state.stderr.destroy();
+    state.observeStdout.destroy();
+    state.observeStderr.destroy();
+    closeDescriptor(4);
+    closeDescriptor(5);
+    closeDescriptor(7);
+    closeDescriptor(8);
+  } else {
+    state.control.destroy();
+    state.stdout.end();
+    state.stderr.end();
+    state.observeStdout.end();
+    state.observeStderr.end();
+  }
+  state.observer.close();
+}
+
+function supervisorRetirementPrerequisites(state: SupervisorState) {
+  const sourceStreamsRetired = state.targetStdoutEnded && state.targetStdoutClosed && state.targetStderrEnded && state.targetStderrClosed;
+  const targetSettled = state.targetLaunchRequested
+    ? state.targetNoChildObserved || (state.targetProcessCreated && (state.targetExecConfirmed
+      ? state.targetExit && state.targetClose && sourceStreamsRetired
+      : state.targetUnconfirmedClose && (!state.targetSpawned || sourceStreamsRetired)))
+    : !state.targetProcessCreated && !state.targetNoChildObserved;
+  const managerRelayRetired = state.anchorManagerPID === undefined
+    || (state.managerStdoutEnded && state.managerStdoutClosed && state.managerStderrEnded && state.managerStderrClosed
+      && state.managerOutputStates.stdout.finalAckSent && state.managerOutputStates.stderr.finalAckSent
+      && state.managerOutputStates.stdout.received === state.managerOutputStates.stdout.expected
+      && state.managerOutputStates.stderr.received === state.managerOutputStates.stderr.expected
+      && !state.managerOutputStates.stdout.relayFailed && !state.managerOutputStates.stderr.relayFailed);
+  return { anchorClosed: state.anchorClosed, anchorManagerClosed: state.anchorManagerClosed, groupAbsent: state.groupAbsent, inputClosed: state.inputClosed, targetSettled, managerRelayRetired,
+    stdoutRetired: state.supervisorStdoutClosed && (state.supervisorStdoutFinished || !state.targetOutputRelayHealthy),
+    stderrRetired: state.supervisorStderrClosed && (state.supervisorStderrFinished || !state.targetOutputRelayHealthy) };
+}
+
+function supervisorUnmetRetirementPrerequisites(state: SupervisorState) { return Object.entries(supervisorRetirementPrerequisites(state)).filter(([, met]) => !met).map(([name]) => name); }
+
+function supervisorNotifyRetirement(state: SupervisorState) {
+  const prerequisites = supervisorRetirementPrerequisites(state);
+  if (!prerequisites.anchorClosed || !prerequisites.anchorManagerClosed || !prerequisites.groupAbsent || !prerequisites.inputClosed
+    || !prerequisites.targetSettled || !prerequisites.managerRelayRetired || state.retirementSent) return;
+  if (!state.retirementOutputEndsRequested) {
+    state.retirementOutputEndsRequested = true;
+    state.stdout.end();
+    state.stderr.end();
+    state.observeStdout.end();
+    state.observeStderr.end();
+  }
+  const stdoutRetired = state.supervisorStdoutClosed && (state.supervisorStdoutFinished || !state.targetOutputRelayHealthy);
+  const stderrRetired = state.supervisorStderrClosed && (state.supervisorStderrFinished || !state.targetOutputRelayHealthy);
+  if (!stdoutRetired || !stderrRetired) return;
+  supervisorRecordObserver(state, { type: 'supervisor-retirement-ready', evidence: supervisorEvidence(state) });
+  state.retirementSent = true;
+  supervisorSendControl(state, { type: 'retirement-ready', evidence: supervisorEvidence(state) });
+  supervisorFinalizeIfReleased(state);
+}
+
+function supervisorInspectGroup(state: SupervisorState, phase: GroupPollPhase) {
+  if (state.groupID === undefined || !state.anchorClosed) return true;
+  return state.groupPollOwner.inspect(phase);
+}
+
+function supervisorOutputFailure(state: SupervisorState, stream: 'stdout' | 'stderr', message: string) {
+  state.targetOutputRelayHealthy = false;
+  state.firstFailure ||= message;
+  supervisorStop(state, 'caller-output-failed', `${stream}: ${state.firstFailure}`);
+}
+
+function supervisorManagerControlWritable(state: SupervisorState) { return Boolean(state.anchor && state.anchorControl && !state.anchorManagerClosed
+  && state.anchor.exitCode === null && state.anchor.signalCode === null
+  && !state.anchorControl.destroyed && state.anchorControl.writable && !state.anchorControl.writableEnded); }
+
+function supervisorStop(state: SupervisorState, reason: string, failure?: string) {
+  if (state.supervisorEnded) return;
+  supervisorRecordObserver(state, { type: 'supervisor-stopping', reason, failure, anchorClosed: state.anchorClosed, anchorManagerClosed: state.anchorManagerClosed, groupAbsent: state.groupAbsent,
+    inputClosed: state.inputClosed, targetSpawned: state.targetSpawned, targetProcessPID: state.targetProcessPID, targetExecConfirmed: state.targetExecConfirmed, targetExit: state.targetExit, targetClose: state.targetClose, targetStdoutEnded: state.targetStdoutEnded, targetStdoutClosed: state.targetStdoutClosed,
+    targetStderrEnded: state.targetStderrEnded, targetStderrClosed: state.targetStderrClosed, clockNs: nowNs().toString(), input: state.inputObservation.snapshot(), managerInput: state.managerInputSummary,
+    unmetRetirementPrerequisites: supervisorUnmetRetirementPrerequisites(state) });
+  const previousStopReason = state.stopReason;
+  if (!state.stopReason) state.stopReason = reason;
+  if (!state.firstFailure && failure) state.firstFailure = failure;
+  supervisorSendControl(state, { type: 'stopping', reason: state.stopReason, failure: state.firstFailure });
+  if (!state.targetSpawned && !state.inputClosed) state.input.resume();
+  const executionExpired = /^\d+$/u.test(state.executionDeadlineNs) && nowNs() >= BigInt(state.executionDeadlineNs);
+  const anchorOwnsTimeout = reason === 'timeout' || previousStopReason === 'timeout' || executionExpired;
+  if (!previousStopReason && !anchorOwnsTimeout && supervisorManagerControlWritable(state)) send(state.anchorControl!, { type: 'stop', reason: state.stopReason });
+  else if (!previousStopReason && !anchorOwnsTimeout && state.anchor && !state.anchorManagerClosed
+    && state.anchor.exitCode === null && state.anchor.signalCode === null) {
     try {
-      anchor = spawn('bun', ['--no-env-file', '--experimental-strip-types', fileURLToPath(import.meta.url), '--anchor-manager',
-        anchorStartupDeadlineNs, String(process.pid), ...(config.terminalTransport ? ['--terminal-transport'] : [])], {
-        detached: false,
-        stdio: config.terminalTransport
-          ? ['ignore', 'ignore', 'ignore', 'pipe', 'pipe', 'pipe', 'pipe', 10, 11]
-          : ['ignore', 'ignore', 'ignore', 'pipe', 'pipe', 'pipe', 'pipe'],
-        cwd: process.cwd(), env: process.env,
-      });
+      if (!state.anchor.kill('SIGTERM')) state.firstFailure ||= 'owned anchor manager rejected SIGTERM';
     } catch (error) {
-      stop('anchor-launch-error', error instanceof Error ? error.message : 'anchor manager could not be launched');
-      return;
-    } finally {
-      if (config.terminalTransport) {
-        closeDescriptor(10);
-        closeDescriptor(11);
-      }
+      state.firstFailure ||= error instanceof Error ? error.message : 'owned anchor manager could not be signaled';
     }
-    if (anchor.pid === undefined) {
-      anchorLaunchFailed = true;
-      stop('anchor-launch-error', 'anchor manager did not receive a process ID');
-      return;
-    }
-    anchorManagerPID = anchor.pid;
-    const managerControl = controlStream(anchor);
-    anchorControl = managerControl;
-    const anchorInput = writableStream(anchor, 6);
-    anchorInput.on('error', error => stop('caller-input-failed', error.message));
-    input.on('error', error => stop('caller-input-failed', error.message));
-    // This one-way endpoint must release only after all writes and finalization succeed.
-    releaseOwnedInputOnFinish(anchorInput);
-    input.pipe(anchorInput);
-    inputObservation.connected(anchorInput);
-    relay(readableStream(anchor, 4), stdout, observeStdout, 'stdout',
-      () => { managerStdoutEnded = true; notifyRetirement(); },
-      () => { managerStdoutClosed = true; notifyRetirement(); });
-    relay(readableStream(anchor, 5), stderr, observeStderr, 'stderr',
-      () => { managerStderrEnded = true; notifyRetirement(); },
-      () => { managerStderrClosed = true; notifyRetirement(); });
-    managerControl.on('error', () => {
-      if (anchorManagerClosed || anchor?.exitCode !== null || anchor?.signalCode !== null) return;
-      failManagerOutputRelay('owned anchor manager control channel failed');
-    });
-    parseLines(managerControl, message => {
-      if (message.type === 'manager-input-observation') {
-        if (typeof message.event !== 'string' || !['connected', 'sourceEnd', 'sourceClose', 'sourceError',
-          'destinationFinish', 'destinationClose', 'destinationError', 'stop', 'teardown'].includes(message.event)) return;
-        managerInputSummary = sanitizedInputPipeSummary(message.summary);
-        recordObserver({ type: 'supervisor-manager-input-observation', event: message.event, summary: managerInputSummary });
-        return;
-      }
-      if (message.type === 'terminal-transport-unavailable') {
-        if (!config?.terminalTransport || targetLaunchRequested || targetProcessCreated) {
-          stop('terminal-transport-protocol-invalid', 'manager reported an unavailable terminal channel outside startup');
-          return;
-        }
-        anchorLaunchFailed = true;
-        const failure = 'terminal authority descriptors were absent, closed, or not connected sockets';
-        firstFailure ||= failure;
-        recordObserver({ type: 'supervisor-terminal-transport-unavailable' });
-        sendControl({ type: 'failure', reason: 'terminal-transport-unavailable', message: firstFailure });
-        stop('terminal-transport-unavailable', firstFailure);
-        return;
-      }
-      if (message.type === 'manager-output-finished') {
-        receiveManagerOutputFinished(message);
-        return;
-      }
-      if (message.type === 'manager-teardown-started') recordObserver({ type: 'supervisor-manager-teardown-started', anchorClosed,
-        targetSpawned, targetClose, message });
-      if (message.type === 'anchor-process-started') {
-        const values = [message.processID, message.spawnParentPID, message.sessionID];
-        const processID = Number(message.processID);
-        if (!Number.isSafeInteger(processID) || processID <= 0 || Number(message.spawnParentPID) !== anchorManagerPID
-          || Number(message.sessionID) !== process.pid || values.some(value => !Number.isSafeInteger(value))) {
-          stop('anchor-admission-failed', 'anchor process identity did not match its actual manager and supervisor');
-          return;
-        }
-        anchorPID = processID;
-        recordObserver({ type: 'anchor-process-started', processID, spawnParentPID: anchorManagerPID,
-          startupDeadlineNs: anchorStartupDeadlineNs });
-        sendControl(message);
-        return;
-      }
-      if (message.type === 'anchor-native-ready') {
-        const clock = typeof message.clockNs === 'string' && /^\d+$/u.test(message.clockNs) ? BigInt(message.clockNs) : undefined;
-        const candidateGuardianPID = Number(message.guardianPID);
-        const identities = [message.anchorPID, message.spawnParentPID, message.groupID, message.sessionID,
-          message.guardianPID, message.guardianParentPID, message.guardianGroupID, message.guardianSessionID];
-        if (clock === undefined || Number(message.anchorPID) !== anchorPID || Number(message.spawnParentPID) !== anchorManagerPID
-          || Number(message.groupID) !== anchorPID || Number(message.sessionID) !== process.pid
-          || !Number.isSafeInteger(candidateGuardianPID) || candidateGuardianPID <= 0 || candidateGuardianPID === anchorPID
-          || Number(message.guardianParentPID) !== anchorPID || Number(message.guardianGroupID) !== anchorPID
-          || Number(message.guardianSessionID) !== process.pid || identities.some(value => !Number.isSafeInteger(value))) {
-          stop('anchor-admission-failed', 'anchor or guardian identity and clock did not match their owned process group');
-          return;
-        }
-        guardianPID = candidateGuardianPID;
-        groupID = Number(message.groupID);
-        sendControl(message);
-        const supervisorNow = nowNs();
-        recordObserver({ type: 'anchor-clock-handshake', anchorClockNs: clock.toString(), supervisorClockNs: supervisorNow.toString() });
-        const executionRemaining = BigInt(config!.executionDeadlineNs) - supervisorNow - 5_000_000n;
-        const cleanupAllowanceNs = BigInt(config!.hardDeadlineNs) - BigInt(config!.executionDeadlineNs);
-        const reserveNs = cleanupAllowanceNs > 0n
-          ? cleanupAllowanceNs / 2n < 500_000_000n ? cleanupAllowanceNs / 2n : 500_000_000n
-          : 0n;
-        const anchorHardDeadline = BigInt(config!.hardDeadlineNs) - reserveNs;
-        const hardRemaining = anchorHardDeadline - supervisorNow - 5_000_000n;
-        if (hardRemaining <= 0n || executionRemaining <= 0n) {
-          stop('timeout');
-          return;
-        }
-        anchorExecutionDeadlineNs = (clock + executionRemaining).toString();
-        send(anchorControl!, { type: 'configure-anchor', executionDeadlineNs: anchorExecutionDeadlineNs,
-          hardDeadlineNs: (clock + hardRemaining).toString(), killDelayMs: config!.killDelayMs });
-        return;
-      }
-      if (message.type === 'anchor-ready') {
-        const values = [message.anchorPID, message.spawnParentPID, message.groupID, message.sessionID,
-          message.guardianPID, message.guardianParentPID, message.guardianGroupID, message.guardianSessionID];
-        if (Number(message.anchorPID) !== anchorPID || Number(message.spawnParentPID) !== anchorManagerPID
-          || Number(message.groupID) !== anchorPID || Number(message.sessionID) !== process.pid
-          || Number(message.guardianPID) !== guardianPID || !Number.isSafeInteger(guardianPID)
-          || guardianPID === anchorPID || Number(message.guardianParentPID) !== anchorPID
-          || Number(message.guardianGroupID) !== anchorPID || Number(message.guardianSessionID) !== process.pid
-          || values.some(value => !Number.isSafeInteger(value))) {
-          stop('anchor-admission-failed', 'anchor or guardian identity changed before readiness');
-          return;
-        }
-        sendControl(message);
-        if (leaseLost || stopReason || nowNs() >= BigInt(config!.executionDeadlineNs)) {
-          stop(stopReason || 'timeout');
-          return;
-        }
-        targetLaunchRequested = true;
-        send(anchorControl!, { type: 'launch-target', binary: config!.binary, args: config!.args,
-          executionDeadlineNs: anchorExecutionDeadlineNs,
-          ...(config!.terminalTarget ? { terminalTarget: config!.terminalTarget } : {}) });
-        return;
-      }
-      if (message.type === 'anchor-exit') {
-        anchorExited = true;
-        recordObserver({ type: 'supervisor-anchor-exit', code: message.code, signal: message.signal });
-      }
-      if (message.type === 'anchor-close') {
-        anchorClosed = true;
-        recordObserver({ type: 'supervisor-anchor-close', code: message.code, signal: message.signal, groupID });
-        if (groupID === undefined) groupAbsent = true;
-        const currentGroupInspection = inspectGroup(anchorManagerClosed ? 'after-manager-close' : 'before-manager-close');
-        if (currentGroupInspection && !supervisorEnded) notifyRetirement();
-      }
-      if (message.type === 'target-process-started' || message.type === 'target-process-unconfirmed') {
-        const values = [message.spawnParentPID, message.groupID, message.anchorPID];
-        const knownPID = message.type === 'target-process-started'
-          ? Number.isSafeInteger(message.processID) && Number(message.processID) > 0
-          : message.processID === null;
-        if (!targetLaunchRequested || targetProcessCreated || targetNoChildObserved || !knownPID
-          || Number(message.spawnParentPID) !== anchorManagerPID || Number(message.groupID) !== groupID
-          || Number(message.anchorPID) !== anchorPID || values.some(value => !Number.isSafeInteger(value))) {
-          stop('target-admission-failed', 'target process creation did not match one requested child and its actual manager and group');
-          return;
-        }
-        targetProcessCreated = true;
-        if (message.type === 'target-process-started') {
-          targetSpawned = true;
-          targetProcessPID = Number(message.processID);
-          recordObserver({ type: 'supervisor-target-process-started', targetPID: targetProcessPID,
-            spawnParentPID: anchorManagerPID, groupID, anchorPID });
-        } else recordObserver({ type: 'supervisor-target-process-unconfirmed', groupID, anchorPID });
-      }
-      if (message.type === 'target-no-child') {
-        if (!targetLaunchRequested || targetProcessCreated || targetNoChildObserved || message.launchRequestReceived !== true
-          || Number(message.spawnParentPID) !== anchorManagerPID || Number(message.groupID) !== groupID
-          || Number(message.anchorPID) !== anchorPID) {
-          stop('target-admission-failed', 'manager no-child outcome did not match an outstanding launch request');
-          return;
-        }
-        targetNoChildObserved = true;
-        recordObserver({ type: 'supervisor-target-no-child', groupID, anchorPID });
-      }
-      if (message.type === 'target-source-end' || message.type === 'target-source-close') {
-        receiveTargetSourceEvent(message);
-        return;
-      }
-      if (message.type === 'target-started') {
-        const values = [message.targetPID, message.spawnParentPID, message.groupID, message.anchorPID];
-        if (!targetProcessCreated || targetExecConfirmed || !targetSpawned || Number(message.targetPID) !== targetProcessPID
-          || !Number.isSafeInteger(message.targetPID) || Number(message.targetPID) <= 0
-          || Number(message.spawnParentPID) !== anchorManagerPID || Number(message.groupID) !== groupID
-          || Number(message.anchorPID) !== anchorPID || values.some(value => !Number.isSafeInteger(value))
-          || (config?.terminalTransport ? message.callback !== 'spawn' || terminalTargetCallbackObserved : message.callback !== undefined)) {
-          stop('target-admission-failed', 'target exec identity did not match its actual manager, PID, group, and callback');
-          return;
-        }
-        targetExecConfirmed = true;
-        recordObserver({ type: 'supervisor-target-started', targetPID: targetProcessPID,
-          spawnParentPID: anchorManagerPID, groupID, anchorPID });
-        if (config?.terminalTransport) {
-          terminalTargetCallbackObserved = true;
-          recordObserver({ type: 'supervisor-terminal-target-callback', targetPID: targetProcessPID,
-            spawnParentPID: anchorManagerPID, groupID, anchorPID });
-        }
-      }
-      if (message.type === 'target-exit') {
-        if (!targetExecConfirmed || targetExit) {
-          stop('target-lifecycle-invalid', 'target exit was missing exec confirmation or duplicated');
-          return;
-        }
-        targetExit = true;
-        recordObserver({ type: 'supervisor-target-exit', code: message.code, signal: message.signal });
-      }
-      if (message.type === 'target-close') {
-        if (!targetExecConfirmed || targetClose) {
-          stop('target-lifecycle-invalid', 'target close was missing exec confirmation or uniqueness');
-          return;
-        }
-        targetClose = true;
-        recordObserver({ type: 'supervisor-target-close', code: message.code, signal: message.signal });
-      }
-      if (message.type === 'target-unconfirmed-close') {
-        if (!targetProcessCreated || targetExecConfirmed || targetUnconfirmedClose) {
-          stop('target-lifecycle-invalid', 'unconfirmed target close did not match one unconfirmed child or uniqueness');
-          return;
-        }
-        targetUnconfirmedClose = true;
-      }
-      if (message.type === 'failure') {
-        firstFailure ||= typeof message.message === 'string' ? message.message : 'owned target process failed';
-        if (message.reason === 'target-output-failed' || message.reason === 'target-stream-error'
-          || message.reason === 'manager-output-closed' || message.reason === 'manager-output-failed'
-          || message.reason === 'caller-output-failed' || message.reason === 'manager-relay-closed-early' || message.reason === 'manager-relay-error') {
-          targetOutputRelayHealthy = false;
-        }
-      }
-      if (message.type === 'anchor-stopping' || message.type === 'stopping') {
-        const reason = typeof message.reason === 'string' ? message.reason : 'anchor-stopping';
-        if (!stopReason) stopReason = reason;
-        if (message.type === 'anchor-stopping') sendControl({ type: 'stopping', reason });
-      }
-      if (message.type === 'anchor-bootstrap-error') {
-        anchorLaunchFailed = true;
-        const failure = typeof message.message === 'string' ? message.message : 'anchor initialization failed';
-        stop('anchor-launch-error', failure);
-      } else if (message.type === 'anchor-kill-error') {
-        const failure = typeof message.message === 'string' ? message.message : 'anchor could not retire its process group';
-        stop('anchor-retirement-failed', failure);
-      } else if (message.type === 'target-launch-error') {
-        firstFailure ||= typeof message.message === 'string' ? message.message : 'target launch failed';
-        sendControl(message);
-      } else if (message.type === 'target-started' || message.type === 'target-exit' || message.type === 'target-close'
-        || message.type === 'target-unconfirmed-close' || message.type === 'failure' || message.type === 'stopping'
-        || message.type === 'anchor-exit' || message.type === 'anchor-close') {
-        if (message.type === 'target-unconfirmed-close') {
-          sendControl({ type: 'target-close', code: message.code, signal: message.signal,
-            ...(typeof message.launchError === 'string' ? { launchError: message.launchError } : {}) });
-        } else sendControl(message);
-      }
-      if (message.type === 'stopping' || message.type === 'failure' || message.type === 'target-input-error') {
-        stop(typeof message.reason === 'string' ? message.reason : 'owned-process-failure',
-          typeof message.message === 'string' ? message.message : undefined);
-      }
-      notifyRetirement();
-    }, error => failManagerOutputRelay(`anchor manager control protocol failed: ${error.message}`));
-    anchor.once('error', error => stop('anchor-manager-launch-error', error.message));
-    anchor.once('close', (code, signal) => {
-      anchorManagerClosed = true;
-      recordObserver({ type: 'supervisor-manager-close', code, signal, anchorClosed, groupAbsent, targetSpawned, targetExit,
-        targetClose, targetStdoutEnded, targetStdoutClosed, targetStderrEnded, targetStderrClosed, inputClosed });
-      anchorControl?.destroy();
-      if (anchorPID === undefined && anchorLaunchFailed) {
-        anchorExited = true;
-        anchorClosed = true;
-        groupAbsent = true;
-      }
-      const currentGroupInspection = inspectGroup('after-manager-close');
-      if (currentGroupInspection && !supervisorEnded) notifyRetirement();
-    });
-  };
+  } else if (!previousStopReason && !anchorOwnsTimeout && state.groupID !== undefined) {
+    state.firstFailure ||= 'owned process group stop refused because its live anchor control is unavailable';
+    supervisorRecordObserver(state, { type: 'supervisor-group-signal-refused', signal: 'SIGTERM', groupID: state.groupID, anchorPID: state.anchorPID, anchorClosed: state.anchorClosed, anchorManagerClosed: state.anchorManagerClosed });
+  }
+  if (!state.anchor && !state.retirementSent) {
+    state.groupAbsent = true;
+    state.anchorClosed = true;
+    state.anchorExited = true;
+    state.anchorManagerClosed = true;
+    if (state.inputClosed && !state.targetSpawned) supervisorNotifyRetirement(state);
+  }
+}
 
-  const scheduleDeadlines = (executionDeadline: string, hardDeadline: string) => {
-    executionDeadlineNs = executionDeadline;
-    hardDeadlineNs = hardDeadline;
-    executionTimer?.cancel();
-    hardTimer?.cancel();
-    executionTimer = scheduleAt(executionDeadlineNs, () => {
-      recordObserver({ type: 'supervisor-execution-deadline', clockNs: nowNs().toString() });
-      stop('timeout');
-    });
-    hardTimer = scheduleAt(hardDeadlineNs, () => {
-      recordObserver({ type: 'supervisor-hard-deadline', clockNs: nowNs().toString(), retirementSent, inputClosed,
-        targetSpawned, anchorClosed, groupAbsent });
-      releaseRequested = true;
-      if (managerControlWritable()) send(anchorControl!, { type: 'manager-output-abort', reason: 'hard-deadline' });
-      stop('hard-deadline');
-      if (managerControlWritable() && !anchorClosed) send(anchorControl!, { type: 'kill-group', reason: 'hard-deadline' });
-      else if (groupID !== undefined) {
-        firstFailure ||= 'owned process group kill refused because its live anchor control is unavailable';
-        recordObserver({ type: 'supervisor-group-signal-refused', signal: 'SIGKILL', groupID, anchorPID, anchorClosed, anchorManagerClosed });
-      }
-      if (!retirementSent && !unprovedSent) {
-        unprovedSent = true;
-        recordObserver({ type: 'supervisor-retirement-unproved', evidence: evidence(), input: inputObservation.snapshot(),
-          managerInput: managerInputSummary, unmetRetirementPrerequisites: unmetRetirementPrerequisites() });
-        sendControl({ type: 'retirement-unproved', evidence: evidence() });
-      }
-      if (anchor && !anchorManagerClosed && anchor.exitCode === null && anchor.signalCode === null) {
-        recordObserver({ type: 'supervisor-manager-forced-kill', managerPID: anchor.pid });
-        try {
-          if (!anchor.kill('SIGKILL')) firstFailure ||= 'owned anchor manager could not be killed at its hard deadline';
-        } catch (error) {
-          firstFailure ||= error instanceof Error ? error.message : 'owned anchor manager could not be killed at its hard deadline';
-        }
-      }
-      finalizeIfReleased(true);
-    });
+function supervisorFailManagerOutputRelay(state: SupervisorState, reason: string) {
+  state.targetOutputRelayHealthy = false;
+  state.firstFailure ||= reason;
+  state.managerOutputStates.stdout.relayFailed = true;
+  state.managerOutputStates.stderr.relayFailed = true;
+  supervisorRecordObserver(state, { type: 'supervisor-manager-output-protocol-error', reason });
+  if (supervisorManagerControlWritable(state)) send(state.anchorControl!, { type: 'manager-output-abort', reason });
+  supervisorStop(state, 'manager-output-protocol-invalid', reason);
+}
+
+function supervisorAcknowledgeReceivedManagerOutput(state: SupervisorState, stream: 'stdout' | 'stderr') {
+  const output = state.managerOutputStates[stream];
+  if (output.relayFailed || output.expected === undefined || output.receivedAckSent) return;
+  if (output.received > output.expected) {
+    supervisorFailManagerOutputRelay(state, `${stream} manager relay exceeded its advertised byte count`);
+    return;
+  }
+  if (output.received !== output.expected) return;
+  if (output.sourceEnded || output.sourceClosed) {
+    supervisorFailManagerOutputRelay(state, `${stream} manager relay reached EOF before its byte acknowledgement`);
+    return;
+  }
+  output.receivedAckSent = true;
+  send(state.anchorControl!, { type: 'manager-output-received', stream, bytes: output.expected });
+}
+
+function supervisorReceiveManagerOutputFinished(state: SupervisorState, message: RecordValue) {
+  const stream = message.stream;
+  if ((stream !== 'stdout' && stream !== 'stderr') || state.anchorManagerPID === undefined
+    || !Number.isSafeInteger(message.bytes) || Number(message.bytes) < 0) {
+    supervisorFailManagerOutputRelay(state, 'manager output completion named an unknown stream or invalid byte count');
+    return;
+  }
+  const output = state.managerOutputStates[stream];
+  if (output.expected !== undefined || output.sourceEnded || output.sourceClosed || output.relayFailed) {
+    supervisorFailManagerOutputRelay(state, `duplicate or late ${stream} manager output completion`);
+    return;
+  }
+  output.expected = Number(message.bytes);
+  supervisorAcknowledgeReceivedManagerOutput(state, stream);
+}
+
+function supervisorMarkLeaseLost(state: SupervisorState) {
+  if (state.leaseLost) return;
+  state.leaseLost = true;
+  state.releaseRequested = true;
+  supervisorStop(state, 'lease-lost');
+  supervisorFinalizeIfReleased(state);
+}
+
+function supervisorRelay(state: SupervisorState, source: NodeJS.ReadableStream, destination: Writable, observer: Writable | undefined, streamName: 'stdout' | 'stderr', onEnd: () => void, onClose: () => void) {
+  let destinationBroken = false;
+  let observerBroken = false;
+  let destinationBlocked = false;
+  let observerBlocked = false;
+  let sourceEnded = false;
+  const resume = () => {
+    if (!destinationBlocked && !observerBlocked) source.resume();
   };
-  const armDeadlines = () => {
-    if (!/^\d+$/u.test(startupExecutionDeadlineNs) || !/^\d+$/u.test(startupHardDeadlineNs)) {
-      stop('invalid-supervisor-deadlines', 'supervisor did not receive original monotonic deadlines');
+  const breakDestination = (error?: NodeJS.ErrnoException) => {
+    if (destinationBroken) return;
+    destinationBroken = true;
+    destinationBlocked = false;
+    if (error?.code === 'EPIPE') supervisorRecordObserver(state, { type: 'downstream-epipe', stream: streamName });
+    state.targetOutputRelayHealthy = false;
+    const message = error instanceof Error ? error.message : `${streamName} caller-facing relay closed early`;
+    state.firstFailure ||= message;
+    supervisorStop(state, 'caller-output-failed', `${streamName}: ${state.firstFailure}`);
+    resume();
+  };
+  const breakObserver = () => { observerBroken = true; observerBlocked = false; resume(); };
+  destination.on('error', breakDestination);
+  destination.once('close', () => {
+    if (!destination.writableFinished) breakDestination();
+  });
+  observer?.on('error', breakObserver);
+  observer?.on('close', breakObserver);
+  source.on('data', (chunk: Buffer) => {
+    const outputState = state.managerOutputStates[streamName];
+    const nextReceived = outputState.received + chunk.byteLength;
+    if (!Number.isSafeInteger(nextReceived)) {
+      supervisorFailManagerOutputRelay(state, `${streamName} manager relay byte count exceeded its safe bound`);
       return;
     }
-    const executionDeadline = BigInt(startupExecutionDeadlineNs);
-    const hardDeadline = BigInt(startupHardDeadlineNs);
-    if (executionDeadline >= hardDeadline) {
-      stop('invalid-supervisor-deadlines', 'supervisor startup deadlines were inconsistent');
+    outputState.received = nextReceived;
+    supervisorAcknowledgeReceivedManagerOutput(state, streamName);
+    if (!destinationBroken && !destination.write(chunk)) {
+      destinationBlocked = true;
+      source.pause();
+      destination.once('drain', () => { destinationBlocked = false; resume(); });
+    }
+    if (observer && !observerBroken && !observer.write(chunk)) {
+      observerBlocked = true;
+      source.pause();
+      observer.once('drain', () => { observerBlocked = false; resume(); });
+    }
+  });
+  source.once('end', () => {
+    sourceEnded = true;
+    const outputState = state.managerOutputStates[streamName];
+    outputState.sourceEnded = true;
+    supervisorRecordObserver(state, { type: 'supervisor-manager-relay-end', stream: streamName });
+    if (outputState.expected === undefined || outputState.received !== outputState.expected || !outputState.receivedAckSent) {
+      supervisorFailManagerOutputRelay(state, `${streamName} manager relay ended without an exact byte handoff`);
+    }
+    onEnd();
+    destination.end();
+    observer?.end();
+  });
+  source.once('close', () => {
+    const outputState = state.managerOutputStates[streamName];
+    outputState.sourceClosed = true;
+    supervisorRecordObserver(state, { type: 'supervisor-manager-relay-close', stream: streamName, naturalEnd: sourceEnded });
+    if (!sourceEnded || outputState.expected === undefined || outputState.received !== outputState.expected
+      || !outputState.receivedAckSent || outputState.relayFailed) {
+      supervisorFailManagerOutputRelay(state, `${streamName} manager relay closed without a proven byte handoff and natural EOF`);
+    } else if (!outputState.finalAckSent) {
+      outputState.finalAckSent = true;
+      send(state.anchorControl!, { type: 'manager-output-retired', stream: streamName, bytes: outputState.expected,
+        naturalEnd: true, closeObserved: true });
+    }
+    onClose();
+    supervisorNotifyRetirement(state);
+  });
+  source.on('error', error => {
+    const outputState = state.managerOutputStates[streamName];
+    outputState.relayFailed = true;
+    supervisorFailManagerOutputRelay(state, error instanceof Error ? error.message : 'manager relay stream failed');
+    supervisorStop(state, 'manager-relay-error', state.firstFailure);
+  });
+}
+
+function supervisorReceiveTargetSourceEvent(state: SupervisorState, message: RecordValue) {
+  const stream = message.stream;
+  if (!state.targetLaunchRequested || !state.targetProcessCreated || state.targetNoChildObserved
+    || (stream !== 'stdout' && stream !== 'stderr')) {
+    state.targetOutputRelayHealthy = false;
+    supervisorStop(state, 'target-source-protocol-invalid', 'target source event did not match a created target and known stream');
+    return;
+  }
+  const ended = stream === 'stdout' ? state.targetStdoutEnded : state.targetStderrEnded;
+  const closed = stream === 'stdout' ? state.targetStdoutClosed : state.targetStderrClosed;
+  if (message.type === 'target-source-end') {
+    if (ended || closed) {
+      state.targetOutputRelayHealthy = false;
+      supervisorStop(state, 'target-source-protocol-invalid', `duplicate or late ${stream} source end`);
       return;
     }
-    scheduleDeadlines(startupExecutionDeadlineNs, startupHardDeadlineNs);
-  };
+    if (stream === 'stdout') state.targetStdoutEnded = true;
+    else state.targetStderrEnded = true;
+    supervisorRecordObserver(state, { type: 'supervisor-target-source-end', stream });
+    supervisorNotifyRetirement(state);
+    return;
+  }
+  if (closed || message.naturalEnd !== ended) {
+    state.targetOutputRelayHealthy = false;
+    supervisorStop(state, 'target-source-protocol-invalid', `invalid or duplicate ${stream} source close`);
+    return;
+  }
+  if (stream === 'stdout') state.targetStdoutClosed = true;
+  else state.targetStderrClosed = true;
+  if (!ended) {
+    state.targetOutputRelayHealthy = false;
+    supervisorStop(state, 'target-source-closed-before-end', `${stream} target source closed without natural EOF`);
+  }
+  supervisorRecordObserver(state, { type: 'supervisor-target-source-close', stream, naturalEnd: ended });
+  supervisorNotifyRetirement(state);
+}
 
-  lease.on('end', markLeaseLost);
-  lease.on('error', markLeaseLost);
-  control.on('error', () => { controlBroken = true; stop('supervisor-control-failed'); });
-  control.on('end', () => { controlBroken = true; stop('supervisor-control-lost'); });
-  input.once('close', () => { inputClosed = true; recordObserver({ type: 'supervisor-input-close' }); notifyRetirement(); });
-  input.once('end', () => { inputClosed = true; recordObserver({ type: 'supervisor-input-end' }); notifyRetirement(); });
-  lease.resume();
-  armDeadlines();
-  recordObserver({ type: 'supervisor-deadlines-armed', executionDeadlineNs: startupExecutionDeadlineNs,
-    hardDeadlineNs: startupHardDeadlineNs, clockNs: nowNs().toString() });
+function supervisorStartAnchor(state: SupervisorState) {
+  if (!state.config || state.anchor || state.leaseLost || state.stopReason) return;
+  supervisorSendControl(state, { type: 'supervisor-progress', stage: 'anchor-launch-requested' });
+  if (nowNs() >= BigInt(state.config.executionDeadlineNs)) { supervisorStop(state, 'timeout'); return; }
+  const cleanupAllowanceNs = BigInt(state.config.hardDeadlineNs) - BigInt(state.config.executionDeadlineNs);
+  const startupReserveNs = cleanupAllowanceNs > 0n
+    ? cleanupAllowanceNs / 2n < 500_000_000n ? cleanupAllowanceNs / 2n : 500_000_000n
+    : 0n;
+  state.anchorStartupDeadlineNs = (BigInt(state.config.hardDeadlineNs) - startupReserveNs).toString();
+  try {
+    state.anchor = spawn('bun', ['--no-env-file', '--experimental-strip-types', fileURLToPath(import.meta.url), '--anchor-manager',
+      state.anchorStartupDeadlineNs, String(process.pid)], {
+      detached: false,
+      stdio: ['ignore', 'ignore', 'ignore', 'pipe', 'pipe', 'pipe', 'pipe'],
+      cwd: process.cwd(), env: process.env,
+    });
+  } catch (error) {
+    supervisorStop(state, 'anchor-launch-error', error instanceof Error ? error.message : 'anchor manager could not be launched');
+    return;
+  }
+  if (state.anchor.pid === undefined) {
+    state.anchorLaunchFailed = true;
+    supervisorStop(state, 'anchor-launch-error', 'anchor manager did not receive a process ID');
+    return;
+  }
+  supervisorConnectAnchor(state, state.anchor);
+}
 
-  parseLines(control, (message) => {
-    if (message.type === 'configure') {
-      if (config || typeof message.binary !== 'string' || !Array.isArray(message.args)
-        || message.args.some(value => typeof value !== 'string')
-        || message.args.some(value => value.includes('\0')) || message.binary.includes('\0')
-        || typeof message.executionDeadlineNs !== 'string' || typeof message.hardDeadlineNs !== 'string'
-        || typeof message.killDelayMs !== 'number'
-        || (message.terminalTransport !== undefined && message.terminalTransport !== true)
-        || (Object.hasOwn(message, 'terminalTarget')
-          && (message.terminalTransport !== true || !terminalTargetConfig(message.terminalTarget)))) {
-        stop('invalid-launch-request', 'invalid owned process launch configuration');
-        return;
-      }
-      const terminalTarget = Object.hasOwn(message, 'terminalTarget') ? terminalTargetConfig(message.terminalTarget) : undefined;
-      config = { ...message, ...(terminalTarget ? { terminalTarget } : {}) } as unknown as LaunchRequest;
-      const configuredExecution = BigInt(config.executionDeadlineNs);
-      const configuredHard = BigInt(config.hardDeadlineNs);
-      const startupExecutionDeadline = BigInt(startupExecutionDeadlineNs);
-      const startupHardDeadline = BigInt(startupHardDeadlineNs);
-      if (configuredExecution > startupExecutionDeadline || configuredHard > startupHardDeadline
-        || configuredExecution >= configuredHard || configuredHard <= nowNs()) {
-        stop('invalid-launch-request', 'translated launch deadlines extended or outlived the finite startup allowance');
-        return;
-      }
-      scheduleDeadlines(config.executionDeadlineNs, config.hardDeadlineNs);
-      sendControl({ type: 'ready' });
-      if (leaseLost) stop('lease-lost');
-    } else if (message.type === 'start') startAnchor();
-    else if (message.type === 'stop') stop(typeof message.reason === 'string' ? message.reason : 'stop-request');
-    else if (message.type === 'release') {
-      releaseRequested = true;
-      if (!anchor && !retirementSent) stop('released-before-dispatch');
-      finalizeIfReleased();
+function supervisorConnectAnchor(state: SupervisorState, anchor: ChildProcess) {
+  state.anchorManagerPID = anchor.pid;
+  const managerControl = controlStream(anchor);
+  state.anchorControl = managerControl;
+  const anchorInput = writableStream(anchor, 6);
+  anchorInput.on('error', error => supervisorStop(state, 'caller-input-failed', error.message));
+  state.input.on('error', error => supervisorStop(state, 'caller-input-failed', error.message));
+  // This one-way endpoint must release only after all writes and finalization succeed.
+  releaseOwnedInputOnFinish(anchorInput);
+  state.input.pipe(anchorInput);
+  state.inputObservation.connected(anchorInput);
+  supervisorRelay(state, readableStream(anchor, 4), state.stdout, state.observeStdout, 'stdout',
+    () => { state.managerStdoutEnded = true; supervisorNotifyRetirement(state); },
+    () => { state.managerStdoutClosed = true; supervisorNotifyRetirement(state); });
+  supervisorRelay(state, readableStream(anchor, 5), state.stderr, state.observeStderr, 'stderr',
+    () => { state.managerStderrEnded = true; supervisorNotifyRetirement(state); },
+    () => { state.managerStderrClosed = true; supervisorNotifyRetirement(state); });
+  managerControl.on('error', () => {
+    if (state.anchorManagerClosed || anchor.exitCode !== null || anchor.signalCode !== null) return;
+    supervisorFailManagerOutputRelay(state, 'owned anchor manager control channel failed');
+  });
+  parseLines(managerControl, message => supervisorHandleManagerMessage(state, message),
+    error => supervisorFailManagerOutputRelay(state, `anchor manager control protocol failed: ${error.message}`));
+  anchor.once('error', error => supervisorStop(state, 'anchor-manager-launch-error', error.message));
+  anchor.once('close', (code, signal) => supervisorObserveManagerClose(state, code, signal));
+}
+
+function supervisorObserveManagerClose(state: SupervisorState, code: number | null, signal: NodeJS.Signals | null) {
+  state.anchorManagerClosed = true;
+  supervisorRecordObserver(state, { type: 'supervisor-manager-close', code, signal, anchorClosed: state.anchorClosed, groupAbsent: state.groupAbsent,
+    targetSpawned: state.targetSpawned, targetExit: state.targetExit, targetClose: state.targetClose,
+    targetStdoutEnded: state.targetStdoutEnded, targetStdoutClosed: state.targetStdoutClosed,
+    targetStderrEnded: state.targetStderrEnded, targetStderrClosed: state.targetStderrClosed, inputClosed: state.inputClosed });
+  state.anchorControl?.destroy();
+  if (state.anchorPID === undefined && state.anchorLaunchFailed) {
+    state.anchorExited = true;
+    state.anchorClosed = true;
+    state.groupAbsent = true;
+  }
+  const currentGroupInspection = supervisorInspectGroup(state, 'after-manager-close');
+  if (currentGroupInspection && !state.supervisorEnded) supervisorNotifyRetirement(state);
+}
+
+function supervisorAdmitAnchorProcess(state: SupervisorState, message: RecordValue) {
+  const values = [message.processID, message.spawnParentPID, message.sessionID];
+  const processID = Number(message.processID);
+  if (!Number.isSafeInteger(processID) || processID <= 0 || Number(message.spawnParentPID) !== state.anchorManagerPID
+    || Number(message.sessionID) !== process.pid || values.some(value => !Number.isSafeInteger(value))) {
+    supervisorStop(state, 'anchor-admission-failed', 'anchor process identity did not match its actual manager and supervisor');
+    return;
+  }
+  state.anchorPID = processID;
+  supervisorRecordObserver(state, { type: 'anchor-process-started', processID, spawnParentPID: state.anchorManagerPID,
+    startupDeadlineNs: state.anchorStartupDeadlineNs });
+  supervisorSendControl(state, message);
+}
+
+function supervisorAdmitAnchorNative(state: SupervisorState, message: RecordValue) {
+  const clock = typeof message.clockNs === 'string' && /^\d+$/u.test(message.clockNs) ? BigInt(message.clockNs) : undefined;
+  const candidateGuardianPID = Number(message.guardianPID);
+  const identities = [message.anchorPID, message.spawnParentPID, message.groupID, message.sessionID,
+    message.guardianPID, message.guardianParentPID, message.guardianGroupID, message.guardianSessionID];
+  if (clock === undefined || Number(message.anchorPID) !== state.anchorPID || Number(message.spawnParentPID) !== state.anchorManagerPID
+    || Number(message.groupID) !== state.anchorPID || Number(message.sessionID) !== process.pid
+    || !Number.isSafeInteger(candidateGuardianPID) || candidateGuardianPID <= 0 || candidateGuardianPID === state.anchorPID
+    || Number(message.guardianParentPID) !== state.anchorPID || Number(message.guardianGroupID) !== state.anchorPID
+    || Number(message.guardianSessionID) !== process.pid || identities.some(value => !Number.isSafeInteger(value))) {
+    supervisorStop(state, 'anchor-admission-failed', 'anchor or guardian identity and clock did not match their owned process group');
+    return;
+  }
+  state.guardianPID = candidateGuardianPID;
+  state.groupID = Number(message.groupID);
+  supervisorSendControl(state, message);
+  const supervisorNow = nowNs();
+  supervisorRecordObserver(state, { type: 'anchor-clock-handshake', anchorClockNs: clock.toString(), supervisorClockNs: supervisorNow.toString() });
+  const executionRemaining = BigInt(state.config!.executionDeadlineNs) - supervisorNow - 5_000_000n;
+  const cleanupAllowanceNs = BigInt(state.config!.hardDeadlineNs) - BigInt(state.config!.executionDeadlineNs);
+  const reserveNs = cleanupAllowanceNs > 0n
+    ? cleanupAllowanceNs / 2n < 500_000_000n ? cleanupAllowanceNs / 2n : 500_000_000n
+    : 0n;
+  const anchorHardDeadline = BigInt(state.config!.hardDeadlineNs) - reserveNs;
+  const hardRemaining = anchorHardDeadline - supervisorNow - 5_000_000n;
+  if (hardRemaining <= 0n || executionRemaining <= 0n) {
+    supervisorStop(state, 'timeout');
+    return;
+  }
+  state.anchorExecutionDeadlineNs = (clock + executionRemaining).toString();
+  send(state.anchorControl!, { type: 'configure-anchor', executionDeadlineNs: state.anchorExecutionDeadlineNs,
+    hardDeadlineNs: (clock + hardRemaining).toString(), killDelayMs: state.config!.killDelayMs });
+}
+
+function supervisorAdmitAnchorReady(state: SupervisorState, message: RecordValue) {
+  const values = [message.anchorPID, message.spawnParentPID, message.groupID, message.sessionID,
+    message.guardianPID, message.guardianParentPID, message.guardianGroupID, message.guardianSessionID];
+  if (Number(message.anchorPID) !== state.anchorPID || Number(message.spawnParentPID) !== state.anchorManagerPID
+    || Number(message.groupID) !== state.anchorPID || Number(message.sessionID) !== process.pid
+    || Number(message.guardianPID) !== state.guardianPID || !Number.isSafeInteger(state.guardianPID)
+    || state.guardianPID === state.anchorPID || Number(message.guardianParentPID) !== state.anchorPID
+    || Number(message.guardianGroupID) !== state.anchorPID || Number(message.guardianSessionID) !== process.pid
+    || values.some(value => !Number.isSafeInteger(value))) {
+    supervisorStop(state, 'anchor-admission-failed', 'anchor or guardian identity changed before readiness');
+    return;
+  }
+  supervisorSendControl(state, message);
+  if (state.leaseLost || state.stopReason || nowNs() >= BigInt(state.config!.executionDeadlineNs)) {
+    supervisorStop(state, state.stopReason || 'timeout');
+    return;
+  }
+  state.targetLaunchRequested = true;
+  send(state.anchorControl!, { type: 'launch-target', binary: state.config!.binary, args: state.config!.args,
+    executionDeadlineNs: state.anchorExecutionDeadlineNs });
+}
+
+function supervisorObserveAnchorExit(state: SupervisorState, message: RecordValue) {
+  if (message.type === 'anchor-exit') {
+    state.anchorExited = true;
+    supervisorRecordObserver(state, { type: 'supervisor-anchor-exit', code: message.code, signal: message.signal });
+  }
+  if (message.type === 'anchor-close') {
+    state.anchorClosed = true;
+    supervisorRecordObserver(state, { type: 'supervisor-anchor-close', code: message.code, signal: message.signal, groupID: state.groupID });
+    if (state.groupID === undefined) state.groupAbsent = true;
+    const currentGroupInspection = supervisorInspectGroup(state, state.anchorManagerClosed ? 'after-manager-close' : 'before-manager-close');
+    if (currentGroupInspection && !state.supervisorEnded) supervisorNotifyRetirement(state);
+  }
+}
+
+function supervisorAdmitTargetProcess(state: SupervisorState, message: RecordValue): boolean {
+  if (message.type === 'target-process-started' || message.type === 'target-process-unconfirmed') {
+    const values = [message.spawnParentPID, message.groupID, message.anchorPID];
+    const knownPID = message.type === 'target-process-started'
+      ? Number.isSafeInteger(message.processID) && Number(message.processID) > 0
+      : message.processID === null;
+    if (!state.targetLaunchRequested || state.targetProcessCreated || state.targetNoChildObserved || !knownPID
+      || Number(message.spawnParentPID) !== state.anchorManagerPID || Number(message.groupID) !== state.groupID
+      || Number(message.anchorPID) !== state.anchorPID || values.some(value => !Number.isSafeInteger(value))) {
+      supervisorStop(state, 'target-admission-failed', 'target process creation did not match one requested child and its actual manager and group');
+      return false;
     }
-  }, error => stop('supervisor-control-handler-failed', error.message));
-  sendControl({ type: 'runtime-clock', clockNs: nowNs().toString() });
+    state.targetProcessCreated = true;
+    if (message.type === 'target-process-started') {
+      state.targetSpawned = true;
+      state.targetProcessPID = Number(message.processID);
+      supervisorRecordObserver(state, { type: 'supervisor-target-process-started', targetPID: state.targetProcessPID,
+        spawnParentPID: state.anchorManagerPID, groupID: state.groupID, anchorPID: state.anchorPID });
+    } else supervisorRecordObserver(state, { type: 'supervisor-target-process-unconfirmed', groupID: state.groupID, anchorPID: state.anchorPID });
+  }
+  if (message.type === 'target-no-child') {
+    if (!state.targetLaunchRequested || state.targetProcessCreated || state.targetNoChildObserved || message.launchRequestReceived !== true
+      || Number(message.spawnParentPID) !== state.anchorManagerPID || Number(message.groupID) !== state.groupID
+      || Number(message.anchorPID) !== state.anchorPID) {
+      supervisorStop(state, 'target-admission-failed', 'manager no-child outcome did not match an outstanding launch request');
+      return false;
+    }
+    state.targetNoChildObserved = true;
+    supervisorRecordObserver(state, { type: 'supervisor-target-no-child', groupID: state.groupID, anchorPID: state.anchorPID });
+  }
+  return true;
+}
+
+function supervisorTrackTargetLifecycle(state: SupervisorState, message: RecordValue): boolean {
+  if (message.type === 'target-started') {
+    const values = [message.targetPID, message.spawnParentPID, message.groupID, message.anchorPID];
+    if (!state.targetProcessCreated || state.targetExecConfirmed || !state.targetSpawned || Number(message.targetPID) !== state.targetProcessPID
+      || !Number.isSafeInteger(message.targetPID) || Number(message.targetPID) <= 0
+      || Number(message.spawnParentPID) !== state.anchorManagerPID || Number(message.groupID) !== state.groupID
+      || Number(message.anchorPID) !== state.anchorPID || values.some(value => !Number.isSafeInteger(value))
+      || message.callback !== undefined) {
+      supervisorStop(state, 'target-admission-failed', 'target exec identity did not match its actual manager, PID, and group');
+      return false;
+    }
+    state.targetExecConfirmed = true;
+    supervisorRecordObserver(state, { type: 'supervisor-target-started', targetPID: state.targetProcessPID,
+      spawnParentPID: state.anchorManagerPID, groupID: state.groupID, anchorPID: state.anchorPID });
+  }
+  if (message.type === 'target-exit') {
+    if (!state.targetExecConfirmed || state.targetExit) {
+      supervisorStop(state, 'target-lifecycle-invalid', 'target exit was missing exec confirmation or duplicated');
+      return false;
+    }
+    state.targetExit = true;
+    supervisorRecordObserver(state, { type: 'supervisor-target-exit', code: message.code, signal: message.signal });
+  }
+  if (message.type === 'target-close') {
+    if (!state.targetExecConfirmed || state.targetClose) {
+      supervisorStop(state, 'target-lifecycle-invalid', 'target close was missing exec confirmation or uniqueness');
+      return false;
+    }
+    state.targetClose = true;
+    supervisorRecordObserver(state, { type: 'supervisor-target-close', code: message.code, signal: message.signal });
+  }
+  if (message.type === 'target-unconfirmed-close') {
+    if (!state.targetProcessCreated || state.targetExecConfirmed || state.targetUnconfirmedClose) {
+      supervisorStop(state, 'target-lifecycle-invalid', 'unconfirmed target close did not match one unconfirmed child or uniqueness');
+      return false;
+    }
+    state.targetUnconfirmedClose = true;
+  }
+  return true;
+}
+
+function supervisorRecordManagerFailure(state: SupervisorState, message: RecordValue) {
+  if (message.type === 'failure') {
+    state.firstFailure ||= typeof message.message === 'string' ? message.message : 'owned target process failed';
+    if (message.reason === 'target-output-failed' || message.reason === 'target-stream-error'
+      || message.reason === 'manager-output-closed' || message.reason === 'manager-output-failed'
+      || message.reason === 'caller-output-failed' || message.reason === 'manager-relay-closed-early' || message.reason === 'manager-relay-error') {
+      state.targetOutputRelayHealthy = false;
+    }
+  }
+  if (message.type === 'anchor-stopping' || message.type === 'stopping') {
+    const reason = typeof message.reason === 'string' ? message.reason : 'anchor-stopping';
+    if (!state.stopReason) state.stopReason = reason;
+    if (message.type === 'anchor-stopping') supervisorSendControl(state, { type: 'stopping', reason });
+  }
+}
+
+function supervisorForwardManagerMessage(state: SupervisorState, message: RecordValue) {
+  if (message.type === 'anchor-bootstrap-error') {
+    state.anchorLaunchFailed = true;
+    const failure = typeof message.message === 'string' ? message.message : 'anchor initialization failed';
+    supervisorStop(state, 'anchor-launch-error', failure);
+  } else if (message.type === 'anchor-kill-error') {
+    const failure = typeof message.message === 'string' ? message.message : 'anchor could not retire its process group';
+    supervisorStop(state, 'anchor-retirement-failed', failure);
+  } else if (message.type === 'target-launch-error') {
+    state.firstFailure ||= typeof message.message === 'string' ? message.message : 'target launch failed';
+    supervisorSendControl(state, message);
+  } else if (message.type === 'target-started' || message.type === 'target-exit' || message.type === 'target-close'
+    || message.type === 'target-unconfirmed-close' || message.type === 'failure' || message.type === 'stopping'
+    || message.type === 'anchor-exit' || message.type === 'anchor-close') {
+    if (message.type === 'target-unconfirmed-close') {
+      supervisorSendControl(state, { type: 'target-close', code: message.code, signal: message.signal,
+        ...(typeof message.launchError === 'string' ? { launchError: message.launchError } : {}) });
+    } else supervisorSendControl(state, message);
+  }
+  if (message.type === 'stopping' || message.type === 'failure' || message.type === 'target-input-error') {
+    supervisorStop(state, typeof message.reason === 'string' ? message.reason : 'owned-process-failure',
+      typeof message.message === 'string' ? message.message : undefined);
+  }
+}
+
+function supervisorHandleManagerMessage(state: SupervisorState, message: RecordValue) {
+  if (message.type === 'manager-input-observation') {
+    if (typeof message.event !== 'string' || !['connected', 'sourceEnd', 'sourceClose', 'sourceError',
+      'destinationFinish', 'destinationClose', 'destinationError', 'stop', 'teardown'].includes(message.event)) return;
+    state.managerInputSummary = sanitizedInputPipeSummary(message.summary);
+    supervisorRecordObserver(state, { type: 'supervisor-manager-input-observation', event: message.event, summary: state.managerInputSummary });
+    return;
+  }
+  if (message.type === 'manager-output-finished') {
+    supervisorReceiveManagerOutputFinished(state, message);
+    return;
+  }
+  if (message.type === 'manager-teardown-started') supervisorRecordObserver(state, { type: 'supervisor-manager-teardown-started', anchorClosed: state.anchorClosed,
+    targetSpawned: state.targetSpawned, targetClose: state.targetClose, message });
+  if (message.type === 'anchor-process-started') {
+    supervisorAdmitAnchorProcess(state, message);
+    return;
+  }
+  if (message.type === 'anchor-native-ready') {
+    supervisorAdmitAnchorNative(state, message);
+    return;
+  }
+  if (message.type === 'anchor-ready') {
+    supervisorAdmitAnchorReady(state, message);
+    return;
+  }
+  supervisorObserveAnchorExit(state, message);
+  if (!supervisorAdmitTargetProcess(state, message)) return;
+  if (message.type === 'target-source-end' || message.type === 'target-source-close') {
+    supervisorReceiveTargetSourceEvent(state, message);
+    return;
+  }
+  if (!supervisorTrackTargetLifecycle(state, message)) return;
+  supervisorRecordManagerFailure(state, message);
+  supervisorForwardManagerMessage(state, message);
+  supervisorNotifyRetirement(state);
+}
+
+function supervisorOnHardDeadline(state: SupervisorState) {
+  supervisorRecordObserver(state, { type: 'supervisor-hard-deadline', clockNs: nowNs().toString(), retirementSent: state.retirementSent, inputClosed: state.inputClosed,
+    targetSpawned: state.targetSpawned, anchorClosed: state.anchorClosed, groupAbsent: state.groupAbsent });
+  state.releaseRequested = true;
+  if (supervisorManagerControlWritable(state)) send(state.anchorControl!, { type: 'manager-output-abort', reason: 'hard-deadline' });
+  supervisorStop(state, 'hard-deadline');
+  if (supervisorManagerControlWritable(state) && !state.anchorClosed) send(state.anchorControl!, { type: 'kill-group', reason: 'hard-deadline' });
+  else if (state.groupID !== undefined) {
+    state.firstFailure ||= 'owned process group kill refused because its live anchor control is unavailable';
+    supervisorRecordObserver(state, { type: 'supervisor-group-signal-refused', signal: 'SIGKILL', groupID: state.groupID, anchorPID: state.anchorPID, anchorClosed: state.anchorClosed, anchorManagerClosed: state.anchorManagerClosed });
+  }
+  if (!state.retirementSent && !state.unprovedSent) {
+    state.unprovedSent = true;
+    supervisorRecordObserver(state, { type: 'supervisor-retirement-unproved', evidence: supervisorEvidence(state), input: state.inputObservation.snapshot(),
+      managerInput: state.managerInputSummary, unmetRetirementPrerequisites: supervisorUnmetRetirementPrerequisites(state) });
+    supervisorSendControl(state, { type: 'retirement-unproved', evidence: supervisorEvidence(state) });
+  }
+  if (state.anchor && !state.anchorManagerClosed && state.anchor.exitCode === null && state.anchor.signalCode === null) {
+    supervisorRecordObserver(state, { type: 'supervisor-manager-forced-kill', managerPID: state.anchor.pid });
+    try {
+      if (!state.anchor.kill('SIGKILL')) state.firstFailure ||= 'owned anchor manager could not be killed at its hard deadline';
+    } catch (error) {
+      state.firstFailure ||= error instanceof Error ? error.message : 'owned anchor manager could not be killed at its hard deadline';
+    }
+  }
+  supervisorFinalizeIfReleased(state, true);
+}
+
+function supervisorScheduleDeadlines(state: SupervisorState, executionDeadline: string, hardDeadline: string) {
+  state.executionDeadlineNs = executionDeadline;
+  state.hardDeadlineNs = hardDeadline;
+  state.executionTimer?.cancel();
+  state.hardTimer?.cancel();
+  state.executionTimer = scheduleAt(state.executionDeadlineNs, () => {
+    supervisorRecordObserver(state, { type: 'supervisor-execution-deadline', clockNs: nowNs().toString() });
+    supervisorStop(state, 'timeout');
+  });
+  state.hardTimer = scheduleAt(state.hardDeadlineNs, () => supervisorOnHardDeadline(state));
+}
+
+function supervisorArmDeadlines(state: SupervisorState) {
+  if (!/^\d+$/u.test(state.startupExecutionDeadlineNs) || !/^\d+$/u.test(state.startupHardDeadlineNs)) {
+    supervisorStop(state, 'invalid-supervisor-deadlines', 'supervisor did not receive original monotonic deadlines');
+    return;
+  }
+  const executionDeadline = BigInt(state.startupExecutionDeadlineNs);
+  const hardDeadline = BigInt(state.startupHardDeadlineNs);
+  if (executionDeadline >= hardDeadline) {
+    supervisorStop(state, 'invalid-supervisor-deadlines', 'supervisor startup deadlines were inconsistent');
+    return;
+  }
+  supervisorScheduleDeadlines(state, state.startupExecutionDeadlineNs, state.startupHardDeadlineNs);
+}
+
+function supervisorWatchCallerOutputs(state: SupervisorState) {
+  state.stdout.once('finish', () => { state.supervisorStdoutFinished = true; supervisorNotifyRetirement(state); });
+  state.stdout.once('close', () => {
+    state.supervisorStdoutClosed = true;
+    if (!state.supervisorStdoutFinished) supervisorOutputFailure(state, 'stdout', 'caller-facing stdout closed before writer finish');
+    supervisorNotifyRetirement(state);
+  });
+  state.stdout.once('error', error => supervisorOutputFailure(state, 'stdout', error instanceof Error ? error.message : 'caller-facing stdout failed'));
+  state.stderr.once('finish', () => { state.supervisorStderrFinished = true; supervisorNotifyRetirement(state); });
+  state.stderr.once('close', () => {
+    state.supervisorStderrClosed = true;
+    if (!state.supervisorStderrFinished) supervisorOutputFailure(state, 'stderr', 'caller-facing stderr closed before writer finish');
+    supervisorNotifyRetirement(state);
+  });
+  state.stderr.once('error', error => supervisorOutputFailure(state, 'stderr', error instanceof Error ? error.message : 'caller-facing stderr failed'));
+}
+
+function supervisorWatchEndpoints(state: SupervisorState) {
+  state.lease.on('end', () => supervisorMarkLeaseLost(state));
+  state.lease.on('error', () => supervisorMarkLeaseLost(state));
+  state.control.on('error', () => { state.controlBroken = true; supervisorStop(state, 'supervisor-control-failed'); });
+  state.control.on('end', () => { state.controlBroken = true; supervisorStop(state, 'supervisor-control-lost'); });
+  state.input.once('close', () => { state.inputClosed = true; supervisorRecordObserver(state, { type: 'supervisor-input-close' }); supervisorNotifyRetirement(state); });
+  state.input.once('end', () => { state.inputClosed = true; supervisorRecordObserver(state, { type: 'supervisor-input-end' }); supervisorNotifyRetirement(state); });
+  state.lease.resume();
+}
+
+function supervisorConfigure(state: SupervisorState, message: RecordValue) {
+  if (state.config || typeof message.binary !== 'string' || !Array.isArray(message.args)
+    || message.args.some(value => typeof value !== 'string')
+    || message.args.some(value => value.includes('\0')) || message.binary.includes('\0')
+    || typeof message.executionDeadlineNs !== 'string' || typeof message.hardDeadlineNs !== 'string'
+    || typeof message.killDelayMs !== 'number') {
+    supervisorStop(state, 'invalid-launch-request', 'invalid owned process launch configuration');
+    return;
+  }
+  const config = message as unknown as LaunchRequest;
+  state.config = config;
+  const configuredExecution = BigInt(config.executionDeadlineNs);
+  const configuredHard = BigInt(config.hardDeadlineNs);
+  const startupExecutionDeadline = BigInt(state.startupExecutionDeadlineNs);
+  const startupHardDeadline = BigInt(state.startupHardDeadlineNs);
+  if (configuredExecution > startupExecutionDeadline || configuredHard > startupHardDeadline
+    || configuredExecution >= configuredHard || configuredHard <= nowNs()) {
+    supervisorStop(state, 'invalid-launch-request', 'translated launch deadlines extended or outlived the finite startup allowance');
+    return;
+  }
+  supervisorScheduleDeadlines(state, config.executionDeadlineNs, config.hardDeadlineNs);
+  supervisorSendControl(state, { type: 'ready' });
+  if (state.leaseLost) supervisorStop(state, 'lease-lost');
+}
+
+function supervisorHandleControlMessage(state: SupervisorState, message: RecordValue) {
+  if (message.type === 'configure') supervisorConfigure(state, message);
+  else if (message.type === 'start') supervisorStartAnchor(state);
+  else if (message.type === 'stop') supervisorStop(state, typeof message.reason === 'string' ? message.reason : 'stop-request');
+  else if (message.type === 'release') {
+    state.releaseRequested = true;
+    if (!state.anchor && !state.retirementSent) supervisorStop(state, 'released-before-dispatch');
+    supervisorFinalizeIfReleased(state);
+  }
+}
+
+function runSupervisor(): void {
+  const state = createSupervisorState();
+  supervisorWatchCallerOutputs(state);
+  supervisorWatchEndpoints(state);
+  supervisorArmDeadlines(state);
+  supervisorRecordObserver(state, { type: 'supervisor-deadlines-armed', executionDeadlineNs: state.startupExecutionDeadlineNs,
+    hardDeadlineNs: state.startupHardDeadlineNs, clockNs: nowNs().toString() });
+  parseLines(state.control, message => supervisorHandleControlMessage(state, message),
+    error => supervisorStop(state, 'supervisor-control-handler-failed', error.message));
+  supervisorSendControl(state, { type: 'runtime-clock', clockNs: nowNs().toString() });
 }
 
 const mode = process.argv[2];

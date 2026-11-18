@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -21,8 +22,24 @@ const (
 
 type hermesReader struct {
 	home     string
-	binary   string
 	executor sqliteexec.Executor
+}
+
+// Rows that agree on these columns are one logical message. The SQL page
+// query and the live feed's hermesRow.logicalKey must name the same fields.
+const hermesLogicalColumns = "role,content,tool_call_id,tool_calls,tool_name,logical_timestamp"
+
+type hermesLogicalKey struct {
+	Role       string
+	ContentHex string
+	ToolCallID string
+	ToolCalls  string
+	ToolName   string
+	Timestamp  float64
+}
+
+func (r hermesRow) logicalKey() hermesLogicalKey {
+	return hermesLogicalKey{r.Role, r.ContentHex, r.ToolCallID, r.ToolCalls, r.ToolName, r.Timestamp}
 }
 
 type hermesRow struct {
@@ -49,31 +66,11 @@ type hermesToolRow struct {
 }
 
 func newHermesReader(home string) *hermesReader {
-	return &hermesReader{home: home, binary: "sqlite3", executor: sqliteexec.MustFromEnv()}
-}
-
-func (r *hermesReader) queryExec() sqliteexec.Executor {
-	return resolveQueryExecutor(r.executor, r.binary)
+	return &hermesReader{home: home, executor: sqliteexec.New()}
 }
 
 func (r *hermesReader) databases() ([]string, string) {
-	if exec := r.queryExec(); exec == nil || !exec.Ready() {
-		return nil, "source_unavailable"
-	}
-	roots := agentroots.HermesData(r.home)
-	databases := make([]string, 0, len(roots))
-	for index, candidate := range agentroots.HermesDBs(r.home) {
-		if index >= len(roots) {
-			break
-		}
-		if path := containedRegularFile(candidate, roots[index]); path != "" {
-			databases = append(databases, path)
-		}
-	}
-	if len(databases) == 0 {
-		return nil, "source_unavailable"
-	}
-	return databases, ""
+	return containedDatabases(agentroots.HermesData(r.home), agentroots.HermesDBs(r.home))
 }
 
 func (r *hermesReader) locate(cwd, sessionID string) Location {
@@ -118,48 +115,35 @@ func sameHermesDirectory(cwd, directory string) bool {
 	return cwdErr == nil && directoryErr == nil && realCwd == realDirectory
 }
 
-func (r *hermesReader) readFrom(database, sessionID, before string, limit int) ([]Entry, bool, bool, hermesRow, string) {
-	return r.readFromContext(context.Background(), database, sessionID, before, limit)
-}
-
-func (r *hermesReader) readFromContext(ctx context.Context, database, sessionID, before string, limit int) ([]Entry, bool, bool, hermesRow, string) {
+func (r *hermesReader) readFromContext(ctx context.Context, database, sessionID, before string, limit int) nativeReadResult[hermesRow] {
 	if !safeSessionID(sessionID) {
-		return nil, false, false, hermesRow{}, "invalid_session"
+		return nativeReadResult[hermesRow]{Code: "invalid_session"}
 	}
 	if before != "" {
 		cursor, err := strconv.ParseInt(before, 10, 64)
 		if err != nil || cursor <= 0 {
-			return nil, false, false, hermesRow{}, "invalid_cursor"
+			return nativeReadResult[hermesRow]{Code: "invalid_cursor"}
 		}
 	}
 	rows, hasMore, queryCode := r.queryContext(ctx, database, sessionID, before, limit)
 	if queryCode != "" {
-		return nil, false, false, hermesRow{}, queryCode
+		return nativeReadResult[hermesRow]{Code: queryCode}
 	}
 	if len(rows) == 0 || rows[0].SessionID != sessionID {
-		return nil, false, false, hermesRow{}, "invalid_session"
+		return nativeReadResult[hermesRow]{Code: "invalid_session"}
 	}
 	if before != "" && rows[0].CursorFound == 0 {
-		return nil, false, false, hermesRow{}, "invalid_cursor"
+		return nativeReadResult[hermesRow]{Code: "invalid_cursor"}
 	}
 	entries, corrupt := parseHermesRows(rows)
 	if toolCorrupt := r.attachToolResultsContext(ctx, database, sessionID, entries); toolCorrupt {
 		corrupt = true
 	}
-	return entries, hasMore, corrupt, rows[0], ""
-}
-
-func (r *hermesReader) query(database, sessionID, before string, limit int) ([]hermesRow, bool, string) {
-	return r.queryContext(context.Background(), database, sessionID, before, limit)
+	return nativeReadResult[hermesRow]{Entries: entries, HasMore: hasMore, Corrupt: corrupt, Metadata: rows[0]}
 }
 
 func (r *hermesReader) queryContext(ctx context.Context, database, sessionID, before string, limit int) ([]hermesRow, bool, string) {
-	if limit < 1 {
-		limit = defaultPageSize
-	}
-	if limit > maxPageSize {
-		limit = maxPageSize
-	}
+	limit = clampPageLimit(limit)
 	sessionHex := hex.EncodeToString([]byte(sessionID))
 	cursorCTE := "cursor AS (SELECT NULL AS logical_id WHERE 0)"
 	cursorFilter := ""
@@ -189,10 +173,10 @@ func (r *hermesReader) queryContext(ctx context.Context, database, sessionID, be
 			`), visible AS (`+
 			`SELECT raw.*,`+
 			`MIN(id) OVER (`+
-			`PARTITION BY role,content,tool_call_id,tool_calls,tool_name,logical_timestamp`+
+			`PARTITION BY `+hermesLogicalColumns+
 			`) AS logical_id,`+
 			`ROW_NUMBER() OVER (`+
-			`PARTITION BY role,content,tool_call_id,tool_calls,tool_name,logical_timestamp `+
+			`PARTITION BY `+hermesLogicalColumns+` `+
 			`ORDER BY active DESC,id DESC`+
 			`) AS generation `+
 			`FROM raw`+
@@ -216,7 +200,7 @@ func (r *hermesReader) queryContext(ctx context.Context, database, sessionID, be
 	)
 	queryCtx, cancel := context.WithTimeout(ctx, hermesQueryTimeout)
 	defer cancel()
-	raw, code := runSQLiteJSON(queryCtx, r.queryExec(), database, query, maxHermesOutput)
+	raw, code := runSQLiteJSON(queryCtx, r.executor, database, query, maxHermesOutput)
 	if code != "" {
 		return nil, false, code
 	}
@@ -234,14 +218,8 @@ func (r *hermesReader) queryContext(ctx context.Context, database, sessionID, be
 	if hasMore && len(rows) > 0 {
 		rows = rows[:len(rows)-1]
 	}
-	for left, right := 0, len(rows)-1; left < right; left, right = left+1, right-1 {
-		rows[left], rows[right] = rows[right], rows[left]
-	}
+	slices.Reverse(rows)
 	return rows, hasMore, ""
-}
-
-func (r *hermesReader) attachToolResults(database, sessionID string, entries []Entry) bool {
-	return r.attachToolResultsContext(context.Background(), database, sessionID, entries)
 }
 
 func (r *hermesReader) attachToolResultsContext(ctx context.Context, database, sessionID string, entries []Entry) bool {
@@ -297,10 +275,6 @@ func attachHermesToolRows(entries []Entry, rows []hermesToolRow) bool {
 	return corrupt
 }
 
-func (r *hermesReader) queryToolRows(database, sessionID string, callIDs []string) ([]hermesToolRow, string) {
-	return r.queryToolRowsContext(context.Background(), database, sessionID, callIDs)
-}
-
 func (r *hermesReader) queryToolRowsContext(ctx context.Context, database, sessionID string, callIDs []string) ([]hermesToolRow, string) {
 	sessionHex := hex.EncodeToString([]byte(sessionID))
 	encodedIDs := make([]string, 0, len(callIDs))
@@ -317,7 +291,7 @@ func (r *hermesReader) queryToolRowsContext(ctx context.Context, database, sessi
 	)
 	queryCtx, cancel := context.WithTimeout(ctx, hermesQueryTimeout)
 	defer cancel()
-	raw, code := runSQLiteJSON(queryCtx, r.queryExec(), database, query, maxHermesOutput)
+	raw, code := runSQLiteJSON(queryCtx, r.executor, database, query, maxHermesOutput)
 	if code != "" {
 		return nil, code
 	}
@@ -419,11 +393,6 @@ func hermesText(raw string) string {
 	return textValue(value)
 }
 
-func hermesTextHex(encoded string) string {
-	text, _ := hermesTextHexValue(encoded)
-	return text
-}
-
 func hermesTextHexValue(encoded string) (string, bool) {
 	if encoded == "" {
 		return "", false
@@ -442,52 +411,23 @@ func hermesTimestamp(value float64) string {
 	return time.Unix(0, int64(value*float64(time.Second))).UTC().Format(time.RFC3339Nano)
 }
 
-func isHermesAgent(agent string) bool {
-	switch normalizedAgent(agent) {
-	case "hermes", "hermesagent":
-		return true
-	default:
-		return false
-	}
-}
-
-func (r *Reader) readHermesFor(agent, cwd, sessionID, before string, limit int) (Page, error) {
+func (r *Reader) readHermesFor(agent, cwd, sessionID string, limit int) ([]Entry, error) {
 	sessionID = strings.TrimSpace(sessionID)
 	if !safeSessionID(sessionID) {
-		return unavailableCode("invalid_session", "This agent has not reported a conversation session yet."), nil
+		return nil, ErrUnavailable
 	}
-	if before != "" {
-		cursor, err := strconv.ParseInt(before, 10, 64)
-		if err != nil || cursor <= 0 {
-			return unavailableCode("invalid_cursor", "This conversation page cursor is invalid."), nil
-		}
-	}
-	if limit < 1 {
-		limit = defaultPageSize
-	}
-	if limit > maxPageSize {
-		limit = maxPageSize
-	}
-	location := r.Locate(agent, cwd, sessionID)
+	limit = clampPageLimit(limit)
+	location := r.LocateWithProject(agent, ProjectContext{CWD: cwd}, sessionID)
 	if location.Path == "" {
-		if _, code := r.hermes.databases(); code != "" {
-			return unavailableCode(code, "Hermes conversation history is unavailable."), nil
-		}
-		return unavailableCode("invalid_session", "No conversation log is available for this session."), nil
+		return nil, ErrUnavailable
 	}
-	entries, hasMore, corrupt, metadata, code := r.hermes.readFrom(location.Path, sessionID, before, limit)
-	if code != "" {
-		return unavailableCode(code, "Hermes conversation history is unavailable."), nil
+	result := r.hermes.readFromContext(context.Background(), location.Path, sessionID, "", limit)
+	if result.Code != "" {
+		return nil, ErrUnavailable
 	}
-	if cwd != "" && metadata.CWD != "" && !sameHermesDirectory(cwd, metadata.CWD) {
-		return unavailableCode("invalid_session", "This conversation belongs to a different workspace."), nil
+	if cwd != "" && result.Metadata.CWD != "" && !sameHermesDirectory(cwd, result.Metadata.CWD) {
+		return nil, ErrUnavailable
 	}
-	normalizeEntriesForResponse(entries)
-	return Page{
-		Available:     true,
-		Entries:       append([]Entry(nil), entries...),
-		HasMore:       hasMore,
-		Total:         metadata.Total,
-		SourceCorrupt: corrupt,
-	}, nil
+	normalizeEntriesForResponse(result.Entries)
+	return append([]Entry(nil), result.Entries...), nil
 }

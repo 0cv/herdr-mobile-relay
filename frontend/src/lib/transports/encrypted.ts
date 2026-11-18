@@ -43,7 +43,6 @@ export interface EncryptedTransportOptions {
   codec: E2EECodec;
   createChannel: FrameChannelFactory;
   handlers: TransportHandlers;
-  handshakeTimeoutMs?: number;
 }
 
 export type TransportAuthentication = Pick<
@@ -65,7 +64,6 @@ export function createEncryptedTransport(options: EncryptedTransportOptions): Re
     handlers,
   } = options;
   let encrypted = false;
-  const handshakeTimeoutMs = options.handshakeTimeoutMs ?? E2EE_HANDSHAKE_TIMEOUT_MS;
 
   let channel: FrameChannel | null = null;
   let handshake: E2EEClientHandshake | null = null;
@@ -174,7 +172,7 @@ export function createEncryptedTransport(options: EncryptedTransportOptions): Re
           }
           handshakeTimer = setTimeout(() => {
             finish({ reason: 'Relay handshake timed out' });
-          }, handshakeTimeoutMs);
+          }, E2EE_HANDSHAKE_TIMEOUT_MS);
           void createE2EEClientHandshake(presentedAuthentication, undefined, codec).then((created) => {
             if (finished) return;
             handshake = created;

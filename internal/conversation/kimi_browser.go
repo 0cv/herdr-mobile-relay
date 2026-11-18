@@ -68,10 +68,10 @@ func (b *Browser) readKimiPage(ctx context.Context, request BrowseRequest) (Brow
 		var err error
 		cursor, err = decodeBrowseCursor(b.key, request.Cursor, request.Scope)
 		if err != nil || cursor.Mode != "native" || cursor.NativeBefore == "" {
-			return browseFailure(true, "invalid_cursor", "This Kimi history cursor is invalid.", browseErrorFor("invalid_cursor", "Start again from the latest messages.", false)), nil
+			return browseFailure("invalid_cursor", "This Kimi history cursor is invalid.", browseErrorFor("invalid_cursor", "Start again from the latest messages.", false)), nil
 		}
 		if cursor.Revision != revision {
-			return browseFailure(true, "source_changed", "Kimi history changed. Start again from the latest messages.", browseErrorFor("source_changed", "Kimi history changed.", false)), nil
+			return browseFailure("source_changed", "Kimi history changed. Start again from the latest messages.", browseErrorFor("source_changed", "Kimi history changed.", false)), nil
 		}
 	}
 	end := len(projection.entries)
@@ -89,9 +89,7 @@ func (b *Browser) readKimiPage(ctx context.Context, request BrowseRequest) (Brow
 	}
 	start := max(0, end-request.Limit)
 	entries, work, code := projection.materialize(ctx, start, end)
-	if b.kimiMaterializationObserver != nil {
-		b.kimiMaterializationObserver(work)
-	}
+	b.observe(browserObservation{kind: "kimi_materialization", work: work})
 	if code != "" {
 		return browseUnavailable(code, kimiReason(code)), nil
 	}

@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/config"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 	"github.com/coder/websocket"
 )
 
@@ -328,7 +329,7 @@ func TestEncryptedHubAuthenticatesBeforeRegistrationAndProtectsMessages(t *testi
 	hub := NewHub(&config.Config{Token: token}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	hub.SetE2EEAuthResolver(fixedE2EEAuthResolver{secret: []byte(token)})
 	connected := make(chan struct{}, 1)
-	received := make(chan map[string]any, 1)
+	received := make(chan protocol.Inbound, 1)
 	hub.SetOnConnect(func(client *ClientConn) {
 		connected <- struct{}{}
 		hub.Send(client, map[string]any{
@@ -336,7 +337,7 @@ func TestEncryptedHubAuthenticatesBeforeRegistrationAndProtectsMessages(t *testi
 			"content": "private terminal output",
 		})
 	})
-	hub.SetHandler(func(_ *ClientConn, message map[string]any, admitted func()) {
+	hub.SetHandler(func(_ *ClientConn, message protocol.Inbound, admitted func()) {
 		admitted()
 		received <- message
 	})
@@ -409,8 +410,8 @@ func TestEncryptedHubAuthenticatesBeforeRegistrationAndProtectsMessages(t *testi
 	}
 	select {
 	case message := <-received:
-		if message["type"] != "refresh_agents" {
-			t.Fatalf("received type = %v", message["type"])
+		if message.Type != "refresh_agents" {
+			t.Fatalf("received type = %v", message.Type)
 		}
 	case <-ctx.Done():
 		t.Fatal("relay did not receive encrypted client message")
@@ -484,7 +485,11 @@ func testClientE2EEHandshake(t *testing.T, ctx context.Context, conn *websocket.
 func testClientFrameE2EEHandshake(
 	t *testing.T,
 	ctx context.Context,
-	conn FrameConn,
+	conn interface {
+		ReadFrame(context.Context) ([]byte, error)
+		WriteFrame(context.Context, []byte) error
+		Codec() FrameCodec
+	},
 	token string,
 	beforeFinish func(),
 ) (*e2eeSession, []byte, []byte) {

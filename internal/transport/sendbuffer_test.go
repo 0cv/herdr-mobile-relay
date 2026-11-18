@@ -4,6 +4,14 @@ import (
 	"testing"
 )
 
+func (b *sendBuffer) Push(data []byte) bool {
+	return b.PushTyped(data, messageType(data), false)
+}
+
+func (b *sendBuffer) PushTyped(data []byte, kind string, replaceable bool) bool {
+	return b.pushTyped(data, kind, replaceable) != pushRejected
+}
+
 func TestSendBufferItemLimit(t *testing.T) {
 	buf := newSendBuffer(3, 1<<20)
 

@@ -3,6 +3,7 @@ package slashcmd
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -105,8 +106,8 @@ func TestWalkFileLimit(t *testing.T) {
 		os.WriteFile(name, []byte("cmd"), 0o644)
 	}
 	commands := walkCommandDir(dir, "personal")
-	if len(commands) > maxWalkFiles {
-		t.Errorf("got %d commands, limit is %d", len(commands), maxWalkFiles)
+	if len(commands) > maxCustomFiles {
+		t.Errorf("got %d commands, limit is %d", len(commands), maxCustomFiles)
 	}
 }
 
@@ -248,7 +249,7 @@ func TestScanSkillDirFollowsSymlinkedSkillDir(t *testing.T) {
 }
 
 // Following symlinks makes it possible for two entries to name one real skill.
-// scanSkillDirFormat already keys on the resolved path; this scanner must agree,
+// scanSkillDirFormatOptions already keys on the resolved path; this scanner must agree,
 // or the palette shows the same skill twice.
 func TestScanSkillDirDeduplicatesSymlinkToSameSkill(t *testing.T) {
 	root := t.TempDir()
@@ -318,5 +319,58 @@ func TestWalkSymlinkToAncestorTerminates(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("walk did not terminate on a symlink to an ancestor")
+	}
+}
+
+func TestSkillDescriptionDefault(t *testing.T) {
+	tests := []struct {
+		name     string
+		metadata map[string]string
+		skill    string
+		want     string
+	}{
+		{"declared", map[string]string{"description": "Does things"}, "deploy", "Does things"},
+		{"missing", map[string]string{}, "deploy", "Deploy skill"},
+		{"empty", map[string]string{"description": ""}, "x", "X skill"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := skillDescription(tt.metadata, tt.skill); got != tt.want {
+				t.Fatalf("skillDescription = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSkillCommandLimitsAndSource(t *testing.T) {
+	metadata := map[string]string{"argument-hint": strings.Repeat("h", 121)}
+	command := skillCommand("/deploy", strings.Repeat("d", 241), "personal", metadata)
+	if command.Command != "/deploy" || command.Source != "personal" {
+		t.Fatalf("unexpected command: %+v", command)
+	}
+	if got := len([]rune(command.Description)); got != 240 {
+		t.Fatalf("description length = %d, want 240", got)
+	}
+	if got := len([]rune(command.ArgumentHint)); got != 120 {
+		t.Fatalf("argument hint length = %d, want 120", got)
+	}
+
+	short := skillCommand("/deploy", " two   words ", "project", map[string]string{})
+	if short.Description != "two words" || short.ArgumentHint != "" {
+		t.Fatalf("unexpected short command: %+v", short)
+	}
+}
+
+func TestSkillFormattedCommand(t *testing.T) {
+	tests := []struct{ format, name, want string }{
+		{"/{name}", "deploy", "/deploy"},
+		{"{name}", "deploy", "/deploy"},
+		{"/skill:{name}", "deploy", "/skill:deploy"},
+		{"$skill-{name}", "deploy", "/$skill-deploy"},
+	}
+	for _, tt := range tests {
+		if got := formattedCommand(tt.format, tt.name); got != tt.want {
+			t.Errorf("formattedCommand(%q, %q) = %q, want %q", tt.format, tt.name, got, tt.want)
+		}
 	}
 }

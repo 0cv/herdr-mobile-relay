@@ -48,6 +48,33 @@ relay_release_root() {
 }
 
 
+state_command() {
+    "$(relay_binary)" stable-state "$@"
+}
+
+state_get() {
+    state_command get "$STATE_FILE" "$1"
+}
+
+state_update() {
+    state_command update "$STATE_FILE" "$@"
+}
+
+wait_for_exit() {
+    local pid="$1"
+    local attempts="$2"
+    local attempt
+    for ((attempt = 0; attempt < attempts; attempt++)); do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            wait "$pid" 2>/dev/null || true
+            return 0
+        fi
+        sleep 1
+    done
+    kill -KILL "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+}
+
 relay_binary() {
     local binary
     local common_dir
@@ -200,6 +227,16 @@ expand_config_path() {
     esac
     canonical_file_path "$path"
 }
+normalize_hostname() {
+    local hostname
+
+    hostname="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+    hostname="${hostname#https://}"
+    hostname="${hostname#wss://}"
+    hostname="${hostname%%/*}"
+    printf '%s\n' "${hostname%.}"
+}
+
 valid_hostname() {
     local hostname="$1"
     local old_ifs
@@ -304,29 +341,6 @@ cloudflared_origin_cert() {
     printf '%s\n' "$HOME/.cloudflared/cert.pem"
 }
 
-# The Cloudflare name of a tunnel UUID. A generated config records the UUID as
-# its `tunnel:` scalar, so anything that reasons about the tunnel *name* — the
-# Herdr namespace guard above all — has to ask Cloudflare which name the id was
-# created with. Fails when the certificate cannot authorize the lookup, when
-# Cloudflare refuses it, or when the id names no live tunnel.
-cloudflared_tunnel_name_by_id() {
-    local uuid="$1"
-    local origin_cert="$2"
-    local list_output
-    local name
-
-    [ -r "$origin_cert" ] || return 1
-    list_output="$(mktemp "${TMPDIR:-/tmp}/herdr-tunnel-list.XXXXXX")" || return 1
-    if ! cloudflared tunnel --origincert "$origin_cert" list --id "$uuid" --output json > "$list_output"; then
-        rm -f "$list_output"
-        return 1
-    fi
-    name="$("$(relay_binary)" stable-state tunnel-name-by-id "$list_output" "$uuid")" || name=""
-    rm -f "$list_output"
-    [ -n "$name" ] || return 1
-    printf '%s\n' "$name"
-}
-
 cloudflare_cert_zone_name() {
     local origin_cert="$1"
     local payload
@@ -367,11 +381,78 @@ relogin_for_cloudflare_zone() {
     fi
 }
 
+dns_has_record() {
+    local hostname="$1"
+    local record_type
+    local response
+    shift
+    [ "$#" -gt 0 ] || set -- A AAAA CNAME
+
+    for record_type in "$@"; do
+        if ! response="$(curl -fsS --max-time 5 -H 'accept: application/dns-json' \
+            "https://cloudflare-dns.com/dns-query?name=$hostname&type=$record_type" 2>/dev/null)"; then
+            return 2
+        fi
+        if printf '%s' "$response" | grep -q '"Answer"'; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 hostname_in_zone() {
     case "$1" in
         "$2" | *".$2") return 0 ;;
     esac
     return 1
+}
+
+ensure_hostname_in_cloudflare_zone() {
+    local hostname="$1"
+    local origin_cert="$2"
+    local cert_zone
+    local confirmation
+
+    cert_zone="$(cloudflare_cert_zone_name "$origin_cert" || true)"
+    if [ -z "$cert_zone" ]; then
+        echo "▸ The Cloudflare login domain could not be read; the created route will be verified exactly."
+        return 0
+    fi
+    if hostname_in_zone "$hostname" "$cert_zone"; then
+        return 0
+    fi
+
+    echo ""
+    echo "✗ The current Cloudflare login authorizes $cert_zone, not $hostname." >&2
+    echo "  Continuing would create $hostname.$cert_zone instead." >&2
+    case "${HERDR_STABLE_RELOGIN:-}" in
+        1|true) confirmation="y" ;;
+        0|false) confirmation="n" ;;
+        *)
+            if [ ! -t 0 ]; then
+                confirmation="n"
+            else
+                read -r -p "Sign in to Cloudflare for ${hostname#*.} now? [Y/n] " confirmation ||
+                    confirmation=""
+            fi
+            ;;
+    esac
+    case "$confirmation" in
+        ""|y|Y|yes|YES) ;;
+        *)
+            echo "  Run 'cloudflared tunnel login' and pick the zone that owns" >&2
+            echo "  $hostname, then run this again." >&2
+            return 1
+            ;;
+    esac
+
+    relogin_for_cloudflare_zone "$origin_cert" "${hostname#*.}" || return 1
+    cert_zone="$(cloudflare_cert_zone_name "$origin_cert" || true)"
+    if [ -z "$cert_zone" ] || ! hostname_in_zone "$hostname" "$cert_zone"; then
+        echo "✗ The new Cloudflare login still does not authorize $hostname." >&2
+        return 1
+    fi
+    echo "✓ Cloudflare authorized $cert_zone."
 }
 
 cloudflare_routed_hostname() {
@@ -380,18 +461,38 @@ cloudflare_routed_hostname() {
         head -1
 }
 
+relay_service_file() {
+    case "$(uname -s)" in
+        Linux) printf '%s\n' "$HOME/.config/systemd/user/$RELAY_SYSTEMD_LABEL" ;;
+        Darwin) printf '%s\n' "$HOME/Library/LaunchAgents/$RELAY_LAUNCHD_LABEL.plist" ;;
+        *) return 1 ;;
+    esac
+}
+
+relay_transport() {
+    local env_file="$1"
+
+    if [ -n "$(env_file_value "$env_file" HERDR_TAILSCALE_PORT)" ]; then
+        echo tailscale
+    elif [ -n "$(gateway_urls "$env_file")" ]; then
+        echo gateway
+    else
+        echo cloudflare
+    fi
+}
+
 installed_service_env_file() {
     local service_file
 
     case "$(uname -s)" in
         Linux)
-            service_file="$HOME/.config/systemd/user/$RELAY_SYSTEMD_LABEL"
+            service_file="$(relay_service_file)"
             if [ -r "$service_file" ]; then
                 systemd_field "$service_file" Environment
             fi
             ;;
         Darwin)
-            service_file="$HOME/Library/LaunchAgents/$RELAY_LAUNCHD_LABEL.plist"
+            service_file="$(relay_service_file)"
             if [ -r "$service_file" ]; then
                 awk '
                     /<key>HERDR_RELAY_ENV<\/key>/ { found = 1; next }
@@ -412,11 +513,25 @@ installed_service_env_file() {
     esac
 }
 
+adopt_installed_service_env() {
+    local service_env
+
+    [ -z "${HERDR_RELAY_ENV:-}" ] || return 0
+    service_env="$(installed_service_env_file)" || return 1
+    [ -n "$service_env" ] || return 0
+    export HERDR_RELAY_ENV="$service_env"
+    if [ "${1:-}" = announce ]; then
+        echo "Reusing the installed relay configuration:"
+        echo "  $service_env"
+        echo ""
+    fi
+}
+
 update_launchd_release_paths() {
     local plist="$1"
     local service_wrapper="$2"
     local work_dir="$3"
-    local env_file="${4:-}"
+    local env_file="$4"
     local plist_buddy="${HERDR_PLIST_BUDDY:-/usr/libexec/PlistBuddy}"
 
     [ -x "$plist_buddy" ] || {
@@ -425,9 +540,7 @@ update_launchd_release_paths() {
     }
     "$plist_buddy" -c "Set :ProgramArguments:0 $service_wrapper" "$plist"
     "$plist_buddy" -c "Set :WorkingDirectory $work_dir" "$plist"
-    if [ -n "$env_file" ]; then
-        "$plist_buddy" -c "Set :EnvironmentVariables:HERDR_RELAY_ENV $env_file" "$plist"
-    fi
+    "$plist_buddy" -c "Set :EnvironmentVariables:HERDR_RELAY_ENV $env_file" "$plist"
 }
 
 require_user_service_context() {
@@ -607,6 +720,7 @@ node_bin_dir() {
 
     if [ -n "$env_file" ] && [ -f "$env_file" ]; then
         recorded="$(env_file_value "$env_file" HERDR_APP_DEPLOY_NODE_DIR)"
+        recorded="${recorded:-${HERDR_APP_DEPLOY_NODE_DIR:-}}"
     fi
     if on_path="$(command -v node 2>/dev/null)"; then
         on_path="$(dirname "$on_path")"
@@ -650,30 +764,28 @@ menu_item() {
     printf '  %s. %s\n' "$key" "$title"
 }
 
-generate_token() {
+generate_random_id() {
+    local label="$1"
+    local removed_characters="$2"
+
     if command -v openssl >/dev/null 2>&1; then
         openssl rand -hex 16
         return
     fi
     if command -v uuidgen >/dev/null 2>&1; then
-        uuidgen | tr '[:upper:]' '[:lower:]' | tr -d '-'
+        uuidgen | tr '[:upper:]' '[:lower:]' | tr -d "$removed_characters"
         return
     fi
-    echo "Cannot generate a relay token: install openssl or uuidgen." >&2
+    echo "Cannot generate a relay $label: install openssl or uuidgen." >&2
     return 1
 }
 
+generate_token() {
+    generate_random_id token '-'
+}
+
 generate_instance_id() {
-    if command -v openssl >/dev/null 2>&1; then
-        openssl rand -hex 16
-        return
-    fi
-    if command -v uuidgen >/dev/null 2>&1; then
-        uuidgen | tr '[:upper:]' '[:lower:]'
-        return
-    fi
-    echo "Cannot generate a relay instance ID: install openssl or uuidgen." >&2
-    return 1
+    generate_random_id "instance ID" ''
 }
 
 env_file_value() {
@@ -684,6 +796,7 @@ env_file_value() {
         return
     fi
     (
+        unset "$key"
         set -a
         # shellcheck source=/dev/null
         . "$env_file"
@@ -696,8 +809,6 @@ set_env_value_atomic() {
     local env_file="$1"
     local key="$2"
     local value="$3"
-    local directory
-    local temp_file
 
     case "$value" in
         *"'"*)
@@ -706,13 +817,24 @@ set_env_value_atomic() {
             ;;
     esac
 
+    rewrite_env_value_atomic "$env_file" "$key" "$value"
+}
+
+rewrite_env_value_atomic() {
+    local env_file="$1"
+    local key="$2"
+    local directory
+    local temp_file
+
     directory="$(dirname "$env_file")"
     mkdir -p "$directory"
     temp_file="$(mktemp "$directory/.relay-env.XXXXXX")"
     if [ -f "$env_file" ]; then
         grep -v "^${key}=" "$env_file" > "$temp_file" || true
     fi
-    printf "%s='%s'\n" "$key" "$value" >> "$temp_file"
+    if [ "$#" -eq 3 ]; then
+        printf "%s='%s'\n" "$key" "$3" >> "$temp_file"
+    fi
     chmod 600 "$temp_file"
     mv "$temp_file" "$env_file"
 }
@@ -722,44 +844,26 @@ remove_env_value_if_equals_atomic() {
     local key="$2"
     local expected="$3"
     local current
-    local directory
-    local temp_file
 
     if [ ! -f "$env_file" ]; then
         return
     fi
-    current="$(
-        set -a
-        # shellcheck source=/dev/null
-        . "$env_file"
-        set +a
-        printf '%s\n' "${!key-}"
-    )"
+    current="$(env_file_value "$env_file" "$key")"
     if [ "$current" != "$expected" ]; then
         return
     fi
 
-    directory="$(dirname "$env_file")"
-    temp_file="$(mktemp "$directory/.relay-env.XXXXXX")"
-    grep -v "^${key}=" "$env_file" > "$temp_file" || true
-    chmod 600 "$temp_file"
-    mv "$temp_file" "$env_file"
+    rewrite_env_value_atomic "$env_file" "$key"
 }
 
 remove_env_value_atomic() {
     local env_file="$1"
     local key="$2"
-    local directory
-    local temp_file
 
     if [ ! -f "$env_file" ] || ! grep -q "^${key}=" "$env_file"; then
         return
     fi
-    directory="$(dirname "$env_file")"
-    temp_file="$(mktemp "$directory/.relay-env.XXXXXX")"
-    grep -v "^${key}=" "$env_file" > "$temp_file" || true
-    chmod 600 "$temp_file"
-    mv "$temp_file" "$env_file"
+    rewrite_env_value_atomic "$env_file" "$key"
 }
 
 persist_github_token() {
@@ -810,10 +914,10 @@ ensure_relay_env() {
     fi
 
     chmod 600 "$env_file"
-    if ! grep -q '^HERDR_RELAY_TOKEN=' "$env_file" || [ -z "$(env_file_value "$env_file" HERDR_RELAY_TOKEN)" ]; then
+    if [ -z "$(env_file_value "$env_file" HERDR_RELAY_TOKEN)" ]; then
         set_env_value_atomic "$env_file" HERDR_RELAY_TOKEN "$(generate_token)"
     fi
-    if ! grep -q '^HERDR_RELAY_INSTANCE_ID=' "$env_file" || [ -z "$(env_file_value "$env_file" HERDR_RELAY_INSTANCE_ID)" ]; then
+    if [ -z "$(env_file_value "$env_file" HERDR_RELAY_INSTANCE_ID)" ]; then
         set_env_value_atomic "$env_file" HERDR_RELAY_INSTANCE_ID "$(generate_instance_id)"
     fi
     if [ -n "$cloudflared_config" ]; then
@@ -834,9 +938,6 @@ ensure_relay_env() {
     else
         persist_github_token "$env_file" "$release_token"
     fi
-    # Migrate older installs that exposed the token to the complete service
-    # process tree. Only the credential-file path remains in relay.env.
-    remove_env_value_atomic "$env_file" GH_TOKEN
 }
 
 load_relay_env() {
@@ -845,7 +946,7 @@ load_relay_env() {
         return
     fi
     local recorded
-    recorded="$(unset HERDR_RELAY_BACKEND; env_file_value "$env_file" HERDR_RELAY_BACKEND)"
+    recorded="$(env_file_value "$env_file" HERDR_RELAY_BACKEND)"
     if [ -n "$recorded" ] && [ "$recorded" != "$HERDR_RELAY_BACKEND" ]; then
         echo "HERDR_RELAY_BACKEND disagrees with $env_file." >&2
         return 1
@@ -855,6 +956,15 @@ load_relay_env() {
     . "$env_file"
     set +a
     resolve_relay_instance
+}
+
+require_positive_integer() {
+    case "$1" in
+        ""|*[!0-9]*|0)
+            echo "$2 must be a positive integer." >&2
+            return 1
+            ;;
+    esac
 }
 
 wait_for_relay_health() {
@@ -899,12 +1009,7 @@ wait_for_relay_health() {
         return 1
     fi
 
-    case "$attempts" in
-        ""|*[!0-9]*|0)
-            echo "Health-check attempts must be a positive integer." >&2
-            return 1
-            ;;
-    esac
+    require_positive_integer "$attempts" "Health-check attempts" || return 1
 
     for ((attempt = 1; attempt <= attempts; attempt++)); do
         if health="$(curl -fsS --max-time 2 "http://127.0.0.1:$port/readyz" 2>/dev/null)" &&
@@ -957,12 +1062,7 @@ wait_for_gateway_registration() {
         return 1
     fi
 
-    case "$attempts" in
-        ""|*[!0-9]*|0)
-            echo "Gateway registration attempts must be a positive integer." >&2
-            return 1
-            ;;
-    esac
+    require_positive_integer "$attempts" "Gateway registration attempts" || return 1
 
     for ((attempt = 1; attempt <= attempts; attempt++)); do
         if health="$(curl -fsS --max-time 2 "http://127.0.0.1:$port/healthz" 2>/dev/null)"; then
@@ -998,8 +1098,6 @@ wait_for_relay_release_health() {
     local expected_revision="$5"
     local expected_web_hash="$6"
     local expected_instance="${7:-${HERDR_RELAY_INSTANCE_ID:-}}"
-    local health
-    local attempt
 
     [ -n "$expected_version" ] &&
         [ -n "$expected_revision" ] &&
@@ -1008,24 +1106,8 @@ wait_for_relay_release_health() {
             return 1
         }
 
-    case "$attempts" in
-        ""|*[!0-9]*|0)
-            echo "Health-check attempts must be a positive integer." >&2
-            return 1
-            ;;
-    esac
-
-    for ((attempt = 1; attempt <= attempts; attempt++)); do
-        if health="$(wait_for_relay_health "$port" 1 0 "$expected_instance" "$expected_version" "$expected_revision" "$expected_web_hash")"; then
-            printf '%s\n' "$health"
-            return 0
-        fi
-        if [ "$attempt" -lt "$attempts" ]; then
-            sleep "$delay"
-        fi
-    done
-
-    return 1
+    require_positive_integer "$attempts" "Health-check attempts" || return 1
+    wait_for_relay_health "$port" "$attempts" "$delay" "$expected_instance" "$expected_version" "$expected_revision" "$expected_web_hash"
 }
 
 report_inventory_failure() {
@@ -1040,8 +1122,7 @@ report_inventory_failure() {
 verify_public_readiness() {
     local env_file="$1" health="$2"
     local config hostname public attempt binary
-    [ -z "$(env_file_value "$env_file" HERDR_TAILSCALE_PORT)" ] || return 0
-    [ -z "$(gateway_urls "$env_file")" ] || return 0
+    [ "$(relay_transport "$env_file")" = cloudflare ] || return 0
     config="$(env_file_value "$env_file" CLOUDFLARED_CONFIG)"
     [ -n "$config" ] || return 0
     [ -f "$config" ] || return 1
@@ -1228,7 +1309,7 @@ prompt_gateway_subscriptions() {
     done
 }
 
-# The HTTPS base for the gateway's own endpoints: /healthz, /probe, /whoami.
+# The HTTPS base for the gateway's own endpoints: /healthz, /probe.
 gateway_http_base() {
     case "$1" in
         wss://*) printf 'https://%s\n' "${1#wss://}" ;;
@@ -1241,17 +1322,7 @@ gateway_http_base() {
 # relay environment, so a typo or a dead host fails during setup rather than at
 # the first phone connection.
 gateway_answers_healthz() {
-    local body
-
-    if ! body="$(
-        curl --fail --silent --show-error \
-            --connect-timeout 3 \
-            --max-time 8 \
-            "$(gateway_http_base "$1")/healthz" 2>/dev/null
-    )"; then
-        return 1
-    fi
-    printf '%s\n' "$body" | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true'
+    gateway_healthz_ms "$1" >/dev/null
 }
 
 # Round-trip milliseconds for a gateway's /healthz, or failure when it does not
@@ -1851,6 +1922,44 @@ print_setup_link_arming() {
     fi
 }
 
+print_pairing() {
+    local env_file="$1"
+    local relay_url="$2"
+    local fallback_origin="$3"
+    local kind="$4"
+    local heading="$5"
+    local record_fallback="${6:-1}"
+    local fragment
+    local app_base
+    local armed=0
+
+    if [ -n "$relay_url" ]; then
+        fragment="$(build_setup_fragment "$HERDR_RELAY_TOKEN" "$(relay_host_label)" "$relay_url")" || return $?
+    else
+        fragment="$(build_transport_setup_fragment "$HERDR_RELAY_TOKEN" "$(relay_host_label)")" || return $?
+    fi
+    if [ "$kind" = gateway ]; then
+        app_base="$(gateway_phone_app_base_url "$env_file")" || return $?
+    else
+        app_base="$(choose_phone_app_base_url "$fallback_origin" "$env_file" "$kind")" || return $?
+    fi
+    if [ "$record_fallback" = 1 ] || [ "$app_base" != "$fallback_origin" ]; then
+        record_phone_app_origin "$app_base" "$env_file" || return $?
+    fi
+    arm_setup_link "$env_file" || armed=$?
+
+    echo "$heading"
+    echo ""
+    print_phone_setup "$app_base/#$fragment" || return $?
+    if [ -n "$fallback_origin" ] && [ "$app_base" != "$fallback_origin" ]; then
+        echo ""
+        echo "  Direct browser fallback:"
+        print_phone_setup_url "$fallback_origin/#$fragment" || return $?
+    fi
+    echo ""
+    print_setup_link_arming "$armed"
+}
+
 prepare_core_directory() {
     local directory="$1" sentinel
     if [ ! -e "$directory" ]; then
@@ -1867,7 +1976,7 @@ prepare_core_directory() {
 resolve_relay_instance() {
     local recorded="" selected="${HERDR_RELAY_BACKEND:-}"
     if [ -n "${HERDR_RELAY_ENV:-}" ] && [ -f "$HERDR_RELAY_ENV" ]; then
-        recorded="$(unset HERDR_RELAY_BACKEND; env_file_value "$HERDR_RELAY_ENV" HERDR_RELAY_BACKEND)"
+        recorded="$(env_file_value "$HERDR_RELAY_ENV" HERDR_RELAY_BACKEND)"
     fi
     if [ -n "$selected" ] && [ -n "$recorded" ] && [ "$selected" != "$recorded" ]; then
         echo "HERDR_RELAY_BACKEND disagrees with $HERDR_RELAY_ENV." >&2
@@ -1888,7 +1997,7 @@ resolve_relay_instance() {
     RELAY_TAILSCALE_PORT="${HERDR_TAILSCALE_PORT:-8443}"
     if [ "$HERDR_RELAY_BACKEND" = hc ]; then
         export HERDR_RELAY_ENV="${HERDR_RELAY_ENV:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr-mobile-relay-hc/relay.env}"
-        recorded="$(unset HERDR_RELAY_BACKEND; env_file_value "$HERDR_RELAY_ENV" HERDR_RELAY_BACKEND)"
+        recorded="$(env_file_value "$HERDR_RELAY_ENV" HERDR_RELAY_BACKEND)"
         if [ -n "$recorded" ] && [ "$recorded" != hc ]; then
             echo "Core relay requires its own hc environment: $HERDR_RELAY_ENV" >&2
             return 1

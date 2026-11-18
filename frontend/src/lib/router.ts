@@ -1,6 +1,6 @@
 import { get, writable, type Readable } from 'svelte/store';
 import { shouldDeferPairingConnection, shouldRetainSetupFragment } from './config';
-import { clientPaneId } from './agents';
+import { agentKind, clientPaneId } from './agents';
 import { parseNotificationTarget } from './protocol';
 import { decodeTargetRoute, encodeTargetRoute, targetRefForAgent, targetRefMatchesAgent } from './resource-id';
 import type { Agent, FrontendTargetRef, NotificationTarget } from './types';
@@ -164,7 +164,7 @@ export function followInitialAgentSession(agents: Readable<Agent[]>): () => void
     if ((view.view !== 'terminal' && view.view !== 'history') || !view.target || !before) return;
     const after = previous.get(view.paneId);
     if (!after) return;
-    const kimi = ['kimi', 'kimicode'].includes((before.agent || '').toLowerCase().replace(/[ _-]/gu, ''));
+    const kimi = agentKind(before.agent) === 'kimi';
     const initialDiscovery = !kimi && !before.agent_session_id && Boolean(after.agent_session_id)
       && !before.conversation_inferred_owner;
     const inferredKimiHistory = kimi && view.view === 'history'

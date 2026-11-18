@@ -65,9 +65,7 @@ func (b *Browser) projectKimiSource(ctx context.Context, location Location, scop
 	if err != nil || !current() {
 		return kimiPageProjection{}, "", "source_changed"
 	}
-	if b.kimiProjectionObserver != nil {
-		b.kimiProjectionObserver()
-	}
+	b.observe(browserObservation{kind: "kimi_projection"})
 	projection := validateKimi(ctx, data.Bytes())
 	if projection.metadata.code != "" {
 		return projection, "", projection.metadata.code

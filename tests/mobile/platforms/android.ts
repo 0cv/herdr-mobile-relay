@@ -24,14 +24,10 @@ import { isAndroidTerminationPackage } from '../android-events';
 import {
   accessibility,
   androidTextLocator,
-  ariaLabel,
-  ariaLabelPrefix,
   AppiumClient,
-  buttonText,
   css,
   delay,
   isCommandAdmissionError,
-  isFatalDriverError as isFatalAppiumError,
   isRetryableElementLookupError,
   minimumDriverRequestMs,
   textLocator,
@@ -39,11 +35,8 @@ import {
   type SessionOptions,
   WebDriverError,
 } from '../support/webdriver';
+import { isExpectedOrigin, isFatalDriverError, preferenceValueScript, promptDraftScript, setPreference, clickDialogText, clickWebText, type WebContext } from './web-context';
 import { runtimeScript, updateCompletionScript, type MobilePlatform, type PlatformOptions, type UpdateCompletionEvidence } from './types';
-
-function isFatalDriverError(error: unknown): boolean {
-  return isFatalAppiumError(error) || isQualificationFatal(error);
-}
 
 function isAdbTransportLoss(error: unknown): boolean {
   return error instanceof WebDriverError && error.code === 'APPIUM_COMMAND' && error.status === 500
@@ -97,6 +90,25 @@ const ANDROID_LAUNCHER_CONFIRMATION_MS = 90_000;
 const ANDROID_PICKER_PACKAGE = 'com.google.android.documentsui';
 const ANDROID_PICKER_ACTIVITY = 'com.android.documentsui.picker.PickActivity';
 const ANDROID_NATIVE_SCROLL_COMMAND_MS = 5_000;
+const CHROME_SHORTCUT_WAIT_MS = 30_000;
+const NATIVE_CONTEXT_SWITCH_MS = 2_000;
+const FOREGROUND_EVIDENCE_MS = 5_000;
+const CHROME_STOPPED_CHECK_MS = 5_000;
+const CHROME_PROCESS_READ_MS = 5_000;
+const SIGNED_INTENT_COMMAND_MS = 30_000;
+const INSTALLED_TARGET_WAIT_MS = 30_000;
+const INSTALLED_TARGET_TAIL_MS = 10_000;
+const DEVTOOLS_WAIT_MS = 30_000;
+const DEVTOOLS_TAIL_MS = 10_000;
+const INSTALLED_VIEW_INSPECTION_MS = 26_000;
+const INSTALLED_VIEW_WARM_INSPECTION_MS = 13_000;
+const CHROME_SESSION_CREATE_MS = 70_000;
+const NATIVE_SETTINGS_MS = 20_000;
+const NATIVE_SETTINGS_REQUEST_MS = 10_000;
+const HOME_KEYEVENT_COMMAND_MS = 30_000;
+const CLOSE_OWNED_SESSION_MS = 30_000;
+const COLD_INTENT_TAIL_MS = 146_000;
+const BACKGROUND_SETTLE_MS = 500;
 const ANDROID_NATIVE_SCROLL_LIMIT = 8;
 const CHROME_WEBAPP_ACTION = 'com.google.android.apps.chrome.webapps.WebappManager.ACTION_START_WEBAPP';
 const CHROME_WEBAPP_COMPONENT = 'com.android.chrome/org.chromium.chrome.browser.webapps.WebappLauncherActivity';
@@ -411,8 +423,8 @@ export class AndroidPlatform implements MobilePlatform {
           checkReplacement();
           await checkOwned();
           checkReplacement();
-          // Only raw-empty successful output proves all baseline mappings disappeared.
-          if (after.stdout !== '' || after.stderr.trim()) throw new Error('ANDROID_SETUP: reverse loss not proven', { cause: error });
+          // adb prints a lone newline for an empty listing, so blank stdout and stderr prove all baseline mappings disappeared.
+          if (after.stdout.trim() || after.stderr.trim()) throw new Error('ANDROID_SETUP: reverse loss not proven', { cause: error });
           reverses = complete;
         }
         stage = 'recovery-admission';
@@ -458,11 +470,11 @@ export class AndroidPlatform implements MobilePlatform {
     if (webContext) {
       await this.driver.switchContext(webContext);
       await this.driver.execute('window.location.href = arguments[0]; return true;', [url]);
-      await delay(1_000);
+      await this.budget.sleep(1_000);
       return;
     }
     await command(process.env.ADB || 'adb', androidOpenUrlArgs(this.serial, url), 30_000);
-    await delay(1_000);
+    await this.budget.sleep(1_000);
   }
 
   async openSetupURLInInstalledApp(url: string): Promise<void> {
@@ -473,7 +485,7 @@ export class AndroidPlatform implements MobilePlatform {
     await this.driver.navigate(url, 30_000);
     await this.attachToInstalledView();
     this.productRecorder.end('mutation', this.retainedOwner!, operation, this.lastProductInspection);
-    await delay(1_000);
+    await this.budget.sleep(1_000);
   }
 
   async installFromBrowser(): Promise<void> {
@@ -506,8 +518,8 @@ export class AndroidPlatform implements MobilePlatform {
     // Do not proceed merely because the launcher overlay disappeared. Chrome
     // publishes the signed ShortcutInfo asynchronously, and that record is
     // the durable install evidence when no WebAPK package or icon exists.
-    await this.waitForChromeShortcut(30_000);
-    await delay(1_500);
+    await this.waitForChromeShortcut(CHROME_SHORTCUT_WAIT_MS);
+    await this.budget.sleep(1_500);
     await command(process.env.ADB || 'adb', ['-s', this.serial, 'shell', 'input', 'keyevent', 'KEYCODE_HOME']);
   }
 
@@ -538,16 +550,16 @@ export class AndroidPlatform implements MobilePlatform {
   }
 
   private async launchInstalledTarget(mode: 'initial' | 'warm' | 'cold'): Promise<void> {
-    const selectionTail = mode === 'warm' ? 13_000 : 26_000;
-    const attachmentTail = (mode === 'cold' ? 70_000 + 20_000 : 0) + 5_000 + selectionTail;
-    const contextTail = mode === 'initial' ? 2_000 : 0;
-    const intentTail = 5_000 + 10_000 + 10_000 + attachmentTail;
-    this.requireLifecycleAllowance(30_000 + contextTail + 5_000 + 5_000 + 30_000 + intentTail);
+    const selectionTail = mode === 'warm' ? INSTALLED_VIEW_WARM_INSPECTION_MS : INSTALLED_VIEW_INSPECTION_MS;
+    const attachmentTail = (mode === 'cold' ? CHROME_SESSION_CREATE_MS + NATIVE_SETTINGS_MS : 0) + CHROME_PROCESS_READ_MS + selectionTail;
+    const contextTail = mode === 'initial' ? NATIVE_CONTEXT_SWITCH_MS : 0;
+    const intentTail = FOREGROUND_EVIDENCE_MS + INSTALLED_TARGET_TAIL_MS + DEVTOOLS_TAIL_MS + attachmentTail;
+    this.requireLifecycleAllowance(CHROME_SHORTCUT_WAIT_MS + contextTail + FOREGROUND_EVIDENCE_MS + CHROME_STOPPED_CHECK_MS + SIGNED_INTENT_COMMAND_MS + intentTail);
     await requireOwnedDevice('android', this.serial);
-    this.requireLifecycleAllowance(30_000 + contextTail + 5_000 + 5_000 + 30_000 + intentTail);
-    const shortcut = await this.waitForChromeShortcut(30_000, contextTail + 5_000 + 5_000 + 30_000 + intentTail,
+    this.requireLifecycleAllowance(CHROME_SHORTCUT_WAIT_MS + contextTail + FOREGROUND_EVIDENCE_MS + CHROME_STOPPED_CHECK_MS + SIGNED_INTENT_COMMAND_MS + intentTail);
+    const shortcut = await this.waitForChromeShortcut(CHROME_SHORTCUT_WAIT_MS, contextTail + FOREGROUND_EVIDENCE_MS + CHROME_STOPPED_CHECK_MS + SIGNED_INTENT_COMMAND_MS + intentTail,
       mode === 'initial' ? undefined : this.installedTarget?.shortcut);
-    this.requireLifecycleAllowance(5_000 + 5_000 + 30_000 + intentTail);
+    this.requireLifecycleAllowance(FOREGROUND_EVIDENCE_MS + CHROME_STOPPED_CHECK_MS + SIGNED_INTENT_COMMAND_MS + intentTail);
     if (mode === 'initial') {
       this.installedTarget = Object.freeze({
         packageName: 'com.android.chrome',
@@ -558,23 +570,23 @@ export class AndroidPlatform implements MobilePlatform {
     this.lastLaunch = { shortcut: this.shortcutEvidence(shortcut), transitions: [] };
     this.diagnostics.record({ phase: 'android-launch', operation: 'shortcut-observed', detail: this.lastLaunch.shortcut });
     if (mode === 'initial') {
-      this.requireLifecycleAllowance(2_000 + 5_000 + 5_000 + 30_000 + intentTail);
-      await this.driver.switchContext('NATIVE_APP', 2_000);
+      this.requireLifecycleAllowance(NATIVE_CONTEXT_SWITCH_MS + FOREGROUND_EVIDENCE_MS + CHROME_STOPPED_CHECK_MS + SIGNED_INTENT_COMMAND_MS + intentTail);
+      await this.driver.switchContext('NATIVE_APP', NATIVE_CONTEXT_SWITCH_MS);
     }
     await this.recordLaunchForeground('before-command');
-    this.requireLifecycleAllowance(5_000 + 30_000 + intentTail);
+    this.requireLifecycleAllowance(CHROME_STOPPED_CHECK_MS + SIGNED_INTENT_COMMAND_MS + intentTail);
     if (mode === 'cold') await this.assertChromeStopped();
     else await this.assertRetainedOwner();
-    this.requireLifecycleAllowance(30_000 + intentTail);
+    this.requireLifecycleAllowance(SIGNED_INTENT_COMMAND_MS + intentTail);
     await this.launchChromeShortcut(shortcut, intentTail);
     this.requireLifecycleAllowance(intentTail);
     await this.recordLaunchForeground('after-command');
-    this.requireLifecycleAllowance(10_000 + 10_000 + attachmentTail);
-    await this.waitForInstalledTarget(30_000, undefined, 10_000 + attachmentTail);
-    this.requireLifecycleAllowance(10_000 + attachmentTail);
-    await this.waitForChromeDevTools(30_000, attachmentTail);
+    this.requireLifecycleAllowance(INSTALLED_TARGET_TAIL_MS + DEVTOOLS_TAIL_MS + attachmentTail);
+    await this.waitForInstalledTarget(INSTALLED_TARGET_WAIT_MS, undefined, DEVTOOLS_TAIL_MS + attachmentTail);
+    this.requireLifecycleAllowance(DEVTOOLS_TAIL_MS + attachmentTail);
+    await this.waitForChromeDevTools(DEVTOOLS_WAIT_MS, attachmentTail);
     this.requireLifecycleAllowance(attachmentTail);
-    if (mode === 'cold') await this.createChromeSession(true, 26_000);
+    if (mode === 'cold') await this.createChromeSession(true, INSTALLED_VIEW_INSPECTION_MS);
     else await this.assertRetainedOwner();
     this.requireLifecycleAllowance(selectionTail);
     await this.inspectInstalledView();
@@ -621,9 +633,9 @@ export class AndroidPlatform implements MobilePlatform {
   }
 
   private async assertChromeStopped(): Promise<void> {
-    this.requireLifecycleAllowance(5_000);
+    this.requireLifecycleAllowance(CHROME_STOPPED_CHECK_MS);
     try {
-      await command(process.env.ADB || 'adb', ['-s', this.serial, 'shell', 'pidof', 'com.android.chrome'], 5_000, { budget: this.budget });
+      await command(process.env.ADB || 'adb', ['-s', this.serial, 'shell', 'pidof', 'com.android.chrome'], CHROME_STOPPED_CHECK_MS, { budget: this.budget });
     } catch (error) {
       this.assertDriverClear();
       if (error instanceof CommandError && error.exitCode === 1 && !error.timedOut && !error.signal
@@ -686,7 +698,7 @@ export class AndroidPlatform implements MobilePlatform {
 
   private nativeTransactionAvailable(deadline: number, timeoutMs = ANDROID_NATIVE_LOOKUP_COMMAND_MS): boolean {
     this.assertOwnershipClear();
-    return Math.min(deadline - Date.now(), this.budget.remainingMs) >= timeoutMs;
+    return Math.min(deadline - this.budget.now(), this.budget.remainingMs) >= timeoutMs;
   }
 
   private async nativeConfirmationForeground(packageName: string, activity: string, deadline: number): Promise<boolean> {
@@ -715,7 +727,7 @@ export class AndroidPlatform implements MobilePlatform {
   }
 
   private async confirmLauncherShortcut(): Promise<boolean> {
-    const deadline = Date.now() + Math.min(ANDROID_LAUNCHER_CONFIRMATION_MS, this.budget.remainingMs);
+    const deadline = this.budget.now() + Math.min(ANDROID_LAUNCHER_CONFIRMATION_MS, this.budget.remainingMs);
     const locator = { using: 'xpath', value:
       `//*[@resource-id='${ANDROID_LAUNCHER_PACKAGE}:id/add_item_bottom_sheet_content']`
       + `[.//*[@resource-id='${ANDROID_LAUNCHER_PACKAGE}:id/widget_name' and @text='Herdr Relay' and @displayed='true']]`
@@ -737,18 +749,18 @@ export class AndroidPlatform implements MobilePlatform {
       } catch (error) {
         if (isFatalDriverError(error) || !isRetryableElementLookupError(error)) throw error;
       }
-      if (this.nativeTransactionAvailable(deadline)) await delay(250);
+      if (this.nativeTransactionAvailable(deadline)) await this.budget.sleep(250);
     }
     return false;
   }
 
   private async launchChromeShortcut(shortcut?: AndroidChromeShortcut, reserveMs = 0): Promise<CommandResult> {
-    const launchShortcut = shortcut || await this.waitForChromeShortcut(30_000, reserveMs);
-    const phase = this.budget.phaseView('android-signed-intent', 30_000, reserveMs);
-    this.requireLifecycleAllowance(30_000 + reserveMs);
+    const launchShortcut = shortcut || await this.waitForChromeShortcut(CHROME_SHORTCUT_WAIT_MS, reserveMs);
+    const phase = this.budget.phaseView('android-signed-intent', SIGNED_INTENT_COMMAND_MS, reserveMs);
+    this.requireLifecycleAllowance(SIGNED_INTENT_COMMAND_MS + reserveMs);
     const args = androidChromeShortcutArgs(this.serial, launchShortcut);
     try {
-      const result = await command(process.env.ADB || 'adb', args, 30_000, { budget: phase });
+      const result = await command(process.env.ADB || 'adb', args, SIGNED_INTENT_COMMAND_MS, { budget: phase });
       phase.assertAvailable('signed intent settlement');
       this.requireLifecycleAllowance(reserveMs);
       if (result.stderr.trim() || !/^\s*Status:\s*ok\s*$/mu.test(result.stdout) || /(?:^|\n)\s*Error:/u.test(result.stdout)) {
@@ -818,7 +830,7 @@ export class AndroidPlatform implements MobilePlatform {
 
   private async recordLaunchForeground(label: string): Promise<void> {
     try {
-      const evidence = await this.foregroundEvidence(5_000, this.budget);
+      const evidence = await this.foregroundEvidence(FOREGROUND_EVIDENCE_MS, this.budget);
       this.assertOwnershipClear();
       this.budget.assertAvailable('foreground settlement');
       const detail = {
@@ -843,9 +855,9 @@ export class AndroidPlatform implements MobilePlatform {
   private async waitForChromeShortcut(timeoutMs: number, reserveMs = 0, expected?: AndroidChromeShortcut): Promise<AndroidChromeShortcut> {
     const adb = process.env.ADB || 'adb';
     const phase = this.budget.phaseView('android-shortcut', timeoutMs, reserveMs);
-    const deadline = Date.now() + phase.remainingMs;
+    const deadline = this.budget.now() + phase.remainingMs;
     let lastError = 'Chrome did not publish a matching Herdr Relay ShortcutInfo';
-    while (Date.now() < deadline) {
+    while (this.budget.now() < deadline) {
       try {
         const output = await commandOutput(adb, [
           '-s', this.serial, 'shell', 'cmd', 'shortcut', 'get-shortcuts',
@@ -892,44 +904,6 @@ export class AndroidPlatform implements MobilePlatform {
     throw new Error(`ANDROID_SHORTCUT: ${lastError}`);
   }
 
-  private async findLauncherIcon(): Promise<string> {
-    const locators = [
-      textLocator('Herdr Mobile Relay'),
-      accessibility('Herdr Mobile Relay'),
-      textLocator('Herdr Relay'),
-      accessibility('Herdr Relay'),
-    ];
-    try {
-      // A shortcut installation normally places the icon on the current home
-      // screen. A WebAPK, however, can be registered in the launcher app
-      // drawer without being pinned to that screen (notably on hosted Android
-      // 15 images), so inspect both launcher surfaces before failing.
-      return await this.driver.findAny(locators, 5_000);
-    } catch (homeError) {
-      if (isFatalDriverError(homeError)) throw homeError;
-      const size = await this.driver.windowSize().catch((error: unknown) => {
-        if (isFatalDriverError(error)) throw error;
-        return { width: 1_080, height: 2_400 };
-      });
-      await this.driver.mobile('swipeGesture', {
-        left: 0,
-        top: 100,
-        width: size.width,
-        height: Math.max(1, size.height - 200),
-        direction: 'up',
-        percent: 0.75,
-      }).catch((error: unknown) => {
-        if (isFatalDriverError(error)) throw error;
-      });
-      try {
-        return await this.driver.findAny(locators, 30_000);
-      } catch (drawerError) {
-        if (isFatalDriverError(drawerError)) throw drawerError;
-        throw new Error(`ANDROID_LAUNCHER: home screen and app drawer did not expose Herdr Relay (${drawerError instanceof Error ? drawerError.message : String(homeError)})`, { cause: drawerError });
-      }
-    }
-  }
-
   async attachToInstalledView(timeoutMs = 30_000): Promise<void> {
     this.beginLifecycle();
     try {
@@ -959,15 +933,15 @@ export class AndroidPlatform implements MobilePlatform {
       const inspect = async (selectedHandle: string) => {
         this.assertRetainedSession();
         if (phase.remainingMs < routeMs + httpMs) throw new Error('Retained inspection parent allowance exhausted');
-        const startedAt = Date.now();
+        const startedAt = this.budget.now();
         const deadline = startedAt + routeMs;
         const value = await this.driver.execute('mobile: inspectRetainedChromeTargets', [{ deadline }], routeMs + httpMs);
         this.assertRetainedSession();
         const decoded = decodeRetainedInspection(value, this.retainedOwner!, {
-          startedAt, deadline, finishedAt: Date.now(), serial: this.serial, scope: this.installedTarget!.shortcut.scope,
+          startedAt, deadline, finishedAt: this.budget.now(), serial: this.serial, scope: this.installedTarget!.shortcut.scope,
           selectedHandle, assertSession: session => this.driver.assertSessionIdentity(session),
         });
-        this.lastProductInspection = this.productRecorder.inspection(this.retainedOwner!, decoded.result, startedAt, Date.now(), deadline);
+        this.lastProductInspection = this.productRecorder.inspection(this.retainedOwner!, decoded.result, startedAt, this.budget.now(), deadline);
         const { original, before, after, processAssociation } = decoded.result;
         this.diagnostics.record({ phase: 'android-attachment', operation: 'bounded-retained-inspection', detail: {
           pid: original.pid, startTime: original.startTime, bootId: original.bootId, namespace: original.namespace, kernelCapability: original.kernelCapability,
@@ -1015,7 +989,7 @@ export class AndroidPlatform implements MobilePlatform {
     }
   }
 
-  private async readInstalledDocument<T>(script: string, detail: 'identity' | 'completion' | 'preference' | 'keyboard', deadline = Date.now() + 52_000): Promise<T> {
+  private async readInstalledDocument<T>(script: string, detail: 'identity' | 'completion' | 'preference' | 'keyboard', deadline = this.budget.now() + 52_000): Promise<T> {
     this.beginLifecycle();
     try {
       return await this.readInstalledDocumentWithinLifecycle<T>(script, detail, deadline);
@@ -1027,7 +1001,7 @@ export class AndroidPlatform implements MobilePlatform {
   }
 
   private async readInstalledDocumentWithinLifecycle<T>(script: string, detail: 'identity' | 'completion' | 'preference' | 'keyboard', deadline: number): Promise<T> {
-    const remaining = () => Math.min(deadline - Date.now(), this.budget.remainingMs);
+    const remaining = () => Math.min(deadline - this.budget.now(), this.budget.remainingMs);
     const initialInspection = this.selectedInstalledWindowValid ? 11_000 : 24_000;
     const context = this.driver.snapshot().selectedContext === 'CHROMIUM' ? 0 : 2_000;
     if (remaining() < initialInspection + context + 13_000) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'insufficient read and retained bounds allowance');
@@ -1075,12 +1049,12 @@ export class AndroidPlatform implements MobilePlatform {
       return '';
     });
     if (currentUrl.includes('#settings')) await this.clickWebText('Back');
-    const deadline = Date.now() + 30_000;
+    const deadline = this.budget.now() + 30_000;
     const agentSelector = `button.agent-open[aria-label="Open mobile-ci on ${relayName}"]`;
     let lastError = '';
-    while (Date.now() < deadline) {
+    while (this.budget.now() < deadline) {
       try {
-        await this.attachToInstalledView(deadline - Date.now());
+        await this.attachToInstalledView(deadline - this.budget.now());
         // Several idle workspaces start as collapsed cards whose agent buttons cannot be clicked until opened.
         const collapsedCard = (await this.driver.findAll(css(`details.workspace-card:not([open]):has(${agentSelector}) > summary`), 2_000))[0];
         if (collapsedCard) {
@@ -1101,7 +1075,7 @@ export class AndroidPlatform implements MobilePlatform {
         if (isFatalDriverError(error) || isQualificationFatal(error)) throw error;
         lastError = error instanceof Error ? error.message : String(error);
       }
-      await delay(250);
+      await this.budget.sleep(250);
     }
     throw new Error(`APPIUM_AGENT: ${relayName}: ${lastError}`);
   }
@@ -1109,15 +1083,15 @@ export class AndroidPlatform implements MobilePlatform {
   async backgroundApp(): Promise<void> {
     this.beginLifecycle();
     try {
-      this.requireLifecycleAllowance(5_000 + 2_000 + 30_000 + 500);
+      this.requireLifecycleAllowance(CHROME_PROCESS_READ_MS + NATIVE_CONTEXT_SWITCH_MS + HOME_KEYEVENT_COMMAND_MS + BACKGROUND_SETTLE_MS);
       await requireOwnedDevice('android', this.serial);
       await this.assertRetainedOwner();
-      this.requireLifecycleAllowance(2_000 + 30_000 + 500);
-      await this.driver.switchContext('NATIVE_APP', 2_000);
-      this.requireLifecycleAllowance(30_000 + 500);
-      await command(process.env.ADB || 'adb', ['-s', this.serial, 'shell', 'input', 'keyevent', 'KEYCODE_HOME'], 30_000, { budget: this.budget });
-      this.requireLifecycleAllowance(500);
-      await delay(500, this.budget);
+      this.requireLifecycleAllowance(NATIVE_CONTEXT_SWITCH_MS + HOME_KEYEVENT_COMMAND_MS + BACKGROUND_SETTLE_MS);
+      await this.driver.switchContext('NATIVE_APP', NATIVE_CONTEXT_SWITCH_MS);
+      this.requireLifecycleAllowance(HOME_KEYEVENT_COMMAND_MS + BACKGROUND_SETTLE_MS);
+      await command(process.env.ADB || 'adb', ['-s', this.serial, 'shell', 'input', 'keyevent', 'KEYCODE_HOME'], HOME_KEYEVENT_COMMAND_MS, { budget: this.budget });
+      this.requireLifecycleAllowance(BACKGROUND_SETTLE_MS);
+      await delay(BACKGROUND_SETTLE_MS, this.budget);
       this.requireLifecycleAllowance(0);
     } catch (error) {
       this.failLifecycle(error);
@@ -1152,12 +1126,12 @@ export class AndroidPlatform implements MobilePlatform {
         }
       };
       this.assertRetainedSession();
-      this.requireLifecycleAllowance(5_000 + 30_000 + 30_000 + 5_000 + 5_000 + 30_000 + 146_000);
+      this.requireLifecycleAllowance(CHROME_STOPPED_CHECK_MS + CLOSE_OWNED_SESSION_MS + CHROME_SHORTCUT_WAIT_MS + FOREGROUND_EVIDENCE_MS + CHROME_STOPPED_CHECK_MS + SIGNED_INTENT_COMMAND_MS + COLD_INTENT_TAIL_MS);
       await this.assertChromeStopped();
       this.assertRetainedSession();
-      this.requireLifecycleAllowance(30_000 + 30_000 + 5_000 + 5_000 + 30_000 + 146_000);
+      this.requireLifecycleAllowance(CLOSE_OWNED_SESSION_MS + CHROME_SHORTCUT_WAIT_MS + FOREGROUND_EVIDENCE_MS + CHROME_STOPPED_CHECK_MS + SIGNED_INTENT_COMMAND_MS + COLD_INTENT_TAIL_MS);
       await this.closeOwnedSession();
-      this.requireLifecycleAllowance(30_000 + 5_000 + 5_000 + 30_000 + 146_000);
+      this.requireLifecycleAllowance(CHROME_SHORTCUT_WAIT_MS + FOREGROUND_EVIDENCE_MS + CHROME_STOPPED_CHECK_MS + SIGNED_INTENT_COMMAND_MS + COLD_INTENT_TAIL_MS);
       if (this.retainedOwner !== handoff.owner) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'retired cold owner changed');
       this.retainedOwner = undefined;
       this.coldProductHandoff = true;
@@ -1181,9 +1155,9 @@ export class AndroidPlatform implements MobilePlatform {
       await this.assertRetainedOwner();
       await this.inspectInstalledView();
       this.requireLifecycleAllowance(157_000);
-      await this.driver.switchContext('NATIVE_APP', 2_000);
+      await this.driver.switchContext('NATIVE_APP', NATIVE_CONTEXT_SWITCH_MS);
       this.requireLifecycleAllowance(155_000);
-      const foreground = await this.foregroundEvidence(5_000, this.budget);
+      const foreground = await this.foregroundEvidence(FOREGROUND_EVIDENCE_MS, this.budget);
       this.requireLifecycleAllowance(150_000);
       const owner = this.retainedOwner!;
       const target = this.installedTarget!;
@@ -1200,9 +1174,9 @@ export class AndroidPlatform implements MobilePlatform {
       };
       this.assertRetainedSession();
       await measurement.terminate(foreground.packageName, foreground.pid);
-      this.requireLifecycleAllowance(30_000);
+      this.requireLifecycleAllowance(HOME_KEYEVENT_COMMAND_MS);
       this.assertRetainedSession();
-      const home = await command(process.env.ADB || 'adb', ['-s', this.serial, 'shell', 'input', 'keyevent', 'KEYCODE_HOME'], 30_000, { budget: this.budget });
+      const home = await command(process.env.ADB || 'adb', ['-s', this.serial, 'shell', 'input', 'keyevent', 'KEYCODE_HOME'], HOME_KEYEVENT_COMMAND_MS, { budget: this.budget });
       this.requireLifecycleAllowance(0);
       if (home.stdout.trim() || home.stderr.trim()) throw new Error('ANDROID_TERMINATE: HOME returned unexpected output');
       this.assertRetainedSession();
@@ -1215,12 +1189,12 @@ export class AndroidPlatform implements MobilePlatform {
   }
 
   private async mutateInstalledDocument(operation: () => Promise<unknown>, deadline: number): Promise<void> {
-    if (Math.min(deadline - Date.now(), this.budget.remainingMs) < 13_000) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'insufficient mutation and postcheck allowance');
+    if (Math.min(deadline - this.budget.now(), this.budget.remainingMs) < 13_000) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'insufficient mutation and postcheck allowance');
     try {
       const receipt = this.productRecorder.begin('mutation', this.retainedOwner!, this.lastProductInspection);
       await operation();
-      await this.attachToInstalledView(deadline - Date.now());
-      if (Date.now() >= deadline) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'mutation parent deadline expired');
+      await this.attachToInstalledView(deadline - this.budget.now());
+      if (this.budget.now() >= deadline) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'mutation parent deadline expired');
       this.productRecorder.end('mutation', this.retainedOwner!, receipt, this.lastProductInspection);
     } catch {
       this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'mutation or retained postcheck failed');
@@ -1228,23 +1202,23 @@ export class AndroidPlatform implements MobilePlatform {
   }
 
   async showKeyboardOnComposer(): Promise<void> {
-    const deadline = Date.now() + Math.min(60_000, this.budget.remainingMs);
-    await this.attachToInstalledView(deadline - Date.now());
+    const deadline = this.budget.now() + Math.min(60_000, this.budget.remainingMs);
+    await this.attachToInstalledView(deadline - this.budget.now());
     let composer = await this.driver.find(css('textarea[aria-label="Prompt"]'), 5_000).catch((error: unknown) => {
       if (isFatalDriverError(error)) throw error;
       return '';
     });
     if (!composer) {
-      const open = await this.driver.find(css('button[aria-label^="Open "]'), Math.min(30_000, deadline - Date.now() - 26_000));
+      const open = await this.driver.find(css('button[aria-label^="Open "]'), Math.min(30_000, deadline - this.budget.now() - 26_000));
       await this.mutateInstalledDocument(() => this.driver.click(open, 2_000), deadline);
-      composer = await this.driver.find(css('textarea[aria-label="Prompt"]'), Math.min(30_000, deadline - Date.now() - 26_000));
+      composer = await this.driver.find(css('textarea[aria-label="Prompt"]'), Math.min(30_000, deadline - this.budget.now() - 26_000));
     }
     await this.mutateInstalledDocument(() => this.driver.click(composer, 2_000), deadline);
     this.keyboardDraft = 'mobile-device-ci draft';
     await this.mutateInstalledDocument(() => this.driver.sendKeys(composer, this.keyboardDraft, 2_000), deadline);
-    if (Math.min(deadline - Date.now(), this.budget.remainingMs) < 21_000) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'insufficient keyboard observation and postcheck allowance');
+    if (Math.min(deadline - this.budget.now(), this.budget.remainingMs) < 21_000) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'insufficient keyboard observation and postcheck allowance');
     await this.waitForKeyboard(true);
-    await this.attachToInstalledView(deadline - Date.now());
+    await this.attachToInstalledView(deadline - this.budget.now());
   }
 
   async hideKeyboard(): Promise<void> {
@@ -1253,124 +1227,42 @@ export class AndroidPlatform implements MobilePlatform {
     await this.waitForKeyboard(false);
     await this.attachToInstalledView();
     if (this.keyboardDraft) {
-      const value = await this.readInstalledDocument<string>("return document.querySelector('textarea[aria-label=\\\"Prompt\\\"]')?.value || ''", 'keyboard');
+      const value = await this.readInstalledDocument<string>(promptDraftScript, 'keyboard');
       if (value !== this.keyboardDraft) throw new Error('ANDROID_KEYBOARD: draft was not preserved after dismissal');
     }
   }
 
-  async clickWebText(text: string): Promise<void> {
-    const deadline = Date.now() + Math.min(30_000, this.budget.remainingMs);
-    let lastError = '';
-    while (Date.now() < deadline) {
-      const remaining = deadline - Date.now();
-      if (remaining < minimumDriverRequestMs) break;
-      try {
-        await this.attachToInstalledView(remaining);
-        const findTimeout = deadline - Date.now();
-        if (findTimeout < minimumDriverRequestMs) break;
-        const locators = [buttonText(text), ariaLabel(text), ariaLabelPrefix(text), textLocator(text)];
-        for (const locator of locators) {
-          const locatorTimeout = deadline - Date.now();
-          if (locatorTimeout < minimumDriverRequestMs) break;
-          try {
-            const element = await this.driver.findAnyOnce([locator], locatorTimeout);
-            const controlTimeout = deadline - Date.now();
-            if (controlTimeout < minimumDriverRequestMs) break;
-            if (await this.webControlReady(element, deadline)) {
-              const clickTimeout = deadline - Date.now();
-              if (clickTimeout < minimumDriverRequestMs) break;
-              if (clickTimeout < 13_000) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'insufficient click and retained postcheck allowance');
-              const receipt = this.productRecorder.begin('mutation', this.retainedOwner!, this.lastProductInspection);
-              await this.driver.click(element, 2_000);
-              await this.attachToInstalledView(deadline - Date.now());
-              this.productRecorder.end('mutation', this.retainedOwner!, receipt, this.lastProductInspection);
-              return;
-            }
-            lastError = `${text} is disabled, hidden, or empty`;
-          } catch (error) {
-            if (isFatalDriverError(error) || isQualificationFatal(error)) throw error;
-            if (error instanceof WebDriverError && !isRetryableElementLookupError(error)) throw error;
-            lastError = error instanceof Error ? error.message : String(error);
-          }
-        }
-      } catch (error) {
-        if (isFatalDriverError(error) || isQualificationFatal(error)) throw error;
-        if (error instanceof WebDriverError && !isRetryableElementLookupError(error)) throw error;
-        lastError = error instanceof Error ? error.message : String(error);
-      }
-      const waitMs = Math.min(250, Math.max(0, deadline - Date.now() - minimumDriverRequestMs));
-      if (waitMs > 0) await delay(waitMs);
-    }
-    throw new Error(`APPIUM_BUTTON: ${text}: ${lastError || 'control was not usable before the deadline'}`);
+  private get webContext(): WebContext {
+    return { driver: this.driver, budget: this.budget, attachToInstalledView: (timeoutMs) => this.attachToInstalledView(timeoutMs) };
   }
 
-  private async webControlReady(element: string, deadline: number): Promise<boolean> {
-    const disabledTimeout = deadline - Date.now();
-    if (disabledTimeout < minimumDriverRequestMs) return false;
-    const disabled = await this.driver.attribute(element, 'disabled', disabledTimeout);
-    if (disabled !== null && disabled !== 'false') return false;
-    const ariaDisabledTimeout = deadline - Date.now();
-    if (ariaDisabledTimeout < minimumDriverRequestMs) return false;
-    const ariaDisabled = await this.driver.attribute(element, 'aria-disabled', ariaDisabledTimeout);
-    if (ariaDisabled === 'true') return false;
-    const hiddenTimeout = deadline - Date.now();
-    if (hiddenTimeout < minimumDriverRequestMs) return false;
-    const hidden = await this.driver.attribute(element, 'hidden', hiddenTimeout);
-    if (hidden !== null && hidden !== 'false') return false;
-    const ariaHiddenTimeout = deadline - Date.now();
-    if (ariaHiddenTimeout < minimumDriverRequestMs) return false;
-    const ariaHidden = await this.driver.attribute(element, 'aria-hidden', ariaHiddenTimeout);
-    if (ariaHidden === 'true') return false;
-    const rectTimeout = deadline - Date.now();
-    if (rectTimeout < minimumDriverRequestMs) return false;
-    const rect = await this.driver.elementRect(element, rectTimeout);
-    return rect.width > 0 && rect.height > 0;
+  async clickWebText(text: string): Promise<void> {
+    await clickWebText(this.webContext, text, async (element, deadline, clickTimeout) => {
+      if (clickTimeout < 13_000) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'insufficient click and retained postcheck allowance');
+      const receipt = this.productRecorder.begin('mutation', this.retainedOwner!, this.lastProductInspection);
+      await this.driver.click(element, 2_000);
+      await this.attachToInstalledView(deadline - this.budget.now());
+      this.productRecorder.end('mutation', this.retainedOwner!, receipt, this.lastProductInspection);
+    });
   }
 
   async clickDialogText(dialogId: string, text: string): Promise<void> {
-    const deadline = Date.now() + Math.min(30_000, this.budget.remainingMs);
-    let lastError = '';
-    while (Date.now() < deadline) {
-      const remaining = deadline - Date.now();
-      if (remaining < minimumDriverRequestMs) break;
-      try {
-        await this.attachToInstalledView(remaining);
-        const findTimeout = deadline - Date.now();
-        if (findTimeout < minimumDriverRequestMs) break;
-        const buttons = await this.driver.findAll(css(`#${dialogId} button`), findTimeout);
-        for (const button of buttons) {
-          const textTimeout = deadline - Date.now();
-          if (textTimeout < minimumDriverRequestMs) break;
-          if ((await this.driver.text(button, textTimeout)).trim() === text) {
-            const clickTimeout = deadline - Date.now();
-            if (clickTimeout < minimumDriverRequestMs) break;
-            if (clickTimeout < 13_000) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'insufficient dialog click and retained postcheck allowance');
-            if (dialogId === 'update-herdr-dialog' && text === 'Load Update') this.productRecorder.transition('update-activation', this.retainedOwner!);
-            const receipt = this.productRecorder.begin('mutation', this.retainedOwner!, this.lastProductInspection);
-            await this.driver.click(button, 2_000);
-            await this.attachToInstalledView(deadline - Date.now());
-            this.productRecorder.end('mutation', this.retainedOwner!, receipt, this.lastProductInspection);
-            return;
-          }
-        }
-        lastError = `${text} is not visible in ${dialogId}`;
-      } catch (error) {
-        if (isFatalDriverError(error)) throw error;
-        lastError = error instanceof Error ? error.message : String(error);
-      }
-      const waitMs = Math.min(250, Math.max(0, deadline - Date.now() - minimumDriverRequestMs));
-      if (waitMs > 0) await delay(waitMs);
-    }
-    throw new Error(`APPIUM_DIALOG_BUTTON: ${dialogId}/${text}: ${lastError}`);
+    await clickDialogText(this.webContext, dialogId, text, async (button, deadline, clickTimeout) => {
+      if (clickTimeout < 13_000) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'insufficient dialog click and retained postcheck allowance');
+      if (dialogId === 'update-herdr-dialog' && text === 'Load Update') this.productRecorder.transition('update-activation', this.retainedOwner!);
+      const receipt = this.productRecorder.begin('mutation', this.retainedOwner!, this.lastProductInspection);
+      await this.driver.click(button, 2_000);
+      await this.attachToInstalledView(deadline - this.budget.now());
+      this.productRecorder.end('mutation', this.retainedOwner!, receipt, this.lastProductInspection);
+    });
   }
 
   async setPreference(preference: string): Promise<void> {
-    await this.clickWebText('Settings');
-    await this.clickWebText(preference === 'state' ? 'By State' : 'Mixed');
+    await setPreference((text) => this.clickWebText(text), preference);
   }
 
   async preferenceValue(): Promise<string> {
-    return this.readInstalledDocument<string>("return localStorage.getItem('herdr_home_workspace_layout') || ''", 'preference');
+    return this.readInstalledDocument<string>(preferenceValueScript, 'preference');
   }
 
   async captureSanitizedEvidence(name: string): Promise<void> {
@@ -1455,22 +1347,22 @@ export class AndroidPlatform implements MobilePlatform {
 
   private async createChromeSession(attachToRunningApp: boolean, reserveMs = 0): Promise<void> {
     this.assertDriverClear();
-    if (reserveMs) this.requireLifecycleAllowance(70_000 + 20_000 + 5_000 + reserveMs);
-    if (this.budget.remainingMs < 70_000) throw new Error('ANDROID_SESSION: insufficient parent allowance including retained producer startup');
+    if (reserveMs) this.requireLifecycleAllowance(CHROME_SESSION_CREATE_MS + NATIVE_SETTINGS_MS + CHROME_PROCESS_READ_MS + reserveMs);
+    if (this.budget.remainingMs < CHROME_SESSION_CREATE_MS) throw new Error('ANDROID_SESSION: insufficient parent allowance including retained producer startup');
     if (this.driver.snapshot().sessionId) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'previous session was not retired before creation');
     this.ownedSessionClose = undefined;
     const options: SessionOptions = {
       capabilities: androidChromeCapabilities(this.serial, attachToRunningApp),
-      requestTimeoutMs: 70_000,
+      requestTimeoutMs: CHROME_SESSION_CREATE_MS,
       budget: this.budget,
     };
     if (!attachToRunningApp && this.setupAttempted) await this.createSetupSession(options);
     else await this.driver.create(options);
     this.assertDriverClear();
-    if (reserveMs) this.requireLifecycleAllowance(20_000 + 5_000 + reserveMs);
-    await this.configureNativeSettings(reserveMs + (reserveMs ? 5_000 : 0));
+    if (reserveMs) this.requireLifecycleAllowance(NATIVE_SETTINGS_MS + CHROME_PROCESS_READ_MS + reserveMs);
+    await this.configureNativeSettings(reserveMs + (reserveMs ? CHROME_PROCESS_READ_MS : 0));
     this.assertDriverClear();
-    if (reserveMs) this.requireLifecycleAllowance(5_000 + reserveMs);
+    if (reserveMs) this.requireLifecycleAllowance(CHROME_PROCESS_READ_MS + reserveMs);
     const assertSession = this.driver.retainSessionOwner();
     try {
       const process = await this.readChromeProcess();
@@ -1489,11 +1381,11 @@ export class AndroidPlatform implements MobilePlatform {
   private async readChromeProcess(budget = this.budget): Promise<RetainedNativeIdentity> {
     this.assertOwnershipClear();
     const observationStartedAt = new Date().toISOString();
-    const deadline = Date.now() + Math.min(5_000, budget.remainingMs);
+    const deadline = this.budget.now() + Math.min(5_000, budget.remainingMs);
     const check = () => {
       this.assertOwnershipClear();
       budget.assertAvailable('native process observation');
-      if (Date.now() >= deadline) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'native process observation expired');
+      if (this.budget.now() >= deadline) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'native process observation expired');
     };
     this.kernelReader ||= createAdbInspection({curDeviceId: this.serial, executable: {defaultArgs: ['-P', '5037', '-s', this.serial]}}, () => this.assertOwnershipClear(), error => {
       this.ownershipFailure ||= qualificationFatal('ANDROID_CONTEXT_OWNERSHIP', error.message, 'ownership');
@@ -1577,15 +1469,15 @@ export class AndroidPlatform implements MobilePlatform {
   }
 
   private async configureNativeSettings(reserveMs = 0): Promise<void> {
-    if (reserveMs) this.requireLifecycleAllowance(20_000 + reserveMs);
-    const timeoutMs = Math.min(10_000, this.budget.remainingMs);
+    if (reserveMs) this.requireLifecycleAllowance(NATIVE_SETTINGS_MS + reserveMs);
+    const timeoutMs = Math.min(NATIVE_SETTINGS_REQUEST_MS, this.budget.remainingMs);
     if (timeoutMs < minimumDriverRequestMs) throw new Error('ANDROID_SETTINGS: insufficient time to configure native settings');
     const requested = {
       waitForIdleTimeout: ANDROID_NATIVE_IDLE_TIMEOUT_MS,
       waitForSelectorTimeout: ANDROID_NATIVE_SELECTOR_TIMEOUT_MS,
     };
     await this.driver.updateSettings(requested, timeoutMs);
-    if (reserveMs) this.requireLifecycleAllowance(10_000 + reserveMs);
+    if (reserveMs) this.requireLifecycleAllowance(NATIVE_SETTINGS_REQUEST_MS + reserveMs);
     const readbackTimeout = Math.min(timeoutMs, this.budget.remainingMs);
     if (readbackTimeout < minimumDriverRequestMs) throw new Error('ANDROID_SETTINGS: insufficient time to read back native settings');
     const response = await this.driver.settings(readbackTimeout);
@@ -1664,7 +1556,7 @@ export class AndroidPlatform implements MobilePlatform {
       ]).catch(() => { this.assertDriverClear(); });
     });
     this.assertDriverClear();
-    await delay(500);
+    await this.budget.sleep(500);
     this.assertDriverClear();
     await this.certificateCommand(['-s', this.serial, 'shell', 'am', 'force-stop', 'com.google.android.documentsui']).catch(() => { this.assertDriverClear(); });
     await this.certificateCommand(['-s', this.serial, 'shell', 'am', 'force-stop', 'com.android.settings']);
@@ -1710,14 +1602,14 @@ export class AndroidPlatform implements MobilePlatform {
       androidTextLocator(remoteName),
     ], remoteName);
     this.assertDriverClear();
-    await delay(1_000);
+    await this.budget.sleep(1_000);
     this.assertDriverClear();
     await this.verifyCertificate(remoteName, commonName);
     await this.certificateCommand(['-s', this.serial, 'shell', 'rm', '-f', remote]);
   }
 
   private async openCertificatePicker(timeoutMs = 30_000): Promise<void> {
-    const startedAt = Date.now();
+    const startedAt = this.budget.now();
     const deadline = startedAt + Math.min(timeoutMs, this.budget.remainingMs);
     const usableControl = { using: 'xpath', value:
       `//*[@package='${ANDROID_PICKER_PACKAGE}' and @clickable='true' and @enabled='true' and @displayed='true']`,
@@ -1725,11 +1617,11 @@ export class AndroidPlatform implements MobilePlatform {
     while (this.nativeTransactionAvailable(deadline)) {
       const foreground = await this.nativeConfirmationForeground(ANDROID_PICKER_PACKAGE, ANDROID_PICKER_ACTIVITY, deadline);
       if (foreground && this.nativeTransactionAvailable(deadline, ANDROID_PICKER_SOURCE_COMMAND_MS)) {
-        const sourceStartedAt = Date.now();
+        const sourceStartedAt = this.budget.now();
         const source = await this.driver.pageSource(ANDROID_PICKER_SOURCE_COMMAND_MS);
-        const sourceDurationMs = Date.now() - sourceStartedAt;
+        const sourceDurationMs = this.budget.now() - sourceStartedAt;
         this.diagnostics.record({ phase: 'android-certificate', operation: 'picker-hierarchy', detail: {
-          elapsedMs: Date.now() - startedAt, sourceDurationMs,
+          elapsedMs: this.budget.now() - startedAt, sourceDurationMs,
         } });
         if (!this.nativeTransactionAvailable(deadline)) break;
         const elements = await this.driver.findAll(usableControl, ANDROID_NATIVE_LOOKUP_COMMAND_MS);
@@ -1739,35 +1631,35 @@ export class AndroidPlatform implements MobilePlatform {
           await mkdir(this.outputDir, { recursive: true });
           await writeBoundedText(join(this.outputDir, 'certificate-picker-ready-hierarchy.xml'), source);
           this.diagnostics.record({ phase: 'android-certificate', operation: 'picker-ready', detail: {
-            elapsedMs: Date.now() - startedAt, sourceDurationMs,
+            elapsedMs: this.budget.now() - startedAt, sourceDurationMs,
           } });
           await this.clickNative([
             accessibility('Show roots'),
             accessibility('Open navigation drawer'),
             accessibility('Open navigation'),
-          ], 'certificate picker navigation', deadline - Date.now());
+          ], 'certificate picker navigation', deadline - this.budget.now());
           return;
         }
       }
-      if (this.nativeTransactionAvailable(deadline)) await delay(250);
+      if (this.nativeTransactionAvailable(deadline)) await this.budget.sleep(250);
     }
     throw new Error('ANDROID_CERTIFICATE: focused certificate picker with usable controls was not ready within the operation budget');
   }
 
   private async waitForSettingsPage(timeoutMs: number): Promise<void> {
-    const deadline = Date.now() + Math.min(timeoutMs, this.budget.remainingMs);
+    const deadline = this.budget.now() + Math.min(timeoutMs, this.budget.remainingMs);
     let last = '';
-    while (Date.now() < deadline) {
-      const remaining = deadline - Date.now();
+    while (this.budget.now() < deadline) {
+      const remaining = deadline - this.budget.now();
       if (remaining < minimumDriverRequestMs) break;
       try {
         const foreground = await this.foregroundEvidence(Math.min(5_000, remaining));
         last = `${foreground.packageName}/${foreground.activity} pid=${foreground.pid}`;
         if (foreground.packageName !== 'com.android.settings' || !/MoreSecurityPrivacySettingsActivity$/u.test(foreground.activity)) {
-          await delay(Math.min(250, deadline - Date.now()));
+          await this.budget.sleep(Math.min(250, deadline - this.budget.now()));
           continue;
         }
-        const sourceTimeout = deadline - Date.now();
+        const sourceTimeout = deadline - this.budget.now();
         if (sourceTimeout < minimumDriverRequestMs) break;
         const source = await this.driver.pageSource(sourceTimeout);
         if (/More security|Security & privacy/iu.test(source)) return;
@@ -1777,9 +1669,9 @@ export class AndroidPlatform implements MobilePlatform {
         if (isFatalDriverError(error)) throw error;
         last = error instanceof Error ? error.message : String(error);
       }
-      const waitMs = Math.min(250, deadline - Date.now());
+      const waitMs = Math.min(250, deadline - this.budget.now());
       if (waitMs <= 0) break;
-      await delay(waitMs);
+      await this.budget.sleep(waitMs);
     }
     throw new Error(`ANDROID_CERTIFICATE: Settings landing page was not ready (${last || 'no activity evidence'})`);
   }
@@ -1841,11 +1733,11 @@ export class AndroidPlatform implements MobilePlatform {
   }
 
   private async clickNative(locators: Locator[], description: string, timeoutMs = 30_000): Promise<void> {
-    const deadline = Date.now() + Math.min(timeoutMs, this.budget.remainingMs);
+    const deadline = this.budget.now() + Math.min(timeoutMs, this.budget.remainingMs);
     let lastError = '';
     while (this.nativeTransactionAvailable(deadline)) {
       try {
-        const element = await this.findNative(locators, deadline - Date.now());
+        const element = await this.findNative(locators, deadline - this.budget.now());
         if (!await this.nativeElementEnabled(element, deadline)) {
           lastError = `${description} is not enabled and displayed`;
           continue;
@@ -1857,15 +1749,15 @@ export class AndroidPlatform implements MobilePlatform {
         if (isFatalDriverError(error) || !isRetryableElementLookupError(error)) throw error;
         lastError = error instanceof Error ? error.message : String(error);
       }
-      const waitMs = Math.min(250, deadline - Date.now());
+      const waitMs = Math.min(250, deadline - this.budget.now());
       if (waitMs <= 0) break;
-      await delay(waitMs);
+      await this.budget.sleep(waitMs);
     }
     throw new Error(`ANDROID_CERTIFICATE: ${description}: ${lastError || 'insufficient time for a complete native transaction'}`);
   }
 
   private async findNative(locators: Locator[], timeoutMs: number): Promise<string> {
-    const deadline = Date.now() + Math.min(timeoutMs, this.budget.remainingMs);
+    const deadline = this.budget.now() + Math.min(timeoutMs, this.budget.remainingMs);
     let lastError = 'insufficient time for a complete native lookup';
     let scrolls = 0;
     let size = { width: 1_080, height: 2_400 };
@@ -1886,7 +1778,7 @@ export class AndroidPlatform implements MobilePlatform {
           lastError = error instanceof Error ? error.message : String(error);
         }
       }
-      const afterLookup = deadline - Date.now();
+      const afterLookup = deadline - this.budget.now();
       if (afterLookup < minimumDriverRequestMs || scrolls >= ANDROID_NATIVE_SCROLL_LIMIT) break;
       if (afterLookup < ANDROID_NATIVE_SCROLL_COMMAND_MS) break;
       const scrollTimeout = Math.min(ANDROID_NATIVE_SCROLL_COMMAND_MS, afterLookup);
@@ -1907,22 +1799,22 @@ export class AndroidPlatform implements MobilePlatform {
         break;
       }
       scrolls += 1;
-      const waitMs = Math.min(250, Math.max(0, deadline - Date.now() - minimumDriverRequestMs));
-      if (waitMs > 0) await delay(waitMs);
+      const waitMs = Math.min(250, Math.max(0, deadline - this.budget.now() - minimumDriverRequestMs));
+      if (waitMs > 0) await this.budget.sleep(waitMs);
     }
     throw new Error(`APPIUM_NATIVE: ${lastError}`);
   }
 
   private async waitForForegroundPackage(packageName: string, timeoutMs = 30_000): Promise<void> {
-    const deadline = Date.now() + timeoutMs;
+    const deadline = this.budget.now() + timeoutMs;
     const accepted = packageName === 'com.android.settings'
       ? [packageName, 'com.google.android.permissioncontroller']
       : [packageName];
     let current = '';
-    while (Date.now() < deadline) {
+    while (this.budget.now() < deadline) {
       current = await this.currentForegroundPackage();
       if (accepted.includes(current)) return;
-      await delay(250);
+      await this.budget.sleep(250);
     }
     throw new Error(`ANDROID_CERTIFICATE: expected ${accepted.join(' or ')} in foreground, found ${current || 'none'}`);
   }
@@ -1962,7 +1854,7 @@ export class AndroidPlatform implements MobilePlatform {
     });
     await this.waitForForegroundPackage('com.android.settings');
     this.assertDriverClear();
-    await delay(500);
+    await this.budget.sleep(500);
     this.assertDriverClear();
     const nameWithoutExtension = certificateName.replace(/\.[^.]+$/u, '');
     await this.driver.findAny([
@@ -2005,7 +1897,7 @@ export class AndroidPlatform implements MobilePlatform {
           lastError = responseDetail;
         } else {
           const metadata = JSON.parse(observed.body) as Record<string, unknown>;
-          if (observed.httpStatus === 200 && this.isExpectedOrigin(observed.url)
+          if (observed.httpStatus === 200 && isExpectedOrigin(observed.url, this.origin)
             && typeof metadata.version === 'string'
             && Number.isInteger(Number(metadata.assets))
             && Number(metadata.assets) > 0) return;
@@ -2089,14 +1981,6 @@ export class AndroidPlatform implements MobilePlatform {
       }
     }
     throw new Error(`ANDROID_TARGET: signed installed target was not foreground (${last || 'none'})`, { cause: launchError });
-  }
-
-  private isExpectedOrigin(value: string): boolean {
-    try {
-      return new URL(value).origin === new URL(this.origin).origin;
-    } catch {
-      return false;
-    }
   }
 
   private guardRetainedCommands(): void {

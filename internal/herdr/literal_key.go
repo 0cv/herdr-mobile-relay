@@ -43,32 +43,8 @@ func (c *Client) SendLiteralKey(ctx context.Context, paneID, character string) e
 	if c == nil || c.api == nil || paneID == "" {
 		return fmt.Errorf("%w: pane is required", ErrInvalidPaneInput)
 	}
-	if err := ctx.Err(); err != nil {
-		return errors.Join(ErrNotStarted, err)
-	}
-	api := c.api
-	api.mu.Lock()
-	defer api.mu.Unlock()
-	if err := ctx.Err(); err != nil {
-		return errors.Join(ErrNotStarted, err)
-	}
-	_ = api.closeLocked()
-	if err := api.connect(ctx); err != nil {
-		return errors.Join(ErrNotStarted, err)
-	}
-	response, wrote, err := api.requestConnected(ctx, "pane.send_keys", map[string]any{
+	return c.api.requestResult(ctx, "pane.send_keys", map[string]any{
 		"pane_id": paneID,
 		"keys":    []string{key},
-	})
-	_ = api.closeLocked()
-	if err != nil {
-		if wrote {
-			return errors.Join(ErrDispatchedUnknown, err)
-		}
-		return errors.Join(ErrNotStarted, err)
-	}
-	if response.Result.Type != "ok" {
-		return errors.Join(ErrDispatchedUnknown, fmt.Errorf("Herdr socket API returned %q for pane.send_keys", response.Result.Type))
-	}
-	return nil
+	}, "ok", nil)
 }

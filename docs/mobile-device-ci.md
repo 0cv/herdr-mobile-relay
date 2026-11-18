@@ -36,8 +36,10 @@ drift, changed dependency identity, firstFatal, ownership/session/target loss,
 invalid inspection or collection still blocks the product contract. CI additionally requires strict environment PASS. Unknown child
 relation is INDETERMINATE, also blocking: different browser and child PIDs, later
 HTTP success, `isolated not needed`, or an unknown initiator do not prove a death
-unrelated. Only the complete normal-retirement and exact planned-cold policies
-below exempt a death; there is no general signal or exit-zero exemption.
+unrelated. Sandbox-helper deaths are reported in `helperDeaths` and never gate;
+every other death, package replacement, module change and GMS drift still do.
+Only the exact planned-cold policy below exempts a death besides those of
+sandbox helpers; there is no general signal or exit-zero exemption.
 
 The recorder is activated by the runner, not by ordinary driver admission. It
 retains actual owner-object ordinals, native birth/kernel capability, bounded
@@ -55,11 +57,13 @@ Clock-domain ambiguity, missing bounds or PID reuse cannot establish ownership.
 These are bounded relations, not exact kernel-birth timestamps or child causality.
 It is limited to 1,000 combined records and 8 MiB; overflow fails rather than
 truncating. Coverage is bounded operations, not continuous renderer attribution.
-The historical child5820 case remains product INDETERMINATE / environment FAIL;
-its target relation is unproved and no historical result is rewritten.
+The historical child5820 case, a death named for Chrome rather than a sandbox
+helper, remains product INDETERMINATE / environment FAIL; its target relation is
+unproved and no historical result is rewritten. Sandbox-helper deaths are
+reported in `helperDeaths` and never gate.
 
 `android-environment.ts check` requires `--contract report|qualification` and
-explicit current-run, attempt, suite, baseline, scenario, prepared bundle and head
+explicit current-run, attempt, baseline, prepared bundle and head
 arguments. It recomputes and compares the immutable schema-3 runner assessment;
 neither outer postcheck overwrites it. Input hashes bind sanitized persisted
 bytes; invalid UTF-8 is rejected before decoding can change their identity.
@@ -130,57 +134,21 @@ device uptime that does not increase between successful samples fails the step;
 a restart long enough to fail three samples in a row ends as a warning instead.
 Once sampling ends,
 `android-gms-settle.json` records the decision, sampling failures and every
-sample, and the step only warns if that file cannot be written. The
-normal-retirement exception admits only
-isolated Chrome sandbox helpers with a complete in-interval fork/start identity,
-absent from the START inventory and absent from the END inventory unless listed
-there under the same process name (that inventory is taken just before the END
-marker), whose Chrome zygote is in the START inventory, or is absent from it and was forked
-exactly once, by `zygote64`, inside the measurement, remains in the END inventory
-and never exits. The helper must then end with that Zygote's report of exit
-status zero, optionally with one system_server `has died` record whose label is
-only the process's importance at death (such as `vis BTOP`, `fg  SVC` or
-`cch+75 CEM`) or one `isolated not needed` kill with the matching isolated UID;
-or with one such `isolated not needed` kill logged before that Zygote's SIGKILL
-report by timestamp or capture order. A kill logged after a clean exit is
-accepted because the helper can exit on its own while the system reaps it. If
-there is no Zygote exit record, retirement instead requires exactly one helper
-`ChildProcessService: Exiting child process.` record, followed by exactly one
-system_server `isolated not needed` kill with the matching isolated UID and at
-least one later `Child process died (type=N) pid=...` record from the Chrome
-browser PID in the START process inventory. The helper's records must end by
-the kill, its death event set must be exactly that kill, and the numbered
-proof retains the helper self-exit, kill, and browser observation. Any Zygote
-exit, including a crash signal, continues to use only the existing exit rules.
-Except for this no-exit case, the Chromium child exit message, the helper's
-lifetime and the order in which the fork, start, kill and exit records arrive
-are not required, because independent producers stamp and submit them. For
-force-stop and package checks
-the lifetime starts at the earliest fork, start or helper record by timestamp
-or by capture order. A planned Chrome force-stop
-also covers helpers from its observed process set that the system kills as
-`isolated not needed` after system_server logs `Force stopping com.android.chrome`
-for user 0 inside the exact operation interval; that exemption admits only the
-kill and one following START-inventory Chrome zygote report of exit status zero or
-SIGKILL, so any other signal, crash or second exit stays fatal. The schema-3
-check retains raw observations and numbered proof lines, reporting normal helper
-lifetimes separately from fatal events and distinguishing event counts from PID
-counts. The helper's own records may be stamped up to 20 ms before the Zygote
-fork and no later than its exit, or no later than the matching kill when there
-is no Zygote exit, in any capture order, and must fit both START/END marker
-bounds, including audit subject timestamps. The fork and start record must always be inside both bounds; only when
-the helper's own child exit, Zygote exit, matching ActivityManager kill or
-helper-attributed Android death record is at or after END's timestamp and after
-END in capture order may its remaining records, and records that mention it,
-also come from the capture after END, still under every other check above. The
-required Chrome browser observation does not by itself extend this post-END
-allowance. Capture is monitored, receive-bounded `main`/`system` logcat, not an
+sample, and the step only warns if that file cannot be written.
+Deaths of Chrome sandbox helpers (`com.android.chrome:sandboxed_process*`) are
+reported in `helperDeaths` in the environment check and the public summary and
+never gate. A death belongs to a helper when every Chrome, GMS or WebAPK process
+name recorded for its PID is a helper name; a PID that is also named by another
+process keeps gating.
+The schema-3
+check retains raw observations and numbered proof lines, distinguishing event
+counts from PID counts. Capture is monitored, receive-bounded `main`/`system` logcat, not an
 exhaustive or lossless all-producer generation-time trace. Producers sample time
 before submission; another producer's earlier/later timestamp is diagnostic
 `boundaryDiscordances`, not proof of capture loss. Original bytes and line numbers
 are retained without sorting. All captured records, including pre-START and
 post-END spill, remain available for adverse and ambiguous attribution checks;
-planned termination markers and exempted events must also fit both receive and
+planned termination markers must also fit both receive and
 timestamp bounds. A planned termination waits up to 5 seconds after `am force-stop`
 for every observed process of the package to exit before it logs `OP_END`; if any
 observed PID or any process of that package is still listed after 5 seconds (or
@@ -189,23 +157,8 @@ observed PID or any process of that package is still listed after 5 seconds (or
 collector failures still reject. A paused producer can submit only after collection
 stops, and absence of loss text in these buffers cannot prove universal losslessness.
 No quiet wait or marker provides an all-producer submission barrier.
-Strictly parsed Android logd AVC subject records retain separate
-`auditSubjects` attribution and raw numbered lines: logd reconstructs the subject
-PID/TID and original timestamp, so publication after exit is not helper execution.
-Only the supported nonpermissive isolated-app file-denial format, corroborated
-numeric UID and unique audit serial qualify; original timestamps remain bounded,
-and audit subjects stamped more than 20 ms before the fork or carrying adverse
-content still reject. This textual reference
-contract is not authenticated socket provenance or runtime-image attestation.
-A helper PID appearing only as digits in another process's `Killing` UID field
-is not a reference to that helper. PID references elsewhere in the record and
-the killed helper's own isolated-UID consistency checks remain enforced.
 Missing, ambiguous, reused or contradictory identities and incomplete log
-coverage fail closed; force-stop, other signals, nonzero exits, crashes and
-replacement evidence override clean-exit evidence. Within normal retirements and
-the planned force-stop exemption, the only accepted helper signal is the SIGKILL
-completing a matching system `isolated not needed` kill, and that reason is never
-sufficient without the complete helper identity or planned operation. Main/privileged Chrome processes and GMS are not covered, and
+coverage fail closed. Main/privileged Chrome processes and GMS are not covered, and
 native/document ownership and required teardown guarantees remain blocking.
 Only the component-only product policy described above differs from strict
 configuration qualification. Android 15's package manager stores a static-library record
@@ -232,7 +185,7 @@ remains unproved. Deadlines and retirement evidence are unchanged.
 
 A manual dispatch requires `artifact_run_id`, a completed successful same-repository `check` push on `main` containing `release-bundles`; provide `source_commit` for a specific revision. Every dispatch runs both platforms with the release suite. External provenance verifies repository, workflow, push event, main branch, conclusion, source SHA, artifact name, archive checksums, manifest revision and expiration before devices are provisioned. Check and release calls bind to the caller's exact artifact without confusing a PR merge build with its head SHA; evidence records both identities.
 
-Preparation verifies the Linux candidate for Android and Darwin arm64 candidate for iOS against checksums, release manifests, descriptors, hashed assets and web-tree hashes. The gate validates the exact expected platform/baseline/suite/source/hash/native-provider rows for the current attempt. All uploads retain evidence for one day, including release bundles, prepared web trees and device results; expired inputs require a new recorded source run.
+Preparation verifies the Linux candidate for Android and Darwin arm64 candidate for iOS against checksums, release manifests, descriptors, hashed assets and web-tree hashes. The gate validates the exact expected platform/baseline/source/hash/native-provider rows for the current attempt. All uploads retain evidence for one day, including release bundles, prepared web trees and device results; expired inputs require a new recorded source run.
 
 Both platforms inject one bounded corrupt candidate-script response, prove it was consumed and phone completion was not acknowledged, then recover through the shipped Try again control without reinstalling or re-pairing. Phone acknowledgement is required. The runner closes the update dialog, returns from Settings to the fixture's alpha agent, and checks keyboard visibility and draft preservation alongside credentials, preferences, relay ownership, lifecycle launches and reload bounds. Evidence contains the result, screenshots, bounded redacted diagnostics and platform/toolchain identities. Secrets, setup fragments, relay credentials and control headers are redacted or deleted before upload. Synthetic bundle preparation and host browser cache-recovery tools remain available for local harness development, outside this device lane.
 
@@ -259,12 +212,29 @@ bootstrap and project paths, runtime and fresh state directory before running
 `bun tests/mobile/support/ios-xctest.ts start`; finish with the matching `stop`
 command and shutdown of only the marked simulator.
 
+The preflight `xcrun simctl install` of the WDA runner is attempted at most three
+times, three seconds apart, and only after exit status 53 (`ECONNABORTED`, the
+connection to the simulator service was aborted). Hosted runs 43884641913
+attempt 1 and 43863348485 attempt 1 hit it about two seconds into the step.
+Every attempt stays in the owner command records and each retry adds an
+`install-wda-retry` lifecycle event. Any other status fails at once.
+
+When `xcodebuild test-without-building` exits with status 65 before any WDA
+listener was admitted and at least 120 seconds of the 300-second startup
+deadline remain, `start` launches one fresh supervisor. This happened once, in
+run 43893623691 attempt 2, 47 seconds after the spawn. The failed attempt's
+sanitized owner record is kept as `owner-attempt-1.json` and uploaded with the
+other owner evidence; the private log of that attempt is dropped. Any other exit,
+a second failure or a late failure is reported as before. No scenario has started
+at this point.
+
 Android fresh CI setup permits at most one additional create per setup-session
 helper invocation, before any retained Chrome owner or initial installed launch.
 The existing literal `adb: device offline` path is unchanged. A completed HTTP 500
 session-create instrumentation 30000 ms deadline error also qualifies only when a
-nonempty, wholly valid, unique TCP reverse baseline becomes raw-empty stdout with
-blank stderr in a successful same-device inspection. Partial, unchanged or
+nonempty, wholly valid, unique TCP reverse baseline becomes blank stdout (adb
+prints a lone newline for an empty listing) with blank stderr in a successful
+same-device inspection. Partial, unchanged or
 unreadable mappings do not qualify. Restoration uses `reverse --no-rebind`; a
 conflict or any inspection/restoration failure preserves the original Appium error
 and records a bounded secondary failure. Ownership, lifecycle and driver health
@@ -346,6 +316,13 @@ This additional failure does not replace the SDK's primary fatal result. Upload 
 cleanup still always run. Evidence collection never invokes Appium, the gate, driver
 construction, HTTP or discovery after failure.
 
+When the installed icon is not on the current Home page, the adapter swipes right
+exactly (current page - 1) times to reach the first page and then searches to the
+left. It never swipes past the first page: the Today View there publishes no page
+indicator, and a swipe over its widgets is probably what opened an app. Hosted run
+43884641913 attempt 2 failed with `Home page indicator is missing` and run
+43774131109 attempt 1 ended in Apple News after the former fixed eight right swipes.
+
 When Safari's compact layout exposes Page Menu instead of Share, installation
 opens the visible, enabled native `MoreMenuButton` once, verifies Safari remains
 foreground, and observes the menu before looking for Share again. A web-content
@@ -367,17 +344,24 @@ installed-app launch failure also saves one bounded native hierarchy as
 `failure-hierarchy.xml`, unless a fatal driver failure has quarantined native
 queries. The Share-sheet installation-row click records its start, acknowledgement
 or failure separately from the final Add lookup; acknowledgement alone does not
-prove the confirmation appeared. Safari prepares the web clip and fetches the
-manifest icon before it answers this click, so the click has the same 12-second
-acknowledgement allowance as the final Add.
+prove the confirmation appeared. The click has the same 12-second
+acknowledgement allowance as the final Add. After the click, SafariViewService
+fetches the manifest icon with its own connection; the fixture logs that request
+without `zstd` in `Accept-Encoding`. Add stays disabled until that request:
+on passing runs it arrives a few seconds after the click, and one failing run
+waited 213 seconds for it.
 
 The normal real-app journey no longer requests automatic confirmation GET
 `/source` after that acknowledgement. It proceeds directly to the existing
 foreground and final-Add checks. `confirmationCapture` records the explicit
 `not-requested-product-first` disposition and copied row-click acknowledgement
 timing, with no source receipt or projection. Other readiness and failure-evidence
-source requests are unchanged. Client timing is correlation, not proof of native
-cause or confirmation readiness.
+source requests are unchanged. When the third lookup finds Add disabled, one
+8-second GET `/source` saves the redacted sheet as
+`ios-confirmation-disabled-hierarchy.xml`, only if 72 seconds of the
+confirmation remain: the source allowance plus the 64-second round. A nonfatal
+failure is recorded and polling continues; a fatal one ends the run as usual.
+Client timing is correlation, not proof of native cause or confirmation readiness.
 
 The unique visible Add, complete enabled/visible/hittable checks, stable identity
 and exactly one final tap are unchanged, as are settings. The deadlines are:
@@ -391,9 +375,9 @@ This retires r37's automatic pre-lookup capture recipe only for the normal journ
 Old r37/run22 evidence and failures remain unchanged. Hosted run40004048167's
 diagnostic request prevented product lookup; removing it is not an underlying
 iOS/native fix or a passing real-device test. Run39971886984 failed final-Add
-lookup without this diagnostic, and its cause remains unknown. The standalone
-projection utility and hypothetical fixtures remain local regression tools,
-not observed native recovery or hosted qualification.
+lookup without this diagnostic, and its cause remains unknown. The hypothetical
+fixtures remain local installation regression tools, not observed native
+recovery or hosted qualification.
 
 The mobile device upload path withholds `RUNNER_TEMP/appium.log` on iOS, removes
 any stale copy from the artifact directory, and emits the small static
@@ -429,5 +413,21 @@ ADB server, uses one shell-v2 stream, and records bounded stdout/stderr, framing
 exit and truncation state. A closed stream without an exit frame has unknown
 remote status. This preceding-window diagnostic does not replace the mandatory
 qualified environment collector or establish exhaustive coverage or cleanliness.
+
+Each Android job records the host side of the ADB connection right after the
+emulator boots and again after the scenario step, even when it failed, as
+`android-host-after-boot.json` and `android-host-after-scenarios.json`. Each
+records which `adb` binary is on PATH and whether it is the SDK copy Appium uses,
+`adb version`, every running ADB server process with its start time, `adb
+devices -l` (skipped when no server runs, so recording never starts one), load
+average, memory and pressure figures, and host kernel log lines about crashes,
+out-of-memory kills, KVM, QEMU or ADB. The last 256 KiB of the ADB server's own
+log is kept, redacted, as `android-adb-server-<stage>.log`. A changed server PID
+or start time shows that the ADB server restarted; the same server with a higher
+`transport_id` shows that it reconnected to the emulator. Recording never fails
+the job. Hosted runs have lost the ADB connection in two ways: the emulator
+process hung and then exited with SIGSEGV, or the connection dropped and
+reconnected within a second while the emulator kept running. Why the connection
+dropped is not known yet; these files are there to answer that.
 
 Physical-phone signoff remains separate: verify the same old-to-candidate flow on an approved Android handset and iPhone, with production access disabled and no uploaded device state. Record OS/browser/PWA provider, standalone launch, credential reconnect, preference preservation, cold relaunch, and keyboard results alongside the emulator artifacts; never treat simulator success as physical-device coverage.

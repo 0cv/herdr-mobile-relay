@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/0cv/herdr-mobile-relay/internal/agentkind"
 )
 
 const (
@@ -96,36 +98,12 @@ func (chain claudeChain) incomplete() bool {
 	return chain.IncompleteReason != ""
 }
 
-func isClaudeProvider(agent string) bool {
-	switch normalizedAgent(agent) {
-	case "claude", "claudecode":
-		return true
-	default:
-		return false
-	}
-}
-
 // resolveClaudeChain follows only the explicit same-project continued-in
 // footer links of the selected anchor. It intentionally does not call Locate
 // for descendants: root/project selection belongs to the anchor, and a new
 // global search could cross profiles or projects with duplicate session IDs.
 func resolveClaudeChain(ctx context.Context, anchor Location, anchorSessionID string) (claudeChain, error) {
-	return resolveClaudeChainWithObserver(ctx, anchor, anchorSessionID, nil)
-}
-
-func resolveClaudeChainWithObserver(ctx context.Context, anchor Location, anchorSessionID string, observe func(int64)) (claudeChain, error) {
-	var readObserver func(int64) error
-	if observe != nil {
-		readObserver = func(bytes int64) error {
-			observe(bytes)
-			return nil
-		}
-	}
-	return resolveClaudeChainWithReadObserver(ctx, anchor, anchorSessionID, readObserver)
-}
-
-func resolveClaudeChainWithReadObserver(ctx context.Context, anchor Location, anchorSessionID string, observe func(int64) error) (claudeChain, error) {
-	return resolveClaudeChainWithReadHooks(ctx, anchor, anchorSessionID, nil, observe)
+	return resolveClaudeChainWithReadHooks(ctx, anchor, anchorSessionID, nil, nil)
 }
 
 // resolveClaudeChainWithReadHooks separates reservation from observation. A
@@ -133,9 +111,6 @@ func resolveClaudeChainWithReadObserver(ctx context.Context, anchor Location, an
 // observer alone would discover an over-budget ReadAt only after the kernel had
 // already returned the bytes.
 func resolveClaudeChainWithReadHooks(ctx context.Context, anchor Location, anchorSessionID string, reserve, observe func(int64) error) (claudeChain, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	anchorSessionID = strings.TrimSpace(anchorSessionID)
 	if anchor.Path == "" || anchor.Root == "" || !safeSessionID(anchorSessionID) {
 		return claudeChain{}, errors.New("invalid Claude chain anchor")
@@ -335,14 +310,7 @@ func inspectClaudeSegmentFooter(ctx context.Context, source fileSource, sessionI
 	return segment, "", "", nil
 }
 
-func readFileRangeObserved(ctx context.Context, file *os.File, start, end int64, observe func(int64) error) ([]byte, error) {
-	return readFileRangeObservedWithReserve(ctx, file, start, end, nil, observe)
-}
-
 func readFileRangeObservedWithReserve(ctx context.Context, file *os.File, start, end int64, reserve, observe func(int64) error) ([]byte, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	if file == nil || start < 0 || end < start {
 		return nil, errors.New("invalid file range")
 	}
@@ -388,139 +356,54 @@ func claudeFooterBoundaryUninspectableBytes(footer []byte, maxRecordBytes int64)
 	return lineBytes > maxRecordBytes
 }
 
-// readCapturedSegment reads at most limit bytes ending at a descriptor's
-// captured boundary. It is used by the legacy reader and deliberately verifies
-// the descriptor before reading, so an old chain never grows into a new leaf.
-func claudeFooterBoundaryUninspectable(file *os.File, start, end, maxRecordBytes int64) (bool, error) {
-	if file == nil || start <= 0 || end <= start {
-		return false, nil
+func (segment claudeSegment) stamp() sourceStamp {
+	return sourceStamp{
+		size: segment.CapturedEnd, modTime: segment.SourceModTime,
+		changeToken: segment.SourceChangeToken, identity: segment.FileIdentity,
 	}
-	var previous [1]byte
-	if _, err := file.ReadAt(previous[:], start-1); err != nil {
-		return false, err
-	}
-	if previous[0] == '\n' {
-		return false, nil
-	}
-	// The footer window begins inside a JSONL record. It is safe to skip a
-	// bounded prefix only when that record terminates inside the window; an
-	// unterminated or oversized boundary record makes the footer uninspectable.
-	buffer := make([]byte, 32*1024)
-	var scanned int64
-	for position := start; position < end; {
-		want := int64(len(buffer))
-		if remaining := end - position; want > remaining {
-			want = remaining
-		}
-		read, err := file.ReadAt(buffer[:want], position)
-		if read > 0 {
-			if newline := bytes.IndexByte(buffer[:read], '\n'); newline >= 0 {
-				lineBytes := scanned + int64(newline) + 1
-				if position+int64(newline)+1 >= end {
-					return true, nil
-				}
-				return lineBytes > maxRecordBytes, nil
-			}
-			scanned += int64(read)
-			position += int64(read)
-		}
-		if err != nil && !errors.Is(err, io.EOF) {
-			return false, err
-		}
-		if read == 0 {
-			break
-		}
-	}
-	return true, nil
 }
 
-func readCapturedSegment(ctx context.Context, segment claudeSegment, limit int64) (string, bool, error) {
-	if ctx == nil {
-		ctx = context.Background()
+func (segment claudeSegment) compareSource(source fileSource) sourceChange {
+	if source.revision != segment.FileRevision {
+		return sourceChanged
 	}
-	if err := ctx.Err(); err != nil {
-		return "", false, err
-	}
+	return segment.stamp().compare(source.info)
+}
+
+// readEntries rejects a segment whose file changed after capture, so an old
+// chain never grows into a new leaf, then reads at most budget bytes ending at
+// the captured boundary.
+func (segment claudeSegment) readEntries(budget int64) ([]Entry, error) {
 	source, err := captureFileSource(segment.Location)
 	if err != nil {
-		return "", false, err
+		return nil, err
 	}
 	defer source.close()
-	if source.revision != segment.FileRevision || source.end < segment.CapturedEnd ||
-		source.end == segment.CapturedEnd && segment.SourceChangeToken != "" && fileChangeToken(source.info) != segment.SourceChangeToken {
-		return "", false, errors.New("Claude chain source changed")
+	if segment.compareSource(source) == sourceChanged {
+		return nil, errors.New("Claude chain source changed")
 	}
 	end := segment.CapturedEnd
 	if end == 0 {
-		return "", false, nil
+		return nil, nil
 	}
-	if limit < 1 {
-		return "", false, errors.New("invalid Claude segment budget")
+	if budget < 1 {
+		return nil, errors.New("invalid Claude segment budget")
 	}
-	start := int64(0)
-	clipped := end > limit
-	if clipped {
-		start = end - limit
-	}
-	data := make([]byte, end-start)
-	read, err := source.file.ReadAt(data, start)
-	if err != nil && !errors.Is(err, io.EOF) {
-		return "", false, err
-	}
-	if int64(read) != end-start {
-		return "", false, io.ErrUnexpectedEOF
-	}
-	if clipped {
-		if newline := bytes.IndexByte(data, '\n'); newline >= 0 {
-			data = data[newline+1:]
-		} else {
-			data = nil
-		}
-	}
-	return string(data), clipped, nil
+	return readJSONLEntries(source.file, agentkind.Claude, source.revision, max(0, end-budget), end)
 }
 
-func namespaceClaudeEntries(entries []Entry, segment claudeSegment, anchor bool) []Entry {
-	if anchor || len(entries) == 0 {
-		return entries
-	}
-	hash := sha256.Sum256([]byte(segment.SessionID + "\x00" + segment.FileRevision))
-	prefix := hex.EncodeToString(hash[:])[:12]
-	for index := range entries {
-		entries[index].ID = prefix + "-" + entries[index].ID
-	}
-	return entries
-}
-
-func continuationDiagnostic(reason string) (bool, string) {
-	switch reason {
-	case continuationReasonMissingSource, continuationReasonInvalidLink, continuationReasonAmbiguous, continuationReasonCycle, continuationReasonLimit, continuationReasonPartial:
-		return true, reason
-	default:
-		return false, ""
-	}
-}
-
-func (r *Reader) readClaudeChain(_ string, sessionID string, anchor Location, before string, limit int) (Page, error) {
+func (r *Reader) readClaudeChain(sessionID string, anchor Location, limit int) ([]Entry, error) {
 	chain, err := resolveClaudeChain(context.Background(), anchor, sessionID)
 	if err != nil {
-		return Page{}, fmt.Errorf("resolve Claude conversation chain: %w", err)
+		return nil, fmt.Errorf("resolve Claude conversation chain: %w", err)
 	}
 	if len(chain.Segments) == 0 {
-		return unavailableCode("invalid_session", "No conversation log is available for this session."), nil
-	}
-	if limit < 1 {
-		limit = defaultPageSize
-	}
-	if limit > maxPageSize {
-		limit = maxPageSize
+		return nil, ErrUnavailable
 	}
 	groups := make([][]Entry, len(chain.Segments))
 	remaining := int64(maxConversationBytes)
-	clipped := false
 	for index := len(chain.Segments) - 1; index >= 0; index-- {
 		if remaining <= 0 {
-			clipped = true
 			break
 		}
 		segment := chain.Segments[index]
@@ -528,29 +411,22 @@ func (r *Reader) readClaudeChain(_ string, sessionID string, anchor Location, be
 		if segment.CapturedEnd < budget {
 			budget = segment.CapturedEnd
 		}
-		text, segmentClipped, readErr := readCapturedSegment(context.Background(), segment, budget)
+		entries, readErr := segment.readEntries(budget)
 		if readErr != nil {
 			if index == len(chain.Segments)-1 {
-				return Page{}, fmt.Errorf("read Claude conversation segment: %w", readErr)
+				return nil, fmt.Errorf("read Claude conversation segment: %w", readErr)
 			}
-			chain.IncompleteReason = continuationReasonMissingSource
-			clipped = true
 			break
 		}
-		entries := parseTranscript("claude", text)
-		groups[index] = namespaceClaudeEntries(entries, segment, index == 0)
+		groups[index] = entries
 		consumed := segment.CapturedEnd
 		if consumed > remaining {
 			consumed = remaining
 		}
 		remaining -= consumed
-		clipped = clipped || segmentClipped
-		if segmentClipped {
+		if segment.CapturedEnd > budget {
 			// The tail of this segment is readable, but no older segment can be
-			// certified within the shared 16 MiB legacy budget.
-			if index > 0 {
-				clipped = true
-			}
+			// certified within the shared 16 MiB budget.
 			break
 		}
 	}
@@ -558,30 +434,5 @@ func (r *Reader) readClaudeChain(_ string, sessionID string, anchor Location, be
 	for _, group := range groups {
 		entries = append(entries, group...)
 	}
-	end := len(entries)
-	if before != "" {
-		found := false
-		for index := range entries {
-			if entries[index].ID == before {
-				end = index
-				found = true
-				break
-			}
-		}
-		if !found {
-			return Page{Available: true, ReasonCode: "source_changed", Reason: "The conversation chain changed; reload history.", Entries: []Entry{}}, nil
-		}
-	}
-	start := end - limit
-	if start < 0 {
-		start = 0
-	}
-	pageEntries := append([]Entry(nil), entries[start:end]...)
-	page := Page{
-		Available: true, Entries: pageEntries, HasMore: start > 0, Total: len(entries), FileTruncated: clipped,
-	}
-	if chain.IncompleteReason != "" {
-		page.ContinuationIncomplete, page.ContinuationReason = continuationDiagnostic(chain.IncompleteReason)
-	}
-	return page, nil
+	return latest(entries, limit), nil
 }

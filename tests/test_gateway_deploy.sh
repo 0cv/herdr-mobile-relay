@@ -108,10 +108,12 @@ cat > "$STUB_DIR/curl" <<'EOF'
 #!/bin/sh
 # The public /healthz probe. Answers only once the stub server is "started", so
 # the script cannot record a gateway URL it never reached.
-for argument in "$@"; do
-    case "$argument" in
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --output) shift; exec > "$1" ;;
         *"/healthz") [ -f "$STUB_STATE/started" ] || exit 7 ;;
     esac
+    shift
 done
 printf '{"ok":true,"relays":0,"clients":0,"uptime_seconds":1}\n'
 EOF
@@ -178,7 +180,7 @@ for FILE in docker-compose.yml Caddyfile .env README.md; do
 done
 for SOURCE in Dockerfile.gateway go.mod go.sum \
     cmd/herdr-gateway/main.go internal/gateway/server.go \
-    internal/gatewaywire/gatewaywire.go; do
+    internal/atomicfile/atomicfile.go internal/gatewaywire/gatewaywire.go; do
     [ -f "$BUNDLE_DIR/gateway-source/$SOURCE" ] ||
         fail "bundle is missing gateway-source/$SOURCE"
 done
@@ -278,9 +280,19 @@ fi
 # or per-IP and cannot bound total memory.
 for KNOB in HERDR_GATEWAY_MAX_RELAYS HERDR_GATEWAY_MAX_CLIENTS; do
     grep -Fq "$KNOB" "$BUNDLE_DIR/.env" || fail ".env lost the $KNOB ceiling"
+    grep -Fq "$KNOB: \${$KNOB:-" "$BUNDLE_DIR/docker-compose.yml" ||
+        fail "compose file does not pass the $KNOB ceiling"
 done
 grep -Fq 'UDP 3478' "$BUNDLE_DIR/README.md" ||
     fail "bundle README does not mention UDP 3478"
+grep -Fq 'WebRTC → Deploy or Upgrade Your Own WebRTC Gateway → I already run a' "$BUNDLE_DIR/README.md" ||
+    fail "bundle README does not name the setup menu path to an existing gateway"
+! grep -Fq 'Choose Connection Method' "$BUNDLE_DIR/README.md" ||
+    fail "bundle README names a menu that no longer exists"
+grep -Fq 'image: ${HERDR_CADDY_IMAGE:-caddy:2-alpine}' "$BUNDLE_DIR/docker-compose.yml" ||
+    fail "compose file lost the Caddy image default"
+grep -Fq 'chown 65532:65532 /state' "$BUNDLE_DIR/docker-compose.yml" ||
+    fail "compose file does not hand the state volume to the gateway user"
 
 # Nothing may be recorded until a gateway actually answers.
 if grep -q '^HERDR_GATEWAY_URL=' "$HERDR_RELAY_ENV"; then
@@ -427,10 +439,12 @@ grep -Fq 'did not' "$OUTPUT" || fail "unverified deployment printed no diagnosis
 rm -f "$STUB_STATE/started" "$STUB_STATE/uploaded.tar.gz"
 cat > "$STUB_DIR/curl" <<'EOF'
 #!/bin/sh
-for argument in "$@"; do
-    case "$argument" in
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --output) shift; exec > "$1" ;;
         *"/healthz") [ -f "$STUB_STATE/started" ] || exit 7 ;;
     esac
+    shift
 done
 printf '{"ok":true,"relays":0,"clients":0,"uptime_seconds":1,"stun_port":3478}\n'
 EOF

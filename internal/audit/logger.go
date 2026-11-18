@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -111,60 +112,24 @@ func (l *Logger) Append(record Record) error {
 }
 
 func (l *Logger) openAppendFile() (*os.File, error) {
-	for attempt := 0; attempt < 3; attempt++ {
-		info, err := os.Lstat(l.path)
-		if errors.Is(err, os.ErrNotExist) {
-			file, createErr := os.OpenFile(l.path, os.O_CREATE|os.O_EXCL|os.O_APPEND|os.O_WRONLY, 0o600)
-			if errors.Is(createErr, os.ErrExist) {
-				continue
-			}
-			if createErr != nil {
-				return nil, fmt.Errorf("create audit file: %w", createErr)
-			}
-			opened, statErr := file.Stat()
-			if statErr != nil {
-				_ = file.Close()
-				return nil, fmt.Errorf("validate new audit file: %w", statErr)
-			}
-			if !opened.Mode().IsRegular() {
-				_ = file.Close()
-				return nil, errors.New("new audit path is not a regular file")
-			}
-			if chmodErr := file.Chmod(0o600); chmodErr != nil {
-				_ = file.Close()
-				return nil, fmt.Errorf("protect audit file: %w", chmodErr)
-			}
-			return file, nil
-		}
-		if err != nil {
-			return nil, fmt.Errorf("inspect audit file: %w", err)
-		}
-		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-			return nil, errors.New("audit path is not a regular file")
-		}
-		file, openErr := os.OpenFile(l.path, os.O_APPEND|os.O_WRONLY, 0o600)
-		if errors.Is(openErr, os.ErrNotExist) {
-			continue
-		}
-		if openErr != nil {
-			return nil, fmt.Errorf("open audit file: %w", openErr)
-		}
-		opened, statErr := file.Stat()
-		if statErr != nil {
-			_ = file.Close()
-			return nil, fmt.Errorf("validate audit file: %w", statErr)
-		}
-		if !opened.Mode().IsRegular() || !os.SameFile(info, opened) {
-			_ = file.Close()
-			return nil, errors.New("audit file changed while it was opening")
-		}
-		if chmodErr := file.Chmod(0o600); chmodErr != nil {
-			_ = file.Close()
-			return nil, fmt.Errorf("protect audit file: %w", chmodErr)
-		}
-		return file, nil
+	file, err := os.OpenFile(l.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open audit file: %w", err)
 	}
-	return nil, errors.New("audit file changed repeatedly while it was opening")
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("validate audit file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		_ = file.Close()
+		return nil, errors.New("audit path is not a regular file")
+	}
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("protect audit file: %w", err)
+	}
+	return file, nil
 }
 
 func (l *Logger) rotateIfNeeded(nextBytes int64) error {

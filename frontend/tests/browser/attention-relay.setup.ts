@@ -59,6 +59,36 @@ async function stopRelay(relay: ChildProcess): Promise<void> {
   if (relay.exitCode === null && relay.signalCode === null) relay.kill('SIGKILL');
 }
 
+interface PaneRow {
+  name: string;
+  agent: string;
+  status: string;
+  content: string;
+  session?: string;
+  cwd?: string;
+}
+
+const attentionCaptures: [name: string, agent: string, capture: string][] = [
+  ['qoder-approval', 'qodercli', 'qodercli-permission-required2'],
+  ['qoder-notes', 'qodercli', 'qodercli-multi-questions-and-notes'],
+  ['codex-notes', 'codex', 'codex-first-question_with_notes'],
+  ['codex-final-question', 'codex', 'codex-middle-question'],
+  ['codex-single-question', 'codex', 'codex-single-question'],
+  ['codex-plan-approval', 'codex', 'codex-implement-plan'],
+  ['claude-approval', 'claude', 'claude-single-approval'],
+  ['claude-later-question', 'claude', 'claude-plan-multi-question'],
+  ['claude-custom-answer', 'claude', 'claude-plan-one-question-notes'],
+  ['claude-multi-select', 'claude', 'claude-multi-select-with-free-text'],
+  ['claude-review', 'claude', 'claude-plan-submit-answers'],
+  ['opencode-single', 'opencode', 'opencode-single-question'],
+  ['opencode-custom', 'opencode', 'opencode-questions-multiple-choice-with-free-text-edited'],
+  ['opencode-review', 'opencode', 'opencode-questions-with-multiple-choice-answers-confirm'],
+  ['qoder-standalone', 'qodercli', 'qodercli-single-question'],
+  ['qoder-settings', 'qodercli', 'qodercli-yes-no'],
+  ['omp-plan-approval', 'omp', 'omp-plan-approval'],
+  ['omp-partial-ask', 'omp', 'omp-partial-ask'],
+];
+
 export default async function setup() {
   const runtime = await mkdtemp(join(tmpdir(), 'herdr-attention-browser-'));
   const cache = process.env.GOCACHE || join(runtime, 'go-cache');
@@ -69,6 +99,7 @@ export default async function setup() {
   const inputOperationsPath = join(runtime, 'terminal-input.jsonl');
   const metadataPath = join(runtime, 'metadata.json');
   const controlPath = join(runtime, 'control.sock');
+  const socketPath = join(runtime, 'herdr.sock');
   const barrierDir = join(runtime, 'barriers');
   await writeFile(metadataPath, '{}', { mode: 0o600 });
   const webRoot = join(runtime, 'web');
@@ -88,45 +119,6 @@ export default async function setup() {
     await writeFile(join(directory, `${session}.jsonl`), await readFile(conversationPath, 'utf8'));
   }
 
-  const [
-    approval,
-    qoderNotes,
-    codexNotes,
-    codexFinalQuestion,
-    codexSingleQuestion,
-    codexPlanApproval,
-    claudeApproval,
-    claudeLaterQuestion,
-    claudeCustomAnswer,
-    claudeMultiSelect,
-    claudeReview,
-    openCodeSingle,
-    openCodeCustom,
-    openCodeReview,
-    qoderStandalone,
-    qoderSettings,
-    ompPlanApproval,
-    ompPartialAsk,
-  ] = await Promise.all([
-    readFile(join(captureRoot, 'qodercli-permission-required2.ansi'), 'utf8'),
-    readFile(join(captureRoot, 'qodercli-multi-questions-and-notes.ansi'), 'utf8'),
-    readFile(join(captureRoot, 'codex-first-question_with_notes.ansi'), 'utf8'),
-    readFile(join(captureRoot, 'codex-middle-question.ansi'), 'utf8'),
-    readFile(join(captureRoot, 'codex-single-question.ansi'), 'utf8'),
-    readFile(join(captureRoot, 'codex-implement-plan.ansi'), 'utf8'),
-    readFile(join(captureRoot, 'claude-single-approval.ansi'), 'utf8'),
-    readFile(join(captureRoot, 'claude-plan-multi-question.ansi'), 'utf8'),
-    readFile(join(captureRoot, 'claude-plan-one-question-notes.ansi'), 'utf8'),
-    readFile(join(captureRoot, 'claude-multi-select-with-free-text.ansi'), 'utf8'),
-    readFile(join(captureRoot, 'claude-plan-submit-answers.ansi'), 'utf8'),
-    readFile(join(captureRoot, 'opencode-single-question.ansi'), 'utf8'),
-    readFile(join(captureRoot, 'opencode-questions-multiple-choice-with-free-text-edited.ansi'), 'utf8'),
-    readFile(join(captureRoot, 'opencode-questions-with-multiple-choice-answers-confirm.ansi'), 'utf8'),
-    readFile(join(captureRoot, 'qodercli-single-question.ansi'), 'utf8'),
-    readFile(join(captureRoot, 'qodercli-yes-no.ansi'), 'utf8'),
-    readFile(join(captureRoot, 'omp-plan-approval.ansi'), 'utf8'),
-    readFile(join(captureRoot, 'omp-partial-ask.ansi'), 'utf8'),
-  ]);
   // The literal-input dialogs have no input prompt line, so the relay cannot classify them: they need
   // inspection, the composer cannot send, and the Keyboard button is offered.
   const literalDialog = [
@@ -136,303 +128,64 @@ export default async function setup() {
     'Custom answer: Where shall we go?',
     'enter or ctrl+q submit  esc cancel  ctrl+g external editor',
   ].join('\n');
+  const rows: PaneRow[] = [
+    { name: 'arbitrary-dialog', agent: 'claude', status: 'blocked', content: literalDialog, session: '123e4567-e89b-12d3-a456-426614174001' },
+    { name: 'orchestration-dialog', agent: 'claude', status: 'blocked', content: 'Guidance for /orchestrate-answer\nCustom answer: Add guidance\nenter or ctrl+q submit  esc cancel  ctrl+g external editor', session: '123e4567-e89b-12d3-a456-426614174002' },
+    ...await Promise.all(attentionCaptures.map(async ([name, agent, capture]) => ({
+      name, agent, status: 'blocked', content: await readFile(join(captureRoot, `${capture}.ansi`), 'utf8'),
+    }))),
+    { name: 'conversation-history', agent: 'claude', status: 'working', content: 'conversation history fixture', session: conversationSession, cwd: '/tmp/conversation' },
+  ];
   const scenario = {
     responses: Object.fromEntries([30, 100, 500, 1_000, 10_000].flatMap(lines =>
       ['visible', 'recent', 'recent-unwrapped'].map(source => [
         ['pane', 'read', 'arbitrary-dialog', '--lines', String(lines), '--source', source, '--format', 'ansi'].join('\0'),
         literalDialog.split('\n').slice(-lines).join('\n'),
       ]))),
-    panes: [
-      { pane_id: 'arbitrary-dialog', terminal_id: 'terminal-arbitrary', agent: 'claude', name: 'arbitrary-dialog', agent_status: 'blocked', tab_id: 'arbitrary-tab', workspace_id: 'workspace-1', cwd: '/tmp/arbitrary-dialog', revision: 1, agent_session: { value: '123e4567-e89b-12d3-a456-426614174001', kind: 'uuid' } },
-      { pane_id: 'orchestration-dialog', terminal_id: 'terminal-orchestration', agent: 'claude', name: 'orchestration-dialog', agent_status: 'blocked', tab_id: 'orchestration-tab', workspace_id: 'workspace-1', cwd: '/tmp/orchestration-dialog', revision: 1, agent_session: { value: '123e4567-e89b-12d3-a456-426614174002', kind: 'uuid' } },
-      {
-        pane_id: 'qoder-approval', terminal_id: 'terminal-qoder-approval', agent: 'qodercli', name: 'qoder-approval',
-        agent_status: 'blocked', tab_id: 'tab-1', workspace_id: 'workspace-1',
-        cwd: '/tmp/qoder-approval', revision: 1,
-      },
-      {
-        pane_id: 'qoder-notes', terminal_id: 'terminal-qoder-notes', agent: 'qodercli', name: 'qoder-notes',
-        agent_status: 'blocked', tab_id: 'tab-2', workspace_id: 'workspace-1',
-        cwd: '/tmp/qoder-notes', revision: 1,
-      },
-      {
-        pane_id: 'codex-notes', terminal_id: 'terminal-codex-notes', agent: 'codex', name: 'codex-notes',
-        agent_status: 'blocked', tab_id: 'tab-3', workspace_id: 'workspace-1',
-        cwd: '/tmp/codex-notes', revision: 1,
-      },
-      {
-        pane_id: 'codex-final-question', terminal_id: 'terminal-codex-final-question', agent: 'codex', name: 'codex-final-question',
-        agent_status: 'blocked', tab_id: 'attention-d', workspace_id: 'workspace-1',
-        cwd: '/tmp/codex-final-question', revision: 1,
-      },
-      {
-        pane_id: 'codex-single-question', terminal_id: 'terminal-codex-single-question', agent: 'codex', name: 'codex-single-question',
-        agent_status: 'blocked', tab_id: 'attention-e', workspace_id: 'workspace-1',
-        cwd: '/tmp/codex-single-question', revision: 1,
-      },
-      {
-        pane_id: 'codex-plan-approval', terminal_id: 'terminal-codex-plan-approval', agent: 'codex', name: 'codex-plan-approval',
-        agent_status: 'blocked', tab_id: 'attention-f', workspace_id: 'workspace-1',
-        cwd: '/tmp/codex-plan-approval', revision: 1,
-      },
-      {
-        pane_id: 'claude-approval', terminal_id: 'terminal-claude-approval', agent: 'claude', name: 'claude-approval',
-        agent_status: 'blocked', tab_id: 'attention-g', workspace_id: 'workspace-1',
-        cwd: '/tmp/claude-approval', revision: 1,
-      },
-      {
-        pane_id: 'claude-later-question', terminal_id: 'terminal-claude-later-question', agent: 'claude', name: 'claude-later-question',
-        agent_status: 'blocked', tab_id: 'attention-h', workspace_id: 'workspace-1',
-        cwd: '/tmp/claude-later-question', revision: 1,
-      },
-      {
-        pane_id: 'claude-custom-answer', terminal_id: 'terminal-claude-custom-answer', agent: 'claude', name: 'claude-custom-answer',
-        agent_status: 'blocked', tab_id: 'attention-i', workspace_id: 'workspace-1',
-        cwd: '/tmp/claude-custom-answer', revision: 1,
-      },
-      {
-        pane_id: 'claude-multi-select', terminal_id: 'terminal-claude-multi-select', agent: 'claude', name: 'claude-multi-select',
-        agent_status: 'blocked', tab_id: 'attention-j', workspace_id: 'workspace-1',
-        cwd: '/tmp/claude-multi-select', revision: 1,
-      },
-      {
-        pane_id: 'claude-review', terminal_id: 'terminal-claude-review', agent: 'claude', name: 'claude-review',
-        agent_status: 'blocked', tab_id: 'attention-k', workspace_id: 'workspace-1',
-        cwd: '/tmp/claude-review', revision: 1,
-      },
-      {
-        pane_id: 'opencode-single', terminal_id: 'terminal-opencode-single', agent: 'opencode', name: 'opencode-single',
-        agent_status: 'blocked', tab_id: 'attention-l', workspace_id: 'workspace-1',
-        cwd: '/tmp/opencode-single', revision: 1,
-      },
-      {
-        pane_id: 'opencode-custom', terminal_id: 'terminal-opencode-custom', agent: 'opencode', name: 'opencode-custom',
-        agent_status: 'blocked', tab_id: 'attention-m', workspace_id: 'workspace-1',
-        cwd: '/tmp/opencode-custom', revision: 1,
-      },
-      {
-        pane_id: 'opencode-review', terminal_id: 'terminal-opencode-review', agent: 'opencode', name: 'opencode-review',
-        agent_status: 'blocked', tab_id: 'attention-n', workspace_id: 'workspace-1',
-        cwd: '/tmp/opencode-review', revision: 1,
-      },
-      {
-        pane_id: 'qoder-standalone', terminal_id: 'terminal-qoder-standalone', agent: 'qodercli', name: 'qoder-standalone',
-        agent_status: 'blocked', tab_id: 'attention-o', workspace_id: 'workspace-1',
-        cwd: '/tmp/qoder-standalone', revision: 1,
-      },
-      {
-        pane_id: 'qoder-settings', terminal_id: 'terminal-qoder-settings', agent: 'qodercli', name: 'qoder-settings',
-        agent_status: 'blocked', tab_id: 'attention-p', workspace_id: 'workspace-1',
-        cwd: '/tmp/qoder-settings', revision: 1,
-      },
-      {
-        pane_id: 'omp-plan-approval', terminal_id: 'terminal-omp-plan-approval', agent: 'omp', name: 'omp-plan-approval',
-        agent_status: 'blocked', tab_id: 'attention-q', workspace_id: 'workspace-1',
-        cwd: '/tmp/omp-plan-approval', revision: 1,
-      },
-      {
-        pane_id: 'omp-partial-ask', terminal_id: 'terminal-omp-partial-ask', agent: 'omp', name: 'omp-partial-ask',
-        agent_status: 'blocked', tab_id: 'attention-r', workspace_id: 'workspace-1',
-        cwd: '/tmp/omp-partial-ask', revision: 1,
-      },
-      {
-        pane_id: 'conversation-history', terminal_id: 'terminal-conversation-history', agent: 'claude', name: 'conversation-history',
-        agent_status: 'working', tab_id: 'attention-s', workspace_id: 'workspace-1',
-        cwd: '/tmp/conversation', revision: 1,
-        agent_session: { value: conversationSession, kind: 'uuid' },
-      },
-    ],
-    tabs: [
-      { tab_id: 'arbitrary-tab', workspace_id: 'workspace-1', label: 'arbitrary-dialog', number: 20, cwd: '/tmp/arbitrary-dialog' },
-      { tab_id: 'orchestration-tab', workspace_id: 'workspace-1', label: 'orchestration-dialog', number: 21, cwd: '/tmp/orchestration-dialog' },
-      { tab_id: 'tab-1', workspace_id: 'workspace-1', label: 'qoder-approval', number: 1, cwd: '/tmp/qoder-approval' },
-      { tab_id: 'tab-2', workspace_id: 'workspace-1', label: 'qoder-notes', number: 2, cwd: '/tmp/qoder-notes' },
-      { tab_id: 'tab-3', workspace_id: 'workspace-1', label: 'codex-notes', number: 3, cwd: '/tmp/codex-notes' },
-      { tab_id: 'attention-d', workspace_id: 'workspace-1', label: 'codex-final-question', number: 4, cwd: '/tmp/codex-final-question' },
-      { tab_id: 'attention-e', workspace_id: 'workspace-1', label: 'codex-single-question', number: 5, cwd: '/tmp/codex-single-question' },
-      { tab_id: 'attention-f', workspace_id: 'workspace-1', label: 'codex-plan-approval', number: 6, cwd: '/tmp/codex-plan-approval' },
-      { tab_id: 'attention-g', workspace_id: 'workspace-1', label: 'claude-approval', number: 7, cwd: '/tmp/claude-approval' },
-      { tab_id: 'attention-h', workspace_id: 'workspace-1', label: 'claude-later-question', number: 8, cwd: '/tmp/claude-later-question' },
-      { tab_id: 'attention-i', workspace_id: 'workspace-1', label: 'claude-custom-answer', number: 9, cwd: '/tmp/claude-custom-answer' },
-      { tab_id: 'attention-j', workspace_id: 'workspace-1', label: 'claude-multi-select', number: 10, cwd: '/tmp/claude-multi-select' },
-      { tab_id: 'attention-k', workspace_id: 'workspace-1', label: 'claude-review', number: 11, cwd: '/tmp/claude-review' },
-      { tab_id: 'attention-l', workspace_id: 'workspace-1', label: 'opencode-single', number: 12, cwd: '/tmp/opencode-single' },
-      { tab_id: 'attention-m', workspace_id: 'workspace-1', label: 'opencode-custom', number: 13, cwd: '/tmp/opencode-custom' },
-      { tab_id: 'attention-n', workspace_id: 'workspace-1', label: 'opencode-review', number: 14, cwd: '/tmp/opencode-review' },
-      { tab_id: 'attention-o', workspace_id: 'workspace-1', label: 'qoder-standalone', number: 15, cwd: '/tmp/qoder-standalone' },
-      { tab_id: 'attention-p', workspace_id: 'workspace-1', label: 'qoder-settings', number: 16, cwd: '/tmp/qoder-settings' },
-      { tab_id: 'attention-q', workspace_id: 'workspace-1', label: 'omp-plan-approval', number: 17, cwd: '/tmp/omp-plan-approval' },
-      { tab_id: 'attention-r', workspace_id: 'workspace-1', label: 'omp-partial-ask', number: 18, cwd: '/tmp/omp-partial-ask' },
-      { tab_id: 'attention-s', workspace_id: 'workspace-1', label: 'conversation-history', number: 19, cwd: '/tmp/conversation' },
-    ],
-    content: {
-      'arbitrary-dialog': literalDialog,
-      'orchestration-dialog': 'Guidance for /orchestrate-answer\nCustom answer: Add guidance\nenter or ctrl+q submit  esc cancel  ctrl+g external editor',
-      'qoder-approval': approval,
-      'qoder-notes': qoderNotes,
-      'codex-notes': codexNotes,
-      'codex-final-question': codexFinalQuestion,
-      'codex-single-question': codexSingleQuestion,
-      'codex-plan-approval': codexPlanApproval,
-      'claude-approval': claudeApproval,
-      'claude-later-question': claudeLaterQuestion,
-      'claude-custom-answer': claudeCustomAnswer,
-      'claude-multi-select': claudeMultiSelect,
-      'claude-review': claudeReview,
-      'opencode-single': openCodeSingle,
-      'opencode-custom': openCodeCustom,
-      'opencode-review': openCodeReview,
-      'qoder-standalone': qoderStandalone,
-      'qoder-settings': qoderSettings,
-      'omp-plan-approval': ompPlanApproval,
-      'omp-partial-ask': ompPartialAsk,
-      'conversation-history': 'conversation history fixture',
-    },
+    focused_workspace_id: 'workspace-1',
+    workspaces: [{ workspace_id: 'workspace-1', number: 1, label: 'Captured', pane_count: rows.length, tab_count: rows.length, cwd: '/tmp' }],
+    panes: rows.map(({ name, agent, status, session, cwd }) => ({
+      pane_id: name, terminal_id: `terminal-${name}`, agent, name, agent_status: status, tab_id: `${name}-tab`,
+      workspace_id: 'workspace-1', cwd: cwd ?? `/tmp/${name}`, revision: 1,
+      ...(session ? { agent_session: { value: session, kind: 'uuid' } } : {}),
+    })),
+    tabs: rows.map(({ name, cwd }, index) => ({
+      tab_id: `${name}-tab`, workspace_id: 'workspace-1', label: name, number: index + 1, cwd: cwd ?? `/tmp/${name}`,
+    })),
+    content: Object.fromEntries(rows.map(({ name, content }) => [name, content])),
   };
   await writeFile(scenarioPath, JSON.stringify(scenario));
-  const socketPath = join(runtime, 'herdr.sock');
-  const workspace = {
-    workspace_id: 'workspace-1',
-    number: 1,
-    label: 'Captured',
-    pane_count: scenario.panes.length,
-    tab_count: scenario.tabs.length,
-    cwd: '/tmp',
-  };
-  const socketServer = createServer((connection) => {
-    connection.setEncoding('utf8');
-    // The relay may close a request early; without a listener the reply's EPIPE would crash the whole test run.
-    connection.on('error', () => connection.destroy());
-    let pending = '';
-    const handle = async (line: string) => {
-      let request: { id?: string; method?: string; params?: Record<string, unknown> };
-      try {
-        request = JSON.parse(line) as typeof request;
-      } catch {
-        connection.end();
-        return;
-      }
-      const id = request.id || '';
-      if (request.method === 'events.subscribe') {
-        connection.write(JSON.stringify({ id, result: { type: 'subscription_started' } }) + '\n');
-        return;
-      }
-      const overrides = JSON.parse(await readFile(metadataPath, 'utf8')) as Record<string, { cwd?: string; agent?: string }>;
-      const panes = scenario.panes.map(pane => ({ ...pane, ...overrides[pane.pane_id] }));
-      let response: Record<string, unknown>;
-      switch (request.method) {
-        case 'ping':
-          response = {
-            id,
-            result: {
-              type: 'pong',
-              version: '0.9.0',
-              protocol: 1,
-              capabilities: {
-                endpoint_protocol_generation: 1,
-                surface_interest: true,
-                health_check: true,
-              },
-            },
-          };
-          break;
-        case 'agent.list':
-          response = { id, result: { type: 'agent_list', agents: panes } };
-          break;
-        case 'pane.list':
-          response = { id, result: { type: 'pane_list', panes } };
-          break;
-        case 'workspace.list':
-          response = { id, result: { type: 'workspace_list', workspaces: [workspace] } };
-          break;
-        case 'tab.list':
-          response = { id, result: { type: 'tab_list', tabs: scenario.tabs } };
-          break;
-        case 'session.snapshot':
-          response = {
-            id,
-            result: {
-              type: 'session_snapshot',
-              snapshot: {
-                version: '0.9.0',
-                protocol: 1,
-                workspaces: [workspace],
-                tabs: scenario.tabs,
-                panes,
-                agents: panes,
-                focused_workspace_id: 'workspace-1',
-              },
-            },
-          };
-          break;
-        case 'pane.send_input':
-          void appendFile(inputOperationsPath, JSON.stringify({ method: request.method, params: request.params, started_at: new Date().toISOString() }) + '\n');
-          if (request.params?.text === 'uncertain-fixture-text') { connection.end(); return; }
-          response = { id, result: { type: 'ok' } };
-          break;
-        case 'pane.read':
-          response = {
-            id,
-            error: { code: 'unknown_method', message: 'attention fixture uses CLI pane reads' },
-          };
-          break;
-        case 'workspace.move_block':
-          response = Array.isArray(request.params?.workspace_ids) && request.params.workspace_ids.length > 0
-            ? { id, result: { type: 'workspace_list', workspaces: [workspace] } }
-            : { id, error: { code: 'workspace_move_block_failed', message: 'empty selection' } };
-          break;
-        case 'workspace.move':
-          response = { id, result: { type: 'workspace_list', workspaces: [workspace] } };
-          break;
-        case 'tab.move':
-          response = { id, result: { type: 'tab_list', tabs: scenario.tabs } };
-          break;
-        case 'workspace.close':
-          response = { id, result: { type: 'ok' } };
-          break;
-        default:
-          response = { id, error: { code: 'unknown_method', message: 'unknown method' } };
-          break;
-      }
-      connection.end(JSON.stringify(response) + '\n');
-    };
-    connection.on('data', (chunk: string) => {
-      pending += chunk;
-      let newline = pending.indexOf('\n');
-      while (newline >= 0) {
-        const line = pending.slice(0, newline);
-        pending = pending.slice(newline + 1);
-        void handle(line).catch(() => connection.destroy());
-        newline = pending.indexOf('\n');
-      }
-    });
-  });
-  await new Promise<void>((resolveSocket, rejectSocket) => {
-    socketServer.once('error', rejectSocket);
-    socketServer.listen(socketPath, resolveSocket);
-  });
-  const closeSocket = async () => {
-    await new Promise<void>((resolveSocket) => socketServer.close(() => resolveSocket()));
-  };
 
   build(fakeBin, './cmd/fake-herdr', cache);
   build(relayBin, './cmd/herdr-mobile-relay', cache);
 
-  const controlServer = spawn(fakeBin, ['control-server'], {
-    cwd: repoRoot,
-    env: { ...process.env, FAKE_HERDR_SCENARIO: scenarioPath, FAKE_HERDR_CONTROL: controlPath, FAKE_HERDR_BARRIER_DIR: barrierDir },
-    stdio: ['ignore', 'ignore', 'pipe'],
-  });
-  if (process.env.HERDR_ATTENTION_PROCESS_LOG) await appendFile(process.env.HERDR_ATTENTION_PROCESS_LOG, JSON.stringify({ kind: 'fixture-control', pid: controlServer.pid, bin: fakeBin, runtime }) + '\n', { mode: 0o600 });
-  let controlOutput = '';
-  controlServer.stderr?.on('data', chunk => { controlOutput += String(chunk); });
-  let controlReady = false;
-  for (let attempt = 0; attempt < 100; attempt++) {
-    try { await access(controlPath); controlReady = true; break; }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-    await new Promise(resolveWait => setTimeout(resolveWait, 20));
+  const startFakeHerdr = async (mode: string, env: NodeJS.ProcessEnv, readyPath: string, logKind: string): Promise<ChildProcess> => {
+    const child = spawn(fakeBin, [mode], { cwd: repoRoot, env, stdio: ['ignore', 'ignore', 'pipe'] });
+    if (process.env.HERDR_ATTENTION_PROCESS_LOG) await appendFile(process.env.HERDR_ATTENTION_PROCESS_LOG, JSON.stringify({ kind: logKind, pid: child.pid, bin: fakeBin, runtime }) + '\n', { mode: 0o600 });
+    let output = '';
+    child.stderr?.on('data', chunk => { output += String(chunk); });
+    for (let attempt = 0; attempt < 100; attempt++) {
+      try { await access(readyPath); return child; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+      await new Promise(resolveWait => setTimeout(resolveWait, 20));
+    }
+    await stopRelay(child);
+    throw new Error(`Fake Herdr ${mode} did not start: ${output}`);
+  };
+  const fakeEnv = { ...process.env, FAKE_HERDR_SCENARIO: scenarioPath, FAKE_HERDR_BARRIER_DIR: barrierDir };
+  const controlServer = await startFakeHerdr('control-server', { ...fakeEnv, FAKE_HERDR_CONTROL: controlPath }, controlPath, 'fixture-control');
+  let socketServer: ChildProcess;
+  try {
+    socketServer = await startFakeHerdr('socket-server', {
+      ...fakeEnv,
+      FAKE_HERDR_SOCKET: socketPath,
+      FAKE_HERDR_PANE_OVERRIDES: metadataPath,
+      FAKE_HERDR_INPUT_LOG: inputOperationsPath,
+    }, socketPath, 'fixture-socket');
+  } catch (error) {
+    await stopRelay(controlServer);
+    throw error;
   }
-  if (!controlReady) { await stopRelay(controlServer); throw new Error(`Private fixture control did not start: ${controlOutput}`); }
 
   const [port, pluginPort] = await Promise.all([freePort(), freePort()]);
   let output = '';
@@ -468,7 +221,7 @@ export default async function setup() {
   } catch (error) {
     await stopRelay(relay);
     await stopRelay(controlServer);
-    await closeSocket();
+    await stopRelay(socketServer);
     await rm(runtime, { recursive: true, force: true });
     throw error;
   }
@@ -484,7 +237,7 @@ export default async function setup() {
   return async () => {
     await stopRelay(relay);
     await stopRelay(controlServer);
-    await closeSocket();
+    await stopRelay(socketServer);
     await rm(runtime, { recursive: true, force: true });
   };
 }

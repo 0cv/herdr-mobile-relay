@@ -63,15 +63,6 @@ func loadOrCreateReferenceSigner(path string) (*ReferenceSigner, error) {
 	return &ReferenceSigner{key: key}, nil
 }
 
-func NewReferenceSigner(key []byte) (*ReferenceSigner, error) {
-	if len(key) < 32 {
-		return nil, errors.New("push_reference_key_too_short")
-	}
-	copyKey := make([]byte, len(key))
-	copy(copyKey, key)
-	return &ReferenceSigner{key: copyKey}, nil
-}
-
 func (s *ReferenceSigner) Sign(claims ReferenceClaims) (string, error) {
 	if s == nil || len(s.key) == 0 {
 		return "", ErrInvalidReference
@@ -212,13 +203,6 @@ func localizedPayloadText(locale string, category Category, preview PreviewMode,
 	default:
 		return "", "", errors.New("push_invalid_preview")
 	}
-}
-
-func localizedApproveOnce(locale string) string {
-	if localize.NormalizeLocale(locale) == localize.SimplifiedChinese {
-		return "仅批准一次"
-	}
-	return "Approve once"
 }
 
 func notificationTag(key PushEventKey) string {

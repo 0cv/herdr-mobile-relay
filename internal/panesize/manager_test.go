@@ -310,7 +310,7 @@ func newFixture(t *testing.T) *fixture {
 		ops:   &fakeOps{devices: map[string]*fakeDevice{}},
 		logs:  &logRecorder{},
 	}
-	f.m = newManager(f.herdr, f.ttys, f.ops, LeaseTTL, ReleaseGrace, clock.Now, slog.New(f.logs))
+	f.m = newManager(f.herdr, f.ttys, f.ops, clock.Now, slog.New(f.logs))
 	f.m.opTimeout = time.Second
 	return f
 }

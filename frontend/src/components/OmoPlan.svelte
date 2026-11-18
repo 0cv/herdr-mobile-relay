@@ -11,10 +11,8 @@
 
   let {
     plan,
-    title = 'Oh My OpenCode plan',
   }: {
     plan: OmoTodoState;
-    title?: string;
   } = $props();
 
   const componentId = $props.id();
@@ -30,7 +28,7 @@
 <section class="omo-plan" aria-labelledby={headingId}>
   <header>
     <div>
-      <h3 id={headingId}>{title}</h3>
+      <h3 id={headingId}>Oh My OpenCode plan</h3>
       <span class="omo-read-only">Read only</span>
     </div>
     {#if updatedAt}

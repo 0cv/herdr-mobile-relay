@@ -3,7 +3,6 @@ package webrtclink
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"io"
@@ -18,6 +17,7 @@ import (
 	"time"
 
 	"github.com/pion/ice/v4"
+	"github.com/pion/stun/v4"
 	"github.com/pion/webrtc/v4"
 
 	"github.com/0cv/herdr-mobile-relay/internal/framing"
@@ -165,7 +165,7 @@ type harness struct {
 	candidates []Candidate
 }
 
-func newHarness(t *testing.T, maxSessions int, mappedIPs []string) *harness {
+func newHarness(t *testing.T, maxSessions int) *harness {
 	t.Helper()
 
 	h := &harness{
@@ -175,7 +175,6 @@ func newHarness(t *testing.T, maxSessions int, mappedIPs []string) *harness {
 	manager, err := New(Options{
 		Logger:           quietLogger(),
 		MaxSessions:      maxSessions,
-		NAT1To1IPs:       mappedIPs,
 		OnLocalCandidate: h.routeCandidate,
 		Serve: func(ctx context.Context, conn transport.FrameConn) {
 			h.recordServe(conn)
@@ -323,7 +322,7 @@ func (h *harness) awaitSessionCount(t *testing.T, want int) {
 }
 
 func TestManagerServesDataChannelOverLoopback(t *testing.T) {
-	h := newHarness(t, 0, nil)
+	h := newHarness(t, 0)
 	if h.manager.LocalPort() <= 0 {
 		t.Fatal("manager did not resolve an ice port")
 	}
@@ -383,7 +382,7 @@ func TestManagerServesDataChannelOverLoopback(t *testing.T) {
 }
 
 func TestManagerRefusesUnexpectedDataChannelLabel(t *testing.T) {
-	h := newHarness(t, 0, nil)
+	h := newHarness(t, 0)
 
 	key := SessionKey{ClientID: "client-1", RequestID: "req-bad-label"}
 	h.negotiate(t, key, "not-herdr")
@@ -397,7 +396,7 @@ func TestManagerRefusesUnexpectedDataChannelLabel(t *testing.T) {
 }
 
 func TestManagerEnforcesMaxSessions(t *testing.T) {
-	h := newHarness(t, 1, nil)
+	h := newHarness(t, 1)
 
 	first := SessionKey{ClientID: "client-1", RequestID: "req-1"}
 	h.negotiate(t, first, dataChannelLabel)
@@ -424,7 +423,7 @@ func TestManagerEnforcesMaxSessions(t *testing.T) {
 }
 
 func TestManagerRenegotiatesKnownSession(t *testing.T) {
-	h := newHarness(t, 1, nil)
+	h := newHarness(t, 1)
 
 	key := SessionKey{ClientID: "client-1", RequestID: "req-1"}
 	peer := h.negotiate(t, key, dataChannelLabel)
@@ -458,7 +457,7 @@ func TestManagerRenegotiatesKnownSession(t *testing.T) {
 }
 
 func TestManagerCloseSessionAndUnknownSignaling(t *testing.T) {
-	h := newHarness(t, 0, nil)
+	h := newHarness(t, 0)
 
 	unknown := SessionKey{ClientID: "client-x", RequestID: "req-x"}
 	if err := h.manager.AddRemoteCandidate(unknown, Candidate{Candidate: "candidate:0 1 udp 1 127.0.0.1 1 typ host"}); !errors.Is(err, errNoSession) {
@@ -478,8 +477,8 @@ func TestManagerCloseSessionAndUnknownSignaling(t *testing.T) {
 }
 
 func TestManagerAdvertisesMappedAddress(t *testing.T) {
-	h := newHarness(t, 0, nil)
-	h.manager.SetNAT1To1IPs([]string{"203.0.113.7"})
+	h := newHarness(t, 0)
+	h.manager.SetNAT1To1IP("203.0.113.7")
 
 	key := SessionKey{ClientID: "client-1", RequestID: "req-1"}
 	h.negotiate(t, key, dataChannelLabel)
@@ -501,7 +500,7 @@ func TestManagerAdvertisesMappedAddress(t *testing.T) {
 }
 
 func TestManagerClosesSessionOnFramingViolation(t *testing.T) {
-	h := newHarness(t, 0, nil)
+	h := newHarness(t, 0)
 
 	key := SessionKey{ClientID: "client-1", RequestID: "req-1"}
 	peer := h.negotiate(t, key, dataChannelLabel)
@@ -524,7 +523,7 @@ func TestManagerClosesSessionOnFramingViolation(t *testing.T) {
 }
 
 func TestManagerSweepsStalledAssembly(t *testing.T) {
-	h := newHarness(t, 0, nil)
+	h := newHarness(t, 0)
 
 	key := SessionKey{ClientID: "client-1", RequestID: "req-1"}
 	peer := h.negotiate(t, key, dataChannelLabel)
@@ -558,18 +557,110 @@ func TestManagerSweepsStalledAssembly(t *testing.T) {
 	}
 }
 
+// openServedConn negotiates one session and returns the hub-side connection
+// together with the browser peer once its DataChannel is open.
+func openServedConn(t *testing.T, h *harness) (transport.FrameConn, *browserPeer) {
+	t.Helper()
+	key := SessionKey{ClientID: "client-1", RequestID: "req-1"}
+	peer := h.negotiate(t, key, dataChannelLabel)
+	conn := h.awaitServe(t)
+	select {
+	case <-peer.opened:
+	case <-time.After(testTimeout):
+		t.Fatal("browser data channel never opened")
+	}
+	return conn, peer
+}
+
 func TestDataChannelConnRejectsOversizedFrame(t *testing.T) {
-	conn := newDataChannelConn(nil, func(string) {})
+	h := newHarness(t, 0)
+	conn, _ := openServedConn(t, h)
+
 	err := conn.WriteFrame(context.Background(), make([]byte, framing.MaxLogicalBytes+1))
 	if !errors.Is(err, framing.ErrFrameTooLarge) {
 		t.Fatalf("write oversized frame = %v, want %v", err, framing.ErrFrameTooLarge)
 	}
 }
 
+func TestDataChannelConnConcurrentWritersKeepFramesIntact(t *testing.T) {
+	h := newHarness(t, 0)
+	conn, peer := openServedConn(t, h)
+
+	const writers = 2
+	const framesPerWriter = 2
+	frameFor := func(writer, seq int) []byte {
+		return bytes.Repeat([]byte{byte(writer), byte(seq)}, 150_000)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	var wg sync.WaitGroup
+	for writer := range writers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for seq := range framesPerWriter {
+				if err := conn.WriteFrame(ctx, frameFor(writer, seq)); err != nil {
+					t.Errorf("writer %d frame %d: %v", writer, seq, err)
+					return
+				}
+			}
+		}()
+	}
+
+	next := make([]int, writers)
+	for range writers * framesPerWriter {
+		frame := peer.awaitFrame(t)
+		if len(frame) == 0 {
+			t.Fatal("browser received an empty frame")
+		}
+		writer, seq := int(frame[0]), int(frame[1])
+		if writer >= writers || seq != next[writer] || !bytes.Equal(frame, frameFor(writer, seq)) {
+			t.Fatalf("browser received a corrupt or out of order frame from writer %d at position %d", writer, seq)
+		}
+		next[writer]++
+	}
+	wg.Wait()
+}
+
+func TestDataChannelConnDeliversFrameAbovePauseThreshold(t *testing.T) {
+	h := newHarness(t, 0)
+	conn, peer := openServedConn(t, h)
+
+	frame := make([]byte, pauseBufferedAmount+1<<20)
+	for i := range frame {
+		frame[i] = byte(i * 7)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	if err := conn.WriteFrame(ctx, frame); err != nil {
+		t.Fatalf("write frame above the pause threshold: %v", err)
+	}
+	if got := peer.awaitFrame(t); !bytes.Equal(got, frame) {
+		t.Fatalf("browser received %d bytes, want %d matching bytes", len(got), len(frame))
+	}
+}
+
+func TestManagerClosesSessionOnInboundQueueOverflow(t *testing.T) {
+	h := newHarness(t, 0)
+	conn, peer := openServedConn(t, h)
+
+	// The test never reads from conn, so complete frames pile up unread.
+	for range 64 {
+		if err := peer.dc.Send(framing.Chunk(nil, []byte("unread"), framing.WebRTCChunkSize)[0]); err != nil {
+			break
+		}
+	}
+
+	h.awaitSessionCount(t, 0)
+	if err := conn.WriteFrame(context.Background(), []byte("late")); !errors.Is(err, transport.ErrFrameConnClosed) {
+		t.Fatalf("write after overflow = %v, want ErrFrameConnClosed", err)
+	}
+}
+
 func TestManagerCloseReleasesGoroutines(t *testing.T) {
 	baseline := runtime.NumGoroutine()
 
-	h := newHarness(t, 0, nil)
+	h := newHarness(t, 0)
 	key := SessionKey{ClientID: "client-1", RequestID: "req-1"}
 	h.negotiate(t, key, dataChannelLabel)
 	h.awaitServe(t)
@@ -640,31 +731,24 @@ func startSTUNResponder(t *testing.T, portDelta int) string {
 // stunBindingSuccess encodes a binding success carrying only an IPv4
 // XOR-MAPPED-ADDRESS, which is all address discovery reads.
 func stunBindingSuccess(request []byte, ip net.IP, port int) ([]byte, bool) {
-	const bindingRequest, bindingSuccess, attrXORMappedAddress = 0x0001, 0x0101, 0x0020
 	v4 := ip.To4()
-	if len(request) < 20 || binary.BigEndian.Uint16(request[:2]) != bindingRequest || v4 == nil {
+	message := stun.Message{Raw: request}
+	if err := message.Decode(); err != nil || message.Type != stun.BindingRequest || v4 == nil {
 		return nil, false
 	}
-
-	reply := make([]byte, 0, 32)
-	reply = binary.BigEndian.AppendUint16(reply, bindingSuccess)
-	// One 4-byte attribute header plus its 8-byte IPv4 value.
-	reply = binary.BigEndian.AppendUint16(reply, 12)
-	reply = binary.BigEndian.AppendUint32(reply, stunMagicCookie)
-	reply = append(reply, request[8:20]...) // echo the transaction id
-	reply = binary.BigEndian.AppendUint16(reply, attrXORMappedAddress)
-	reply = binary.BigEndian.AppendUint16(reply, 8)
-	reply = append(reply, 0x00, 0x01) // reserved, address family IPv4
-	reply = binary.BigEndian.AppendUint16(reply, uint16(port)^(stunMagicCookie>>16))
-	return binary.BigEndian.AppendUint32(reply, binary.BigEndian.Uint32(v4)^stunMagicCookie), true
+	reply, err := stun.Build(&message, stun.BindingSuccess, &stun.XORMappedAddress{IP: v4, Port: port})
+	if err != nil {
+		return nil, false
+	}
+	return reply.Raw, true
 }
 
 // TestDiscoverMappedAddressRequiresSTUNServer keeps a relay whose gateway
 // advertises no STUN port from silently reporting a mapping it never learned.
 func TestDiscoverMappedAddressRequiresSTUNServer(t *testing.T) {
-	h := newHarness(t, 1, nil)
+	h := newHarness(t, 1)
 
-	if _, err := h.manager.DiscoverMappedAddresses(context.Background()); !errors.Is(err, errNoSTUNServer) {
+	if _, err := h.manager.DiscoverMappedAddress(context.Background()); !errors.Is(err, errNoSTUNServer) {
 		t.Fatalf("discovery without a server = %v, want errNoSTUNServer", err)
 	}
 }
@@ -674,15 +758,15 @@ func TestDiscoverMappedAddressRequiresSTUNServer(t *testing.T) {
 // gathers on, so the reflected port is the shared ICE port.
 func TestDiscoverMappedAddressReflectsSharedSocket(t *testing.T) {
 	server := startSTUNResponder(t, 0)
-	h := newHarness(t, 1, nil)
-	h.manager.SetSTUNServers([]string{"stun:" + server})
+	h := newHarness(t, 1)
+	h.manager.SetSTUNServer("stun:" + server)
 
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
-	var discovered []netip.AddrPort
+	var mapped netip.AddrPort
 	var err error
 	for attempt := range 3 {
-		discovered, err = h.manager.DiscoverMappedAddresses(ctx)
+		mapped, err = h.manager.DiscoverMappedAddress(ctx)
 		if err == nil {
 			break
 		}
@@ -694,10 +778,6 @@ func TestDiscoverMappedAddressReflectsSharedSocket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("discover mapped address after bounded connectivity attempts: %v", err)
 	}
-	if len(discovered) == 0 {
-		t.Fatal("discovery returned no mappings")
-	}
-	mapped := discovered[0]
 	if got := mapped.Addr().String(); got != "127.0.0.1" {
 		t.Fatalf("mapped ip = %s, want 127.0.0.1", got)
 	}
@@ -710,10 +790,11 @@ func TestDiscoverMappedAddressReflectsSharedSocket(t *testing.T) {
 // router: the port survives the NAT, so pion can gather the reflexive
 // candidate itself and no candidate has to be synthesised.
 func TestPublishMappedAddressPortPreservedFeedsNAT1To1(t *testing.T) {
-	h := newHarness(t, 1, []string{"198.51.100.7"})
+	h := newHarness(t, 1)
+	h.manager.SetNAT1To1IP("198.51.100.7")
 	mapped := netip.AddrPortFrom(netip.MustParseAddr("203.0.113.9"), uint16(h.manager.LocalPort()))
 
-	h.manager.PublishMappedAddresses([]netip.AddrPort{mapped})
+	h.manager.PublishMappedAddress(mapped)
 
 	h.manager.mu.Lock()
 	ips := h.manager.natIPsLocked()
@@ -734,16 +815,16 @@ func TestPublishMappedAddressPortPreservedFeedsNAT1To1(t *testing.T) {
 // session already reserved from the old API must receive the mapping by
 // trickle even when the NAT preserved the shared socket's port.
 func TestPublishMappedAddressPortPreservedUpdatesPendingSession(t *testing.T) {
-	h := newHarness(t, 1, nil)
+	h := newHarness(t, 1)
 	key := SessionKey{ClientID: "client-1", RequestID: "req-1"}
 	h.manager.mu.Lock()
 	h.manager.newSessionLocked(key)
 	h.manager.mu.Unlock()
 	mapped := netip.AddrPortFrom(netip.MustParseAddr("203.0.113.9"), uint16(h.manager.LocalPort()))
 
-	h.manager.PublishMappedAddresses([]netip.AddrPort{mapped})
+	h.manager.PublishMappedAddress(mapped)
 	// A keepalive reporting the same mapping must not duplicate the candidate.
-	h.manager.PublishMappedAddresses([]netip.AddrPort{mapped})
+	h.manager.PublishMappedAddress(mapped)
 
 	got := h.localCandidates()
 	if len(got) != 1 {
@@ -767,7 +848,7 @@ func TestPublishMappedAddressPortPreservedUpdatesPendingSession(t *testing.T) {
 // which rewrites the port: NAT1To1 cannot express that, so exactly one
 // reflexive candidate is synthesised and trickled per session.
 func TestPublishMappedAddressPortChangedTricklesSrflx(t *testing.T) {
-	h := newHarness(t, 1, nil)
+	h := newHarness(t, 1)
 	key := SessionKey{ClientID: "client-1", RequestID: "req-1"}
 	h.manager.mu.Lock()
 	h.manager.newSessionLocked(key)
@@ -778,9 +859,9 @@ func TestPublishMappedAddressPortChangedTricklesSrflx(t *testing.T) {
 		externalPort = h.manager.LocalPort() - 1
 	}
 	mapped := netip.AddrPortFrom(netip.MustParseAddr("203.0.113.9"), uint16(externalPort))
-	h.manager.PublishMappedAddresses([]netip.AddrPort{mapped})
+	h.manager.PublishMappedAddress(mapped)
 	// A repeated discovery of the same address must not duplicate it.
-	h.manager.PublishMappedAddresses([]netip.AddrPort{mapped})
+	h.manager.PublishMappedAddress(mapped)
 
 	got := h.localCandidates()
 	if len(got) != 1 {
@@ -818,6 +899,38 @@ func TestPublishMappedAddressPortChangedTricklesSrflx(t *testing.T) {
 	}
 }
 
+func TestPublishMappedAddressReachesOffersAndUpdates(t *testing.T) {
+	for name, publishFirst := range map[string]bool{"before_offer": true, "after_offer": false} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, 1)
+			externalPort := h.manager.LocalPort()%65535 + 1
+			mapped := netip.AddrPortFrom(netip.MustParseAddr("203.0.113.9"), uint16(externalPort))
+			if publishFirst {
+				h.manager.PublishMappedAddress(mapped)
+			}
+			key := SessionKey{ClientID: "client-1", RequestID: "req-1"}
+			h.negotiateWithCandidates(t, key, dataChannelLabel, false)
+			h.manager.PublishMappedAddress(mapped)
+			h.manager.PublishMappedAddress(mapped)
+
+			updated := netip.AddrPortFrom(netip.MustParseAddr("203.0.113.10"), mapped.Port())
+			h.manager.PublishMappedAddress(updated)
+			h.manager.PublishMappedAddress(updated)
+
+			var reflexive []string
+			for _, candidate := range h.localCandidates() {
+				if candidateType(candidate.Candidate) == "srflx" {
+					reflexive = append(reflexive, candidate.Candidate)
+				}
+			}
+			want := []string{h.manager.srflxCandidate(mapped), h.manager.srflxCandidate(updated)}
+			if !slices.Equal(reflexive, want) {
+				t.Fatalf("reflexive candidates = %v, want %v", reflexive, want)
+			}
+		})
+	}
+}
+
 // Candidate types are read from strings the remote peer supplies, so the parser
 // must be closed: an unknown or malformed type becomes "other" rather than a new
 // map key an attacker chooses.
@@ -839,9 +952,33 @@ func TestCandidateTypeIsClosedSet(t *testing.T) {
 	}
 }
 
+func TestSessionReportEmptyCandidateTypesAreObjects(t *testing.T) {
+	h := newHarness(t, 0)
+	h.manager.mu.Lock()
+	h.manager.newSessionLocked(SessionKey{ClientID: "client-1", RequestID: "req-1"})
+	h.manager.mu.Unlock()
+
+	reports := h.manager.SessionReports()
+	if len(reports) != 1 {
+		t.Fatalf("reports = %d, want 1", len(reports))
+	}
+	for name, counts := range map[string]map[string]int{
+		"local_types":  reports[0].LocalTypes,
+		"remote_types": reports[0].RemoteTypes,
+	} {
+		encoded, err := json.Marshal(counts)
+		if err != nil {
+			t.Fatalf("marshal %s: %v", name, err)
+		}
+		if string(encoded) != "{}" {
+			t.Errorf("%s = %s, want {}", name, encoded)
+		}
+	}
+}
+
 // A report must never carry an address: /healthz is unauthenticated.
 func TestSessionReportCarriesTypesOnly(t *testing.T) {
-	h := newHarness(t, 0, nil)
+	h := newHarness(t, 0)
 	key := SessionKey{ClientID: "client-1", RequestID: "req-1"}
 	h.negotiate(t, key, dataChannelLabel)
 
@@ -888,7 +1025,7 @@ func awaitSelectedPair(t *testing.T, s *session) SessionReport {
 // direct session, and a session that closes without one is the cohort that
 // would justify symmetric-NAT port prediction.
 func TestOutcomeCountersClassifyEachSessionOnce(t *testing.T) {
-	h := newHarness(t, 0, nil)
+	h := newHarness(t, 0)
 	if got := h.manager.Outcomes(); got.Direct != 0 || got.Relayed != 0 {
 		t.Fatalf("fresh manager outcomes = %+v, want zeroes", got)
 	}

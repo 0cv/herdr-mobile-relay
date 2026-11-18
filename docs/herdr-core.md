@@ -14,10 +14,10 @@ commands below.
   be single-line and contain no control characters.
 - Secret input to a verified no-echo prompt, without input-side persistence.
   Programs that echo or log a secret can still expose it in terminal output.
-- Start agents with **+**, and stop, clear or restart agents. Clear and Restart
-  run the agent's recorded launch profile, or else the profile matching its
+- Start agents with **+**, and stop or clear agents. Clear runs the agent's
+  recorded launch profile, or else the profile matching its
   name, so options from the original command line are not kept.
-  Clear and Restart start a replacement in the same tab, then kill the old terminal
+  Clear starts a replacement in the same tab, then kills the old terminal
   after waiting up to five seconds for herdr.app to adopt the replacement. If adoption
   is not confirmed in time, the old terminal is still killed and the tab may come back unnamed.
   New tabs receive the requested name if herdr.app adopts them within a minute;
@@ -102,8 +102,8 @@ never falls back to the `HERDR_*` values, so Pi registers only with the core rel
 
 The relay does not read the core's `socket` setting in `config.toml`.
 
-`HERDR_SOCKET_PATH` is ignored on core. Explicit port and
-`HERDR_RELAY_SERVICE_NAME` values win. If `HERDR_RELAY_ENV` is set, its containing
+`HERDR_SOCKET_PATH` is ignored on core. Explicit port values win.
+If `HERDR_RELAY_ENV` is set, its containing
 directory becomes the runtime directory, regardless of `HERDR_PLUGIN_CONFIG_DIR`.
 
 Do **not** share these with the TUI instance:

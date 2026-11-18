@@ -5,12 +5,17 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
+
+	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
 )
 
 type piProvider struct{}
 
 func (p *piProvider) ID() string { return "pi" }
+
+func (p *piProvider) Builtins() []Command { return piBuiltins }
 
 // piBuiltins mirrors the primary interactive commands in Pi 0.87.0. Keep this
 // list version-aware if a future Pi release removes or renames a command.
@@ -56,45 +61,24 @@ var piBuiltins = []Command{
 // and nothing here filters on it.
 func (p *piProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	reader := newCatalogReader()
-	if ctx.SuppressNative {
-		builtins := make([]Command, len(piBuiltins))
-		copy(builtins, piBuiltins)
-		return builtins, reader.truncated
-	}
 	if ctx.CommandFormat != "" {
-		// The relay's INI configured this profile explicitly, which outranks
-		// discovery.
-		custom, truncated := reader.discoverGenericSkills(ctx.SkillDirs, ctx.CommandFormat)
-		return builtinsWithCustom(piBuiltins, custom), truncated || reader.truncated
+		return reader.configuredCatalog(piBuiltins, ctx)
 	}
 
 	settings := reader.loadPiSkillSettings(ctx)
 	if !settings.enableSkillCommands {
-		builtins := make([]Command, len(piBuiltins))
-		copy(builtins, piBuiltins)
-		return builtins, reader.truncated
+		return slices.Clone(piBuiltins), reader.truncated
 	}
 
 	truncated := false
 	budget := maxCustomFiles
-	active := make(map[string]Command, len(piBuiltins))
-	order := make([]string, 0, len(piBuiltins))
-	apply := func(commands []Command) {
-		for _, command := range commands {
-			if _, exists := active[command.Command]; exists {
-				continue
-			}
-			order = append(order, command.Command)
-			active[command.Command] = command
-		}
-	}
-	apply(piBuiltins)
+	list := newCommandList(piBuiltins, false)
 
 	seenFiles := make(map[string]bool)
 	seenDirs := make(map[string]bool)
 	scanScope := func(source string, roots []string, scope piSkillScope) {
 		commands, trunc := reader.scanPiSkillRoots(roots, scope.paths, scope.patterns, source, &budget, seenFiles, seenDirs)
-		apply(commands)
+		list.addIfAbsent(commands)
 		truncated = truncated || trunc
 	}
 
@@ -113,16 +97,10 @@ func (p *piProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 		filepath.Join(ctx.Home, ".agents", "skills"),
 	}, settings.global)
 
-	commands := make([]Command, 0, len(order))
-	for _, name := range order {
-		if command, exists := active[name]; exists {
-			commands = append(commands, command)
-		}
-	}
 	if budget <= 0 {
 		truncated = true
 	}
-	return commands, truncated || reader.truncated
+	return list.commands(), truncated || reader.truncated
 }
 
 type piConfiguredSkillPath struct {
@@ -223,7 +201,7 @@ func resolvePiSkillScope(entries []string, base, home string) piSkillScope {
 			prefix = entry[0]
 			entry = strings.TrimSpace(entry[1:])
 		}
-		expanded := expandTilde(entry, home)
+		expanded := agentroots.ExpandTilde(entry, home)
 		if expanded == "" || strings.HasPrefix(expanded, "~") {
 			continue
 		}
@@ -341,7 +319,7 @@ func (reader *catalogReader) scanPiSkillTree(path, source string, patterns []str
 			return nil, false
 		}
 		seenFiles[real] = true
-		command := reader.skillCommandFromFile(real, strings.TrimSuffix(filepath.Base(real), filepath.Ext(real)), source, ompCommandFormat, budget, skillScanOptions{requireDescription: true})
+		command := reader.skillCommandFromFile(real, strings.TrimSuffix(filepath.Base(real), filepath.Ext(real)), source, ompCommandFormat, budget, skillScanOptions{})
 		if command == nil {
 			return nil, false
 		}
@@ -358,7 +336,7 @@ func (reader *catalogReader) scanPiSkillTree(path, source string, patterns []str
 			return nil, false
 		}
 		seenFiles[skillFile] = true
-		command := reader.skillCommandFromFile(skillFile, filepath.Base(real), source, ompCommandFormat, budget, skillScanOptions{requireDescription: true})
+		command := reader.skillCommandFromFile(skillFile, filepath.Base(real), source, ompCommandFormat, budget, skillScanOptions{})
 		if command == nil {
 			return nil, false
 		}
@@ -405,7 +383,7 @@ func (reader *catalogReader) scanPiSkillTree(path, source string, patterns []str
 			continue
 		}
 		seenFiles[realFile] = true
-		if command := reader.skillCommandFromFile(realFile, strings.TrimSuffix(name, filepath.Ext(name)), source, ompCommandFormat, budget, skillScanOptions{requireDescription: true}); command != nil {
+		if command := reader.skillCommandFromFile(realFile, strings.TrimSuffix(name, filepath.Ext(name)), source, ompCommandFormat, budget, skillScanOptions{}); command != nil {
 			commands = append(commands, *command)
 		}
 	}
@@ -474,30 +452,6 @@ func piGlobMatch(pattern, path string) bool {
 	expression.WriteByte('$')
 	matched, err := regexp.MatchString(expression.String(), path)
 	return err == nil && matched
-}
-
-// builtinsWithCustom appends custom commands to builtins, keeping the builtin on
-// a name collision. Used for the INI-configured escape hatch, where the relay's
-// own configuration named the skill directories explicitly.
-func builtinsWithCustom(builtins, custom []Command) []Command {
-	if len(custom) == 0 {
-		return builtins
-	}
-
-	commands := make([]Command, 0, len(builtins)+len(custom))
-	commands = append(commands, builtins...)
-	seen := make(map[string]bool, len(builtins)+len(custom))
-	for _, command := range builtins {
-		seen[command.Command] = true
-	}
-	for _, command := range custom {
-		if seen[command.Command] {
-			continue
-		}
-		seen[command.Command] = true
-		commands = append(commands, command)
-	}
-	return commands
 }
 
 func init() {

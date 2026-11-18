@@ -1,7 +1,6 @@
 package conversation
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -18,6 +17,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/0cv/herdr-mobile-relay/internal/agentkind"
 	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
 	panehistory "github.com/0cv/herdr-mobile-relay/internal/history"
 )
@@ -66,31 +66,7 @@ type Entry struct {
 	Truncated bool           `json:"truncated,omitempty"`
 }
 
-type Page struct {
-	Available              bool          `json:"available"`
-	ReasonCode             string        `json:"reason_code,omitempty"`
-	Reason                 string        `json:"reason,omitempty"`
-	Entries                []Entry       `json:"entries"`
-	HasMore                bool          `json:"has_more"`
-	Total                  int           `json:"total"`
-	FileTruncated          bool          `json:"file_truncated,omitempty"`
-	SourceCorrupt          bool          `json:"source_corrupt,omitempty"`
-	ContinuationIncomplete bool          `json:"continuation_incomplete,omitempty"`
-	ContinuationReason     string        `json:"continuation_reason,omitempty"`
-	OMOPlan                *OMOTodoState `json:"omo_plan,omitempty"`
-}
-
-func (page Page) MarshalJSON() ([]byte, error) {
-	type wirePage Page
-	var total *int
-	if page.Total != UnknownTotal {
-		total = &page.Total
-	}
-	return json.Marshal(struct {
-		wirePage
-		Total *int `json:"total"`
-	}{wirePage(page), total})
-}
+var ErrUnavailable = errors.New("conversation source is unavailable")
 
 type locationKey struct {
 	Agent         string
@@ -153,155 +129,88 @@ func (r *Reader) cursorRoots() []string { return agentroots.Cursor(r.home) }
 func (r *Reader) grokRoots() []string { return agentroots.Grok(r.home) }
 
 func Supported(agent string) bool {
-	return RecordedSupported(agent)
+	return agentkind.Of(agent) != ""
 }
 
-func RecordedSupported(agent string) bool {
-	switch normalizedAgent(agent) {
-	case "claude", "claudecode", "qoder", "qodercli", "codex", "openaicodex",
-		"pi", "picodingagent", "omp", "ohmypi", "cursor", "cursoragent",
-		"opencode", "hermes", "hermesagent", "omo", "ohmyopencode", "kimi", "kimicode",
-		"agy", "antigravity", "antigravitycli", "grok":
-		return true
-	default:
-		return false
-	}
-}
-
-func normalizedAgent(agent string) string {
-	value := strings.ToLower(strings.TrimSpace(agent))
-	value = strings.NewReplacer("-", "", "_", "", " ", "").Replace(value)
-	if value == "grokbuild" {
-		return "grok"
-	}
-	return value
-}
-
-// Read resolves a conversation without project context. It is used for
-// historical activity where the pane cwd is no longer available.
-func (r *Reader) Read(agent, sessionID, before string, limit int) (Page, error) {
-	return r.ReadWithProject(agent, ProjectContext{}, sessionID, before, limit)
-}
-
-// ReadFor resolves a pane conversation using the same cwd-aware locator as the
-// session-title resolver.
-func (r *Reader) ReadFor(agent, cwd, sessionID, before string, limit int) (Page, error) {
-	return r.ReadWithProject(agent, ProjectContext{CWD: cwd}, sessionID, before, limit)
-}
-
-// read preserves the old package-local helper shape for tests and legacy
-// callers; public callers should use Read or ReadFor.
-func (r *Reader) read(agent, cwd, sessionID, before string, limit int) (Page, error) {
-	return r.ReadWithProject(agent, ProjectContext{CWD: cwd}, sessionID, before, limit)
-}
-
-// ReadWithProject resolves a conversation with the pane and, for Claude Code,
+// ReadLatest resolves a conversation with the pane and, for Claude Code,
 // foreground directory hints. Once the anchor is located, Claude continuation
 // descendants stay in that anchor's project and root.
-func (r *Reader) ReadWithProject(agent string, project ProjectContext, sessionID, before string, limit int) (Page, error) {
+func (r *Reader) ReadLatest(agent string, project ProjectContext, sessionID string, limit int) ([]Entry, error) {
 	project = NormalizeProjectContext(agent, project)
-	if IsKimi(agent) {
+	kind := agentkind.Of(agent)
+	if kind == agentkind.Kimi {
 		projection, _, code := r.readKimi(context.Background(), project, sessionID)
 		if code != "" {
-			return unavailableCode(code, kimiReason(code)), nil
+			return nil, ErrUnavailable
 		}
-		return kimiPage(projection, before, limit), nil
+		return latest(projection.entries, limit), nil
 	}
-	if isHermesAgent(agent) {
-		return r.readHermesFor(agent, project.CWD, sessionID, before, limit)
+	if kind == agentkind.Hermes {
+		return r.readHermesFor(agent, project.CWD, sessionID, limit)
 	}
-	if isAgyAgent(agent) {
-		return r.readAgyFor(sessionID, before, limit)
+	if kind == agentkind.Agy {
+		return r.readAgyFor(sessionID, limit)
 	}
-	if normalizedAgent(agent) == "opencode" {
-		return r.readOpenCode(sessionID, before, limit)
+	if kind == agentkind.OpenCode {
+		return r.readOpenCode(sessionID, limit)
 	}
-	if normalizedAgent(agent) == "omo" || normalizedAgent(agent) == "ohmyopencode" {
-		return r.readOMO(project.CWD, sessionID, before, limit)
+	if kind == agentkind.OMO {
+		return r.readOMO(project.CWD, sessionID, limit)
 	}
-	if normalizedAgent(agent) == "grok" {
-		return r.readGrokFor(project, sessionID, before, limit)
+	if kind == agentkind.Grok {
+		return r.readGrokFor(project, sessionID, limit)
 	}
 	if !Supported(agent) {
-		return unavailableCode("invalid_provider", "Conversation history is not available for this agent."), nil
+		return nil, ErrUnavailable
 	}
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
-		return unavailableCode("invalid_session", "This agent has not reported a conversation session yet."), nil
+		return nil, ErrUnavailable
 	}
 	location := r.LocateWithProject(agent, project, sessionID)
 	if location.Path == "" {
-		return unavailableCode("invalid_session", "No conversation log is available for this session."), nil
+		return nil, ErrUnavailable
 	}
-	if isClaudeProvider(agent) {
-		return r.readClaudeChain(project.CWD, sessionID, location, before, limit)
+	if agentkind.Of(agent) == agentkind.Claude {
+		return r.readClaudeChain(sessionID, location, limit)
 	}
-	text, clipped, err := loadTail(location.Path, maxConversationBytes)
+	source, err := captureFileSource(location)
 	if err != nil {
-		return Page{}, fmt.Errorf("read conversation log: %w", err)
+		return nil, fmt.Errorf("read conversation log: %w", err)
 	}
-	entries := parseTranscript(agent, text)
+	defer source.close()
+	entries, err := readJSONLTail(source.file, agent, source.revision, source.end)
+	if err != nil {
+		return nil, fmt.Errorf("read conversation log: %w", err)
+	}
+	return latest(entries, limit), nil
+}
+
+func clampPageLimit(limit int) int {
 	if limit < 1 {
-		limit = defaultPageSize
+		return defaultPageSize
 	}
-	if limit > maxPageSize {
-		limit = maxPageSize
-	}
-	end := len(entries)
-	if before != "" {
-		for index := range entries {
-			if entries[index].ID == before {
-				end = index
-				break
-			}
-		}
-	}
-	start := end - limit
-	if start < 0 {
-		start = 0
-	}
-	pageEntries := append([]Entry(nil), entries[start:end]...)
-	return Page{
-		Available:     true,
-		Entries:       pageEntries,
-		HasMore:       start > 0,
-		Total:         len(entries),
-		FileTruncated: clipped,
-	}, nil
-}
-func unavailable(reason string) Page {
-	return unavailableCode("source_unavailable", reason)
+	return min(limit, maxPageSize)
 }
 
-func unavailableCode(code, reason string) Page {
-	return Page{Available: false, ReasonCode: code, Reason: reason, Entries: []Entry{}}
-}
-
-// Locate returns the exact contained transcript selected for agent, cwd and
-// sessionID. Root order is authoritative; within Claude roots the foreground
-// directory is tried before the pane cwd. Cached tuple locations are returned
-// before any filesystem walk, keeping title and history on the same copy.
-func (r *Reader) Locate(agent, cwd, sessionID string) Location {
-	return r.LocateWithProject(agent, ProjectContext{CWD: cwd}, sessionID)
+func latest(entries []Entry, limit int) []Entry {
+	start := max(0, len(entries)-clampPageLimit(limit))
+	return append([]Entry(nil), entries[start:]...)
 }
 
 // LocateWithProject returns the exact contained transcript selected for the
-// supplied project context. The effective foreground hint is part of the
-// cache and single-flight keys, so changing it cannot reuse an old hit or
-// miss.
+// supplied project context. Root order is authoritative; within Claude roots
+// the foreground directory is tried before the pane cwd. The effective
+// foreground hint is part of the cache and single-flight keys, so changing it
+// cannot reuse an old hit or miss. Cached tuple locations are returned before
+// any filesystem walk, keeping title and history on the same copy.
 func (r *Reader) LocateWithProject(agent string, project ProjectContext, sessionID string) Location {
 	project = NormalizeProjectContext(agent, project)
 	sessionID = strings.TrimSpace(sessionID)
-	agentKey := normalizedAgent(agent)
-	if IsKimi(agent) {
+	agentKey := agentkind.Of(agent)
+	if agentKey == agentkind.Kimi {
 		_, location, _ := r.SelectKimiSession(project, sessionID)
 		return location
-	}
-	if isHermesAgent(agent) {
-		agentKey = "hermes"
-	}
-	if isAgyAgent(agent) {
-		agentKey = "agy"
 	}
 	key := locationKey{Agent: agentKey, CWD: project.CWD, ForegroundCWD: project.ForegroundCWD, SessionID: sessionID}
 	for {
@@ -346,44 +255,35 @@ func (r *Reader) LocateWithProject(agent string, project ProjectContext, session
 	return location
 }
 
-// locate preserves the old package-local helper shape for tests and legacy
-// callers; public callers should use Locate or LocateWithProject.
-func (r *Reader) locate(agent, cwd, sessionID string) Location {
-	return r.locateWithProject(agent, ProjectContext{CWD: cwd}, sessionID)
-}
-
 func (r *Reader) locateWithProject(agent string, project ProjectContext, sessionID string) Location {
 	project = NormalizeProjectContext(agent, project)
-	switch normalizedAgent(agent) {
-	case "claude", "claudecode":
+	switch agentkind.Of(agent) {
+	case agentkind.Claude:
 		if !safeSessionID(sessionID) {
 			return Location{}
 		}
 		return findProjectSessionWithProject(r.claudeRoots(), project, sessionID+".jsonl", claudeProjectName)
-	case "qoder", "qodercli":
+	case agentkind.Qoder:
 		if !safeSessionID(sessionID) {
 			return Location{}
 		}
 		return findProjectSessionWithProject(r.qoderRoots(), project, sessionID+".jsonl", claudeProjectName)
-	case "codex", "openaicodex":
+	case agentkind.Codex:
 		if !canonicalSessionID.MatchString(sessionID) {
 			return Location{}
 		}
 		return findCodexSession(r.codexRoots(), sessionID)
-	case "pi", "picodingagent":
+	case agentkind.Pi:
 		return resolvePathOrSession(r.piRoots(), sessionID, "_")
-	case "omp", "ohmypi":
+	case agentkind.OMP:
 		return resolvePathOrSession(r.ompRoots(), sessionID, "_")
-	case "hermes", "hermesagent":
+	case agentkind.Hermes:
 		return r.hermes.locate(project.CWD, sessionID)
-	case "agy", "antigravity", "antigravitycli":
+	case agentkind.Agy:
 		return r.agy.locate(sessionID)
-	case "kimi", "kimicode":
-		_, location, _ := r.SelectKimiSession(project, sessionID)
-		return location
-	case "cursor", "cursoragent":
+	case agentkind.Cursor:
 		return findCursorSession(r.cursorRoots(), project, sessionID)
-	case "grok":
+	case agentkind.Grok:
 		if !safeSessionID(sessionID) {
 			return Location{}
 		}
@@ -420,12 +320,6 @@ func safeSessionID(value string) bool {
 func isDir(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.IsDir()
-}
-
-func findProjectSession(roots []string, cwd, filename, preferredProjectName string) Location {
-	return findProjectSessionWithProject(roots, ProjectContext{CWD: cwd}, filename, func(string) string {
-		return preferredProjectName
-	})
 }
 
 // findProjectSessionWithProject keeps roots as the outer loop. Within one root
@@ -607,6 +501,22 @@ func resolvePathOrSession(roots []string, sessionID, separator string) Location 
 	return Location{}
 }
 
+func containedDatabases(roots, candidates []string) ([]string, string) {
+	databases := make([]string, 0, len(roots))
+	for index, candidate := range candidates {
+		if index >= len(roots) {
+			break
+		}
+		if path := containedRegularFile(candidate, roots[index]); path != "" {
+			databases = append(databases, path)
+		}
+	}
+	if len(databases) == 0 {
+		return nil, "source_unavailable"
+	}
+	return databases, ""
+}
+
 func containedRegularFile(path, root string) string {
 	realRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
@@ -627,46 +537,31 @@ func containedRegularFile(path, root string) string {
 	return realPath
 }
 
-func loadTail(path string, limit int64) (string, bool, error) {
-	file, err := openConversationSource(path)
+func readJSONLEntries(file *os.File, agent, revision string, start, end int64) ([]Entry, error) {
+	records, err := NewJSONLRecordReader(context.Background(), file, start, end, maxConversationBytes, nil)
 	if err != nil {
-		return "", false, err
+		return nil, err
 	}
-	defer file.Close()
-	return loadTailFile(file, limit)
+	projector := newMemoryProjector(agent, revision)
+	for {
+		record, err := records.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		projector.apply(record)
+	}
+	entries := make([]Entry, len(projector.entries))
+	for index, projected := range projector.entries {
+		entries[index] = projected.Entry
+	}
+	return entries, nil
 }
 
-func loadTailFile(file *os.File, limit int64) (string, bool, error) {
-	if file == nil {
-		return "", false, errors.New("conversation source is closed")
-	}
-	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() {
-		if err == nil {
-			err = errors.New("conversation source is not a regular file")
-		}
-		return "", false, err
-	}
-	clipped := info.Size() > limit
-	start := int64(0)
-	if clipped {
-		start = info.Size() - limit
-	}
-	if _, err := file.Seek(start, 0); err != nil {
-		return "", false, err
-	}
-	data, err := io.ReadAll(io.LimitReader(file, limit))
-	if err != nil {
-		return "", false, err
-	}
-	if clipped {
-		if newline := bytes.IndexByte(data, '\n'); newline >= 0 {
-			data = data[newline+1:]
-		} else {
-			data = nil
-		}
-	}
-	return string(data), clipped, nil
+func readJSONLTail(file *os.File, agent, revision string, size int64) ([]Entry, error) {
+	return readJSONLEntries(file, agent, revision, max(0, size-maxConversationBytes), size)
 }
 
 type toolResult struct {
@@ -680,57 +575,16 @@ type toolLocation struct {
 	tool  int
 }
 
-func parseTranscript(agent, text string) []Entry {
-	normalized := normalizedAgent(agent)
-	entries := make([]Entry, 0)
-	seenIDs := make(map[string]int)
-	pendingTools := make(map[string]toolLocation)
-	for _, line := range strings.Split(text, "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		var record map[string]any
-		if json.Unmarshal([]byte(line), &record) != nil {
-			continue
-		}
-		calls, results := parseToolActivity(normalized, record)
-		for _, result := range results {
-			location, ok := pendingTools[toolAssociationKey(normalized, result.id)]
-			if !ok || location.entry >= len(entries) || location.tool >= len(entries[location.entry].Tools) {
-				continue
-			}
-			tool := &entries[location.entry].Tools[location.tool]
-			applyProjectedToolResult(tool, result)
-			delete(pendingTools, toolAssociationKey(normalized, result.id))
-		}
-
-		entry := prepareJSONLEntry(agent, record, calls)
-		if entry == nil {
-			continue
-		}
-		normalizeEntryTools(entry)
-		entry.ID = stableRowID(line, seenIDs)
-		entryIndex := len(entries)
-		entries = append(entries, *entry)
-		for toolIndex := range calls {
-			if id := toolAssociationID(calls[toolIndex]); id != "" {
-				pendingTools[toolAssociationKey(normalized, id)] = toolLocation{entry: entryIndex, tool: toolIndex}
-			}
-		}
-	}
-	return entries
-}
-
 func parseToolActivity(agent string, record map[string]any) ([]ToolActivity, []toolResult) {
 	switch agent {
-	case "claude", "claudecode", "qoder", "qodercli":
+	case agentkind.Claude, agentkind.Qoder:
 		if record["isSidechain"] == true {
 			return nil, nil
 		}
 		message, _ := record["message"].(map[string]any)
 		blocks, _ := message["content"].([]any)
 		return toolsFromBlocks(blocks)
-	case "codex", "openaicodex":
+	case agentkind.Codex:
 		if stringValue(record["type"]) != "response_item" {
 			return nil, nil
 		}
@@ -750,7 +604,7 @@ func parseToolActivity(agent string, record map[string]any) ([]ToolActivity, []t
 				failed: payload["is_error"] == true,
 			}}
 		}
-	case "pi", "picodingagent", "omp", "ohmypi", "omo", "ohmyopencode":
+	case agentkind.Pi, agentkind.OMP, agentkind.OMO:
 		if stringValue(record["type"]) != "message" {
 			return nil, nil
 		}
@@ -764,7 +618,7 @@ func parseToolActivity(agent string, record map[string]any) ([]ToolActivity, []t
 		}
 		blocks, _ := message["content"].([]any)
 		return toolsFromBlocks(blocks)
-	case "cursor", "cursoragent":
+	case agentkind.Cursor:
 		message, _ := record["message"].(map[string]any)
 		blocks, _ := message["content"].([]any)
 		return toolsFromBlocks(blocks)
@@ -1104,17 +958,6 @@ func clampText(text string, limit int) (string, bool) {
 		clipped = clipped[:len(clipped)-1]
 	}
 	return strings.TrimSpace(clipped), true
-}
-
-func stableRowID(line string, seen map[string]int) string {
-	digest := sha256.Sum256([]byte(line))
-	base := hex.EncodeToString(digest[:12])
-	occurrence := seen[base]
-	seen[base] = occurrence + 1
-	if occurrence == 0 {
-		return base
-	}
-	return fmt.Sprintf("%s-%d", base, occurrence)
 }
 
 func stringValue(value any) string {

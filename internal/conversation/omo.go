@@ -8,13 +8,12 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/agentkind"
 	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
 )
 
 const (
-	maxOMOTodoBytes     = 512 * 1024
 	maxOMOIdentityBytes = 1024 * 1024
 	maxOMOPhases        = 128
 	maxOMOTasks         = 1000
@@ -57,77 +56,30 @@ type omoCacheEntry struct {
 	modTime  int64
 	identity string
 	entries  []Entry
-	plan     OMOTodoState
-	clipped  bool
 }
 
 func (r *Reader) omoRoots() []string { return agentroots.OMO(r.home) }
 
-func (r *Reader) readOMO(cwd, sessionID, before string, limit int) (Page, error) {
+func (r *Reader) readOMO(cwd, sessionID string, limit int) ([]Entry, error) {
 	location, identity, code := r.locateOMO(cwd, strings.TrimSpace(sessionID))
 	if code != "" {
-		return unavailableCode(code, "OMO conversation history is unavailable."), nil
+		return nil, ErrUnavailable
 	}
-	entries, plan, clipped, code := r.loadOMO(location, identity, cwd)
+	entries, code := r.loadOMO(location, identity, cwd)
 	if code != "" {
-		reason := "OMO conversation history is unavailable."
-		if code == "invalid_session" {
-			reason = "OMO session identity does not match the requested session."
-		}
-		return unavailableCode(code, reason), nil
+		return nil, ErrUnavailable
 	}
-	if limit < 1 {
-		limit = defaultPageSize
-	}
-	if limit > maxPageSize {
-		limit = maxPageSize
-	}
-	end := len(entries)
-	if before != "" {
-		found := false
-		for index := range entries {
-			if entries[index].ID == before {
-				end = index
-				found = true
-				break
-			}
-		}
-		if !found {
-			return unavailableCode("invalid_cursor", "The conversation cursor is invalid."), nil
-		}
-	}
-	start := end - limit
-	if start < 0 {
-		start = 0
-	}
-	return Page{
-		Available: true, Entries: append([]Entry(nil), entries[start:end]...),
-		HasMore: start > 0, Total: len(entries), FileTruncated: clipped, SourceCorrupt: plan.ReasonCode == "source_corrupt", OMOPlan: &plan,
-	}, nil
+	return latest(entries, limit), nil
 }
 
-// ReadOMOTodoState returns the latest valid native senpi.todo-state row for one
-// exact OMO session. Invalid later rows cannot erase an earlier valid v2 state.
-func (r *Reader) ReadOMOTodoState(cwd, sessionID string) OMOTodoState {
-	location, identity, code := r.locateOMO(cwd, strings.TrimSpace(sessionID))
-	if code != "" {
-		return OMOTodoState{ReasonCode: code, Phases: []OMOTodoPhase{}}
-	}
-	_, plan, _, code := r.loadOMO(location, identity, cwd)
-	if code != "" {
-		return OMOTodoState{ReasonCode: code, Phases: []OMOTodoPhase{}}
-	}
-	return plan
-}
-
-func (r *Reader) loadOMO(location Location, identity omoIdentity, cwd string) ([]Entry, OMOTodoState, bool, string) {
+func (r *Reader) loadOMO(location Location, identity omoIdentity, cwd string) ([]Entry, string) {
 	source, err := captureFileSource(location)
 	if err != nil {
-		return nil, OMOTodoState{}, false, "source_unavailable"
+		return nil, "source_unavailable"
 	}
 	defer source.close()
 	if !verifyOMOIdentityFile(source.file, identity, cwd) {
-		return nil, OMOTodoState{}, false, "invalid_session"
+		return nil, "invalid_session"
 	}
 	key := source.path + "\x00" + identity.ID + "\x00" + cwd
 	sourceIdentity := fileIdentity(source.info)
@@ -135,29 +87,17 @@ func (r *Reader) loadOMO(location Location, identity omoIdentity, cwd string) ([
 	cached, ok := r.omoCache[key]
 	r.mu.Unlock()
 	if ok && cached.size == source.info.Size() && cached.modTime == source.info.ModTime().UnixNano() && cached.identity == sourceIdentity {
-		return append([]Entry(nil), cached.entries...), cached.plan, cached.clipped, ""
+		return append([]Entry(nil), cached.entries...), ""
 	}
-	text, clipped, err := loadTailFile(source.file, maxConversationBytes)
+	entries, err := readJSONLTail(source.file, agentkind.OMO, source.revision, source.info.Size())
 	if err != nil {
-		return nil, OMOTodoState{}, false, "source_unavailable"
-	}
-	entries := parseTranscript("pi", text)
-	plan := OMOTodoState{
-		Available: true, SessionID: identity.ID, Phases: []OMOTodoPhase{}, Truncated: clipped,
-	}
-	state, found, invalidOnly := latestValidOMOTodo(text, identity.ID)
-	if found {
-		state.Available = true
-		state.Truncated = state.Truncated || clipped
-		plan = state
-	} else if invalidOnly {
-		plan.ReasonCode = "source_corrupt"
+		return nil, "source_unavailable"
 	}
 	current, statErr := os.Stat(source.path)
 	if statErr == nil && os.SameFile(source.info, current) && current.Size() == source.info.Size() && current.ModTime() == source.info.ModTime() {
 		entry := omoCacheEntry{
 			size: source.info.Size(), modTime: source.info.ModTime().UnixNano(), identity: sourceIdentity,
-			entries: append([]Entry(nil), entries...), plan: plan, clipped: clipped,
+			entries: append([]Entry(nil), entries...),
 		}
 		r.mu.Lock()
 		if len(r.omoCache) >= maxOMOCacheEntries {
@@ -166,7 +106,7 @@ func (r *Reader) loadOMO(location Location, identity omoIdentity, cwd string) ([
 		r.omoCache[key] = entry
 		r.mu.Unlock()
 	}
-	return entries, plan, clipped, ""
+	return entries, ""
 }
 
 func (r *Reader) locateOMO(cwd, sessionID string) (Location, omoIdentity, string) {
@@ -277,15 +217,6 @@ func safeOMOIdentity(value string) bool {
 	return true
 }
 
-func verifyOMOIdentity(path string, expected omoIdentity, requestedCWD string) bool {
-	file, err := openConversationSource(path)
-	if err != nil {
-		return false
-	}
-	defer file.Close()
-	return verifyOMOIdentityFile(file, expected, requestedCWD)
-}
-
 func verifyOMOIdentityFile(file *os.File, expected omoIdentity, requestedCWD string) bool {
 	if file == nil {
 		return false
@@ -310,40 +241,6 @@ func verifyOMOIdentityFile(file *os.File, expected omoIdentity, requestedCWD str
 		return true
 	}
 	return false
-}
-
-func latestValidOMOTodo(text, sessionID string) (OMOTodoState, bool, bool) {
-	var latest OMOTodoState
-	found := false
-	sawTodo := false
-	for len(text) > 0 {
-		line := text
-		if newline := strings.IndexByte(text, '\n'); newline >= 0 {
-			line = text[:newline]
-			text = text[newline+1:]
-		} else {
-			text = ""
-		}
-		if len(line) > maxOMOTodoBytes {
-			continue
-		}
-		var record struct {
-			Type       string          `json:"type"`
-			CustomType string          `json:"customType"`
-			Timestamp  string          `json:"timestamp"`
-			Data       json.RawMessage `json:"data"`
-		}
-		if json.Unmarshal([]byte(line), &record) != nil || record.Type != "custom" || record.CustomType != "senpi.todo-state" {
-			continue
-		}
-		sawTodo = true
-		state, ok := decodeOMOTodo(record.Data, sessionID, record.Timestamp)
-		if ok {
-			latest = state
-			found = true
-		}
-	}
-	return latest, found, sawTodo && !found
 }
 
 func decodeOMOTodo(data json.RawMessage, sessionID, timestamp string) (OMOTodoState, bool) {
@@ -397,14 +294,4 @@ func validOMOTodoStatus(status string) bool {
 	default:
 		return false
 	}
-}
-
-func parseOMOTimestamp(name string) (time.Time, bool) {
-	parts := omoFilename.FindStringSubmatch(name)
-	if len(parts) != 2 {
-		return time.Time{}, false
-	}
-	value := strings.SplitN(strings.TrimSuffix(name, ".jsonl"), "_", 2)[0]
-	parsed, err := time.Parse("2006-01-02T15-04-05-000Z", value)
-	return parsed, err == nil
 }
