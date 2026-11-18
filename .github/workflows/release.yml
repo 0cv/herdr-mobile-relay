@@ -57,13 +57,10 @@ jobs:
           fetch-depth: 0
       - uses: ./.github/actions/setup-toolchain
         with:
-          node: 'true'
           bun: 'true'
           go: 'true'
-      - run: bun install --frozen-lockfile --cwd frontend
       - name: Build release bundles
         run: |
-          make cross-build
           version="${GITHUB_REF_NAME#v}"
           manifest_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' herdr-plugin.toml)"
           test "$version" = "$manifest_version" || {

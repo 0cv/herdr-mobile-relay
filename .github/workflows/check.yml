@@ -144,7 +144,6 @@ jobs:
           fetch-depth: 0
       - uses: ./.github/actions/setup-toolchain
         with:
-          node: 'true'
           bun: 'true'
           go: 'true'
       - name: Build, manifest, checksum, and offline-verify four targets
