@@ -250,7 +250,7 @@ function settledResult<T>(promise: Promise<T>): Promise<PromiseSettledResult<T>>
 }
 
 function internalGmsFinalization(measurement: Measurement): Promise<void> {
-  const finalization = (measurement as unknown as { gmsFinalizationPromise?: Promise<void> }).gmsFinalizationPromise;
+  const finalization = (measurement as unknown as { gms: { finalizationPromise?: Promise<void> } }).gms.finalizationPromise;
   assert.ok(finalization, 'GMS finalization was not started');
   return finalization;
 }
@@ -3446,7 +3446,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     let collector: OwnedProcessHandle | undefined;
     let groupID: number | undefined;
     await withAndroidRetainedLifecycleFixture(fixture, async ({ measurement }) => {
-      collector = (measurement as unknown as { collector?: OwnedProcessHandle }).collector;
+      collector = (measurement as unknown as { collector: { process?: OwnedProcessHandle } }).collector.process;
       assert.ok(collector, 'retained fixture must use the production default collector');
       await collector.ready;
       const binding = await collector.started;
@@ -5275,7 +5275,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     let collectorSpawns = 0;
     const startupDetails = () => JSON.stringify({ collectorReady: existsSync(collectorReadyPath),
       writerReady: existsSync(readyPath), transportEndpointRequests: endpoint.requests,
-      transportObservationFailure: (measurement as unknown as { transportObservationFailure?: string }).transportObservationFailure,
+      transportObservationFailure: (measurement as unknown as { transport: { failure?: string } }).transport.failure,
       failure: boundedCommandFailureDetails(failure?.result, observer.records()) });
     const measurement: AndroidEnvironmentMeasurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), {
       transportFixture,
@@ -6003,27 +6003,26 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     try {
       await beginObservedMeasurement(measurement);
       const internal = measurement as unknown as {
-        bytes: number; collectorStdoutHandler: (chunk: Buffer) => void;
-        transportTrigger: AndroidTransportTriggerDetector;
-        collector: { stop: (reason: string) => void }; collectorFailure?: Error; chunks: Buffer[];
+        collector: { bytes: number; stdoutHandler: (chunk: Buffer) => void; process: { stop: (reason: string) => void }; failure?: Error; chunks: Buffer[] };
+        transport: { trigger: AndroidTransportTriggerDetector };
       };
       let detectorCalls = 0;
       const stops: string[] = [];
-      internal.transportTrigger.observe = () => { detectorCalls++; return []; };
-      const stop = internal.collector.stop.bind(internal.collector);
-      internal.collector.stop = reason => { stops.push(reason); };
+      internal.transport.trigger.observe = () => { detectorCalls++; return []; };
+      const stop = internal.collector.process.stop.bind(internal.collector.process);
+      internal.collector.process.stop = reason => { stops.push(reason); };
       const chunk = Buffer.from('ordinary message\n');
-      const chunksBefore = internal.chunks.length;
-      internal.bytes = ANDROID_LOG_LIMIT - chunk.length;
-      internal.collectorStdoutHandler(chunk);
+      const chunksBefore = internal.collector.chunks.length;
+      internal.collector.bytes = ANDROID_LOG_LIMIT - chunk.length;
+      internal.collector.stdoutHandler(chunk);
       assert.equal(detectorCalls, 1);
-      assert.equal(internal.chunks.length, chunksBefore + 1);
-      internal.collectorStdoutHandler(chunk);
-      internal.collector.stop = stop;
+      assert.equal(internal.collector.chunks.length, chunksBefore + 1);
+      internal.collector.stdoutHandler(chunk);
+      internal.collector.process.stop = stop;
       assert.equal(detectorCalls, 1);
-      assert.equal(internal.chunks.length, chunksBefore + 1);
+      assert.equal(internal.collector.chunks.length, chunksBefore + 1);
       assert.deepEqual(stops, ['collector-output-limit']);
-      assert.equal(internal.collectorFailure?.message, 'ANDROID_ENVIRONMENT: measured log exceeds bound');
+      assert.equal(internal.collector.failure?.message, 'ANDROID_ENVIRONMENT: measured log exceeds bound');
     } finally {
       await measurement.finish().catch(() => undefined);
       for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
