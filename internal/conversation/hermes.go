@@ -70,20 +70,7 @@ func newHermesReader(home string) *hermesReader {
 }
 
 func (r *hermesReader) databases() ([]string, string) {
-	roots := agentroots.HermesData(r.home)
-	databases := make([]string, 0, len(roots))
-	for index, candidate := range agentroots.HermesDBs(r.home) {
-		if index >= len(roots) {
-			break
-		}
-		if path := containedRegularFile(candidate, roots[index]); path != "" {
-			databases = append(databases, path)
-		}
-	}
-	if len(databases) == 0 {
-		return nil, "source_unavailable"
-	}
-	return databases, ""
+	return containedDatabases(agentroots.HermesData(r.home), agentroots.HermesDBs(r.home))
 }
 
 func (r *hermesReader) locate(cwd, sessionID string) Location {
