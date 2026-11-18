@@ -344,17 +344,24 @@ installed-app launch failure also saves one bounded native hierarchy as
 `failure-hierarchy.xml`, unless a fatal driver failure has quarantined native
 queries. The Share-sheet installation-row click records its start, acknowledgement
 or failure separately from the final Add lookup; acknowledgement alone does not
-prove the confirmation appeared. Safari prepares the web clip and fetches the
-manifest icon before it answers this click, so the click has the same 12-second
-acknowledgement allowance as the final Add.
+prove the confirmation appeared. The click has the same 12-second
+acknowledgement allowance as the final Add. After the click, SafariViewService
+fetches the manifest icon with its own connection; the fixture logs that request
+without `zstd` in `Accept-Encoding`. Add stays disabled until that request:
+on passing runs it arrives a few seconds after the click, and one failing run
+waited 213 seconds for it.
 
 The normal real-app journey no longer requests automatic confirmation GET
 `/source` after that acknowledgement. It proceeds directly to the existing
 foreground and final-Add checks. `confirmationCapture` records the explicit
 `not-requested-product-first` disposition and copied row-click acknowledgement
 timing, with no source receipt or projection. Other readiness and failure-evidence
-source requests are unchanged. Client timing is correlation, not proof of native
-cause or confirmation readiness.
+source requests are unchanged. When the third lookup finds Add disabled, one
+8-second GET `/source` saves the redacted sheet as
+`ios-confirmation-disabled-hierarchy.xml`, only if 72 seconds of the
+confirmation remain: the source allowance plus the 64-second round. A nonfatal
+failure is recorded and polling continues; a fatal one ends the run as usual.
+Client timing is correlation, not proof of native cause or confirmation readiness.
 
 The unique visible Add, complete enabled/visible/hittable checks, stable identity
 and exactly one final tap are unchanged, as are settings. The deadlines are:

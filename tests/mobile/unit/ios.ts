@@ -1517,7 +1517,7 @@ async function confirmationReplay(name: string, options: {
       lookups++;
       await sleepPastTimeout(clock, options.latency?.lookup || 0, signal!);
       advance('lookup');
-      if (options.persistent || (options.fault && lookups > 1)) clock.elapsed += 3_000;
+      if (options.persistent || (options.fault && options.faultAt !== 'source' && lookups > 1)) clock.elapsed += 3_000;
       if (fixture && lookups === 1) await clock.sleep(fixture.lookup.endedAt - fixture.lookup.startedAt);
       if (options.faultAt === 'lookup') return fault();
       if (state() === 'missing') return missing();
@@ -2033,6 +2033,76 @@ test('confirmation hypothetical stale then disabled loading then ready clicks on
   assert.equal(replay.lookups, 3);
   assert.deepEqual(replay.attributes, ['add-1:enabled', 'add-2:enabled', 'add-3:enabled', 'add-3:visible', 'add-3:hittable']);
   assert.equal(replay.clicks.at(-1), 'add-3');
+});
+
+function disabledCaptureEvidence(replay: Awaited<ReturnType<typeof confirmationReplay>>) {
+  const target = replay.requests.findIndex((request) => request.path.endsWith('/target-1/click'));
+  const sources = replay.requests.slice(target + 1).filter((request) => request.path.endsWith('/source'));
+  const outcomes = (replay.platform.evidenceSnapshot().events as Array<{ operation: string; detail?: { outcome?: string } }>)
+    .filter((event) => event.operation === 'disabled-confirmation-hierarchy').map((event) => event.detail?.outcome);
+  const saved = readFile(join(replay.outputDir, 'ios-confirmation-disabled-hierarchy.xml'), 'utf8').catch(() => undefined);
+  return { sources, outcomes, saved };
+}
+
+test('confirmation saves one redacted hierarchy after the third disabled poll and keeps waiting for Add', async () => {
+  const skip = requireXmlLint();
+  if (skip) return skip;
+  const replay = await confirmationReplay('disabled-capture', {
+    states: ['disabled', 'disabled', 'disabled', 'disabled', 'disabled', 'ready'],
+    confirmationSource: '<AppiumAUT><XCUIElementTypeTextField value="https://localhost/#setup=private-setup-token&amp;label=alpha"/></AppiumAUT>',
+  });
+  assert.equal(replay.error, undefined);
+  assert.deepEqual(replay.clicks, ['share', 'target-1', 'add-6']);
+  const { sources, outcomes, saved } = disabledCaptureEvidence(replay);
+  assert.equal(sources.length, 1);
+  const thirdDisabled = replay.requests.findIndex((request) => request.path.endsWith('/element/add-3/attribute/enabled'));
+  assert.equal(replay.requests[thirdDisabled + 1], sources[0]);
+  assert.deepEqual(outcomes, ['captured']);
+  const hierarchy = await saved;
+  assert.match(hierarchy!, /#setup=\[REDACTED\]/u);
+  assert.doesNotMatch(hierarchy!, /private-setup-token/u);
+  const command = replay.driver.snapshot().commands.find((entry) => entry.path.endsWith('/source') && entry.timing?.scope === 'ios-install-confirmation');
+  assert.equal(command?.timeoutMs, 8_000);
+  assert.equal(replay.driver.snapshot().unusable, false);
+});
+
+for (const remaining of [72_000, 71_999]) {
+  test(`confirmation disabled hierarchy needs its source allowance plus a full round (${remaining}ms)`, async () => {
+    const skip = requireXmlLint();
+    if (skip) return skip;
+    const replay = await confirmationReplay(`disabled-capture-${remaining}`, {
+      states: ['disabled', 'disabled', 'disabled', 'ready'],
+      remainingAt: (boundary, lookup) => boundary === 'enabled' && lookup === 3 ? remaining : undefined,
+    });
+    assert.equal(replay.error, undefined);
+    assert.deepEqual(replay.clicks, ['share', 'target-1', 'add-4']);
+    const { sources, outcomes, saved } = disabledCaptureEvidence(replay);
+    const captured = remaining === 72_000;
+    assert.equal(sources.length, captured ? 1 : 0);
+    assert.deepEqual(outcomes, [captured ? 'captured' : 'skipped-budget']);
+    assert.equal(await saved !== undefined, captured);
+  });
+}
+
+test('confirmation disabled hierarchy failure is recorded and only a fatal one stops the install', async () => {
+  const skip = requireXmlLint();
+  if (skip) return skip;
+  const states = ['disabled', 'disabled', 'disabled', 'ready'] as ConfirmationState[];
+  const unrelated = await confirmationReplay('disabled-capture-unrelated', { states, faultAt: 'source', fault: 'unrelated' });
+  assert.equal(unrelated.error, undefined);
+  assert.deepEqual(unrelated.clicks, ['share', 'target-1', 'add-4']);
+  const nonfatal = disabledCaptureEvidence(unrelated);
+  assert.deepEqual(nonfatal.outcomes, ['unavailable']);
+  assert.equal(await nonfatal.saved, undefined);
+
+  const hung = await confirmationReplay('disabled-capture-hung', { states, faultAt: 'source', fault: 'hung' });
+  assert.match(String(hung.error), /APPIUM_TIMEOUT/u);
+  assert.deepEqual(hung.clicks, ['share', 'target-1']);
+  assert.equal(hung.lookups, 3);
+  assert.equal(hung.driver.snapshot().unusable, true);
+  const fatal = disabledCaptureEvidence(hung);
+  assert.deepEqual(fatal.outcomes, []);
+  assert.equal(await fatal.saved, undefined);
 });
 
 test('confirmation admits a synthetic late enabled prefix without an early click', async () => {
