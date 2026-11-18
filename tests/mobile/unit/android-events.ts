@@ -165,66 +165,6 @@ androidEventTests.push(['synthetic explicit operations require receive and times
 }]);
 
 
-androidEventTests.push(['synthetic planned Chrome force-stop covers observed helpers the system reaps inside the operation', async () => {
-  const helper = 'com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:0';
-  const operation: AndroidPlannedTermination = {
-    id: 'stop', measurementId: 'synthetic', packageName: 'com.android.chrome', pid: '300',
-    processes: { '300': 'com.android.chrome', '301': helper }, succeeded: true,
-    command: ['shell', 'am', 'force-stop', '--user', '0', 'com.android.chrome'],
-  };
-  const processes: Record<string, string> = { '100': 'com.android.chrome_zygote', '300': 'com.android.chrome', '301': helper, '559': 'system_server' };
-  const begin = line(2, 1, 'HerdrMeasure', 'synthetic OP_BEGIN stop com.android.chrome 300');
-  const finish = line(6, 1, 'HerdrMeasure', 'synthetic OP_END stop com.android.chrome 300');
-  const stopping = line(3, 559, 'ActivityManager', 'Force stopping com.android.chrome appid=10145 user=0: from pid 50');
-  const kill = line(3, 559, 'ActivityManager', 'Killing 300:com.android.chrome/u0a145 (adj 0): stop com.android.chrome due to from pid 50');
-  const reap = line(4, 559, 'ActivityManager', `Killing 301:${helper}/u0a145i-9000 (adj 0): isolated not needed`);
-  const helperExit = line(4, 100, 'Zygote', 'Process 301 exited due to signal 9 (Killed)');
-  const signal = line(5, 100, 'Zygote', 'Process 300 exited due to signal 9 (Killed)');
-  const check = (log: string, operations = [operation], before = processes) => measuredAndroidEvents(log, snapshot('start', before), snapshot('end'), operations);
-  const operationLog = (...records: string[]) => start + begin + records.join('') + finish + end;
-  const valid = operationLog(stopping, kill, reap, helperExit, signal);
-  assert.deepEqual(check(valid).issues, []);
-  assert.deepEqual(check(valid).fatalEvents, []);
-  assert.deepEqual(check(operationLog(stopping, kill, reap, helperExit.replace('due to signal 9 (Killed)', 'cleanly (0)'), signal)).fatalEvents, []);
-  const cleanExit = helperExit.replace('due to signal 9 (Killed)', 'cleanly (0)');
-  assert.deepEqual(check(operationLog(stopping, kill, cleanExit, reap, signal)).fatalEvents, []);
-  const earlyCleanExit = cleanExit.replace('6374.000', '6373.750');
-  assert.deepEqual(check(operationLog(stopping, kill, earlyCleanExit, reap, signal)).fatalEvents, []);
-  const otherProcesses = { ...operation, processes: { '300': 'com.android.chrome' } };
-  const otherName = { ...operation, processes: { '300': 'com.android.chrome', '301': `${helper}1` } };
-  for (const [name, log, operations] of [
-    ['early clean exit without reaping', operationLog(stopping, kill, earlyCleanExit, signal), [operation]],
-    ['early crash exit', operationLog(stopping, kill, earlyCleanExit.replace('cleanly (0)', 'due to signal 11 (Segmentation fault)'), reap, signal), [operation]],
-    ['clean exit received before force-stop', operationLog(earlyCleanExit, stopping, kill, reap, signal), [operation]],
-    ['clean exit timestamped before force-stop', operationLog(stopping, kill, earlyCleanExit.replace('6373.750', '6372.500'), reap, signal), [operation]],
-    ['early clean exit from unknown zygote', operationLog(stopping, kill, earlyCleanExit.replace('100 100', '101 101'), reap, signal), [operation]],
-    ['early clean exit with another signal', operationLog(stopping, kill, earlyCleanExit, reap, line(4, 559, 'Process', 'Sending signal. PID: 301 SIG: 9'), signal), [operation]],
-    ['early clean exit with duplicate exit', operationLog(stopping, kill, earlyCleanExit, reap, cleanExit, signal), [operation]],
-    ['early clean exit with wrong helper identity', operationLog(stopping, kill, earlyCleanExit, reap, signal), [otherName]],
-    ['early clean exit with unknown reaper', operationLog(stopping, kill, earlyCleanExit, reap.replace('559 559', '558 558'), signal), [operation]],
-    ['helper outside the observed process set', valid, [otherProcesses]],
-    ['helper with a different observed name', valid, [otherName]],
-    ['reaping received after the operation', start + begin + stopping + kill + signal + finish + reap + helperExit + end, [operation]],
-    ['reaping timestamped after the operation', operationLog(stopping, kill, reap.replace('6374.000', '6377.000'), helperExit, signal), [operation]],
-    ['reaping before the force-stop record', operationLog(reap, helperExit, stopping, kill, signal), [operation]],
-    ['force-stop record for another user', operationLog(stopping.replace('user=0', 'user=10'), kill, reap, helperExit, signal), [operation]],
-    ['reaping by an unknown producer', operationLog(stopping, kill, reap.replace('559 559', '558 558'), helperExit, signal), [operation]],
-    ['different reaping reason', operationLog(stopping, kill, reap.replace('isolated not needed', 'remove task'), helperExit, signal), [operation]],
-    ['crash signal after reaping', operationLog(stopping, kill, reap, helperExit.replace('signal 9 (Killed)', 'signal 11 (Segmentation fault)'), signal), [operation]],
-    ['additional signal after reaping', operationLog(stopping, kill, reap, helperExit, line(4, 559, 'Process', 'Sending signal. PID: 301 SIG: 9'), signal), [operation]],
-    ['second exit after reaping', operationLog(stopping, kill, reap, helperExit, helperExit.replace('due to signal 9 (Killed)', 'cleanly (0)'), signal), [operation]],
-    ['helper exit from an unknown zygote', operationLog(stopping, kill, reap, helperExit.replace('100 100', '101 101'), signal), [operation]],
-    ['force-stop record from an unknown producer', operationLog(stopping.replace('559 559', '558 558'), kill, reap, helperExit, signal), [operation]],
-    ['repeated reaping record', operationLog(stopping, kill, reap, reap, helperExit, signal), [operation]],
-    ['force-stop kill of a sandboxed helper', operationLog(stopping, kill, reap.replace('/u0a145i-9000 (adj 0): isolated not needed', '/u0ai2 (adj 0): stop com.android.chrome due to from pid 50'), reap, helperExit, signal), [operation]],
-    ['reaping repeated after the exit', operationLog(stopping, kill, reap, helperExit, reap, helperExit.replace('due to signal 9 (Killed)', 'cleanly (0)'), signal), [operation]],
-  ] as [string, string, AndroidPlannedTermination[]][]) {
-    const result = check(log, operations);
-    assert.deepEqual(result.issues, [], name);
-    assert.ok(result.fatalEvents.some((event) => event.includes('301')), name);
-  }
-}]);
-
 for (const [name, log] of [
   ['missing start', body + end], ['missing end', start + body], ['reversed markers', end + body + start],
   ['duplicate start', start + start + body + end], ['truncated', (start + body + end).trimEnd()],

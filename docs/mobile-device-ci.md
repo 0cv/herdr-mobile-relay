@@ -140,13 +140,7 @@ reported in `helperDeaths` in the environment check and the public summary and
 never gate. A death belongs to a helper when every Chrome, GMS or WebAPK process
 name recorded for its PID is a helper name; a PID that is also named by another
 process keeps gating.
-A planned Chrome force-stop
-also covers helpers from its observed process set that the system kills as
-`isolated not needed` after system_server logs `Force stopping com.android.chrome`
-for user 0 inside the exact operation interval; that exemption admits only the
-kill and one following START-inventory Chrome zygote report of exit status zero or
-SIGKILL, so any other helper signal, crash or second exit is reported in
-`helperDeaths` and does not gate. The schema-3
+The schema-3
 check retains raw observations and numbered proof lines, distinguishing event
 counts from PID counts. Capture is monitored, receive-bounded `main`/`system` logcat, not an
 exhaustive or lossless all-producer generation-time trace. Producers sample time
@@ -154,7 +148,7 @@ before submission; another producer's earlier/later timestamp is diagnostic
 `boundaryDiscordances`, not proof of capture loss. Original bytes and line numbers
 are retained without sorting. All captured records, including pre-START and
 post-END spill, remain available for adverse and ambiguous attribution checks;
-planned termination markers and exempted events must also fit both receive and
+planned termination markers must also fit both receive and
 timestamp bounds. A planned termination waits up to 5 seconds after `am force-stop`
 for every observed process of the package to exit before it logs `OP_END`; if any
 observed PID or any process of that package is still listed after 5 seconds (or
