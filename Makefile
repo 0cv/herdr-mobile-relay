@@ -156,7 +156,7 @@ cross-build:
 	done
 
 release-bundle-check:
-	@tmp="$$(mktemp -d)"; trap 'rm -rf "$$tmp"' EXIT; \
+	@set -e; tmp="$$(mktemp -d)"; trap 'rm -rf "$$tmp"' EXIT; \
 	version="$$(sed -n 's/^version = "\([^"]*\)"/\1/p' herdr-plugin.toml)"; \
 	revision="$$(git rev-parse HEAD 2>/dev/null || echo test-revision)"; \
 	scripts/package-release.sh "$$version" "$$revision" "$$tmp"; \
