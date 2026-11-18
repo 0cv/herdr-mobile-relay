@@ -54,7 +54,12 @@ import {
 import { androidTransitionTests } from './android-transitions';
 import { androidEventTests } from './android-events';
 import { androidGmsSettleTests } from './android-gms-settle';
-import { androidEnvironmentTests, validateFakeAdbDiagnostic, type FakeAdbDiagnostic, type FakeAdbDiagnosticEvent, type FakeAdbDiagnosticStage, type FakeAdbExitCategory, type FakeAdbFixturePathCategory } from './android-environment';
+import { androidEnvironmentEventTests } from './android-environment-events';
+import { androidEnvironmentGmsObservationTests } from './android-environment-gms';
+import { androidEnvironmentOwnedProcessTests } from './android-environment-owned-process';
+import { androidEnvironmentSnapshotTests } from './android-environment-snapshots';
+import { androidEnvironmentTransportTests } from './android-environment-transport';
+import { validateFakeAdbDiagnostic, type FakeAdbDiagnostic, type FakeAdbDiagnosticEvent, type FakeAdbDiagnosticStage, type FakeAdbExitCategory, type FakeAdbFixturePathCategory } from './android-environment';
 import { androidTransportTests } from './android-transport';
 import { FakeClock } from './fake-clock';
 import { androidEmulatorLifetimeTests } from './android-emulator-lifetime';
@@ -1033,12 +1038,19 @@ test('Android environment snapshot persists bounded diagnostics for static-libra
   }
 });
 
-for (const [name, body] of androidEnvironmentTests({
+const androidEnvironmentHarness = {
   createFixture: createAndroidEnvironmentFixture,
   writeState: writeAndroidEnvironmentFixtureState,
   snapshot: runAndroidEnvironmentFixtureSnapshot,
   check: runAndroidEnvironmentFixtureCheck,
-})) test(name, body);
+};
+for (const [name, body] of [
+  ...androidEnvironmentOwnedProcessTests(androidEnvironmentHarness),
+  ...androidEnvironmentSnapshotTests(androidEnvironmentHarness),
+  ...androidEnvironmentEventTests(androidEnvironmentHarness),
+  ...androidEnvironmentGmsObservationTests(androidEnvironmentHarness),
+  ...androidEnvironmentTransportTests(androidEnvironmentHarness),
+]) test(name, body);
 
 test('Android Chrome startup only enables attach mode after explicit launch', async () => {
   const ordinary = androidChromeCapabilities('emulator-5554');
