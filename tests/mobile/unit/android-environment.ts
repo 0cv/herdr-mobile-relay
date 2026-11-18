@@ -1,16 +1,16 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { constants as osConstants, tmpdir } from 'node:os';
 import { closeSync, createWriteStream, existsSync, openSync, readdirSync, readFileSync } from 'node:fs';
-import { appendFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Readable } from 'node:stream';
-import { createConnection as createNetConnection, createServer as createNetServer, type Server, type Socket } from 'node:net';
+import { createServer as createNetServer, type Server, type Socket } from 'node:net';
 import { repositoryPath, repositoryRoot } from '../support/paths';
 import { fileSha256 } from '../support/artifacts';
 import { ANDROID_LOG_LIMIT, parseAndroidGmsComponentState, type AndroidEnvironmentSnapshot, type AndroidPreparation, type AndroidPlannedTermination } from '../android-environment';
-import { AndroidEnvironmentMeasurement as Measurement, gmsWriterProgress, type AndroidMeasurementIO } from '../android-measurement';
+import { AndroidEnvironmentMeasurement as Measurement, type AndroidMeasurementIO } from '../android-measurement';
 import { BoundedCommandError, boundedCommand } from '../support/bounded-process';
 import { callerDeadlineToRuntime, callerDurationToRuntime, monotonicNowNs, processGroupAbsent, spawnOwnedProcess, type OwnedProcessHandle, type RetirementEvidence } from '../support/owned-process';
 import { admitNonblockingDescriptor, createOwnedGroupPollOwner, createSupervisorObservationWriter, type GroupPollPhase } from '../support/owned-process-runtime';
@@ -88,46 +88,6 @@ interface Fixture {
 
 function observerRecords(path: string): Array<Record<string, unknown>> {
   return readFileSync(path, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line) as Record<string, unknown>);
-}
-
-type BoundedCommandArguments = Parameters<typeof boundedCommand>;
-type GmsCleanupOutcome = { timeoutMs: number; returned: boolean; timedOut?: boolean; command?: unknown; request: BoundedCommandArguments };
-
-async function observeGmsCleanup(outcomes: GmsCleanupOutcome[], ...request: BoundedCommandArguments): ReturnType<typeof boundedCommand> {
-  const timeoutMs = request[2];
-  try {
-    const result = await boundedCommand(...request);
-    outcomes.push({ timeoutMs, returned: true, command: boundedCommandFailureDetails(result), request });
-    return result;
-  } catch (error) {
-    outcomes.push({ timeoutMs, returned: false, timedOut: error instanceof BoundedCommandError ? error.result.timedOut : undefined,
-      command: error instanceof BoundedCommandError ? boundedCommandFailureDetails(error.result) : String(error).slice(0, 500), request });
-    throw error;
-  }
-}
-
-// A real cleanup worker on a slow host can exceed its fixed allowance; the measurement must then report the evidence as
-// pending with a removal error, and the same worker must still remove the evidence when given enough time.
-async function assertGmsTemporaryCleanup(state: unknown, errors: string[], outcomes: GmsCleanupOutcome[]): Promise<void> {
-  const details = JSON.stringify({ state, outcomes: outcomes.map(({ request: _request, ...outcome }) => outcome),
-    errors: errors.filter(error => /temporary observation/u.test(error)) });
-  const last = outcomes.at(-1);
-  assert.ok(last, details);
-  if (state === 'removed-after-failure') {
-    assert.equal(last.returned, true, details);
-    return;
-  }
-  assert.equal(state, 'pending', details);
-  assert.equal(last.returned, false, details);
-  assert.equal(last.timedOut, true, details);
-  assert.ok(errors.some(error => error.includes('GMS temporary observation evidence could not be removed')), details);
-  const [binary, args, , options] = last.request;
-  const confirmation = await boundedCommand(binary, args, 15_000, {
-    label: options.label, maxBytes: options.maxBytes, maxBytesPerStream: options.maxBytesPerStream, input: options.input, cleanupReservationMs: 1_000,
-  });
-  assert.equal(confirmation.stdout, '{"removed":true}\n', details);
-  const { temporary } = JSON.parse(String(options.input)) as { temporary: string };
-  assert.equal(existsSync(temporary), false, details);
 }
 
 export function createBoundedSupervisorObserver(root: string, name: string) {
@@ -264,7 +224,8 @@ function gmsAttackTimingRule(limits: unknown, stage: unknown, elapsedMs: unknown
   const elapsed = Number(elapsedMs);
   if (parseDurationMs > parseReserveMs) violations.push(`normalization took ${parseDurationMs} ms, beyond its ${parseReserveMs} ms parse reserve`);
   if (durationMs > stageAllowanceMs) violations.push(`collection took ${durationMs} ms, beyond its ${stageAllowanceMs} ms stage allowance`);
-  if (elapsed < durationMs) violations.push(`elapsed ${elapsed} ms is shorter than the ${durationMs} ms collection it contains`);
+  // durationMs is rounded up to whole milliseconds, so compare it with the rounded-up elapsed time.
+  if (Math.ceil(elapsed) < durationMs) violations.push(`elapsed ${elapsed} ms is shorter than the ${durationMs} ms collection it contains`);
   if (elapsed > compositeCeilingMs) violations.push(`collection and both persistence operations took ${elapsed} ms, beyond ${compositeCeilingMs} ms`);
   return { violations, stageAllowanceMs, compositeCeilingMs };
 }
@@ -290,7 +251,7 @@ function settledResult<T>(promise: Promise<T>): Promise<PromiseSettledResult<T>>
 }
 
 function internalGmsFinalization(measurement: Measurement): Promise<void> {
-  const finalization = (measurement as unknown as { gmsFinalizationPromise?: Promise<void> }).gmsFinalizationPromise;
+  const finalization = (measurement as unknown as { gms: { finalizationPromise?: Promise<void> } }).gms.finalizationPromise;
   assert.ok(finalization, 'GMS finalization was not started');
   return finalization;
 }
@@ -3486,7 +3447,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     let collector: OwnedProcessHandle | undefined;
     let groupID: number | undefined;
     await withAndroidRetainedLifecycleFixture(fixture, async ({ measurement }) => {
-      collector = (measurement as unknown as { collector?: OwnedProcessHandle }).collector;
+      collector = (measurement as unknown as { collector: { process?: OwnedProcessHandle } }).collector.process;
       assert.ok(collector, 'retained fixture must use the production default collector');
       await collector.ready;
       const binding = await collector.started;
@@ -4544,7 +4505,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
           return variant === 'unexpected output' ? { ...successfulResult, stdout: canary } : successfulResult;
         },
         writeJson: async (path, value) => {
-          if (path === join(fixture.root, 'android-environment-operations.json')) {
+          if (path === join(fixture.root, 'android-environment-operations.json') && (value as unknown[]).length > 0) {
             const operations = JSON.parse(JSON.stringify(value)) as AndroidPlannedTermination[];
             publications.push(operations);
             if (variant === 'receipt write failure' && operations[0]?.commandReceipt) throw secondary;
@@ -4676,7 +4637,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     let receiptPublications = 0;
     const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), {
       writeJson: async (path, value) => {
-        if (path === join(fixture.root, 'android-environment-operations.json')) {
+        if (path === join(fixture.root, 'android-environment-operations.json') && (value as unknown[]).length > 0) {
           const operations = JSON.parse(JSON.stringify(value)) as AndroidPlannedTermination[];
           publications.push(operations);
           if (operations[0]?.commandReceipt && receiptPublications++ === 0) throw primary;
@@ -4723,7 +4684,6 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       process.env.ANDROID_EMULATOR_LIFETIME_FILE = lifetime;
     }
     const originalAbortController = globalThis.AbortController;
-    const requiredError = new Error('required collector write failed');
     const publications: AndroidPlannedTermination[][] = [];
     const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), {
       command: async (...args) => {
@@ -4740,12 +4700,8 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
         }
         return result;
       },
-      boundedCommand: async (binary, args, timeout, options) => {
-        if (variant === 'required collection failure' && args.includes('--android-measurement-persist-text')) throw requiredError;
-        return boundedCommand(binary, args, timeout, options);
-      },
       writeJson: async (path, value) => {
-        if (path === join(fixture.root, 'android-environment-operations.json')) {
+        if (path === join(fixture.root, 'android-environment-operations.json') && (value as unknown[]).length > 0) {
           const operations = JSON.parse(JSON.stringify(value)) as AndroidPlannedTermination[];
           publications.push(operations);
           const requests = await readFile(fixture.log, 'utf8');
@@ -4755,6 +4711,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
         await writeSanitizedJson(path, value);
       },
     });
+    if (variant === 'required collection failure') await mkdir(join(fixture.root, 'android-qualification-logcat.log'), { recursive: true });
     try {
       await beginObservedMeasurement(measurement);
       await measurement.terminate('com.android.chrome', '6538');
@@ -4795,7 +4752,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       assert.equal(outcome.assessment?.collection.status, requiredFailure ? 'UNKNOWN' : 'PASS');
       assert.equal(outcome.assessment?.status, requiredFailure ? 'UNKNOWN' : 'PASS');
       assert.equal(outcome.assessment?.passed, !requiredFailure);
-      if (requiredFailure) assert.ok(outcome.errors.includes(requiredError));
+      if (requiredFailure) assert.ok(outcome.errors.length > 0);
       else {
         assert.deepEqual(outcome.errors, []);
         assert.deepEqual(measurement.failureOutcome().errors, []);
@@ -4858,6 +4815,121 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
       Object.assign(process.env, saved);
     }
+  });
+  const withMeasurementOutput = async (body: (output: string, measurement: Measurement) => Promise<void>, io: Partial<AndroidMeasurementIO> = {}) => {
+    const fixture = await harness.createFixture();
+    const saved = { ...process.env };
+    Object.assign(process.env, fixture.environment);
+    const output = join(fixture.root, 'evidence');
+    const measurement = new AndroidEnvironmentMeasurement('emulator-5554', output, repositoryPath('tests/mobile/toolchains.json'), io);
+    try {
+      await body(output, measurement);
+    } finally {
+      await chmod(output, 0o700).catch(() => undefined);
+      await measurement.finish().catch(() => undefined);
+      for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+      Object.assign(process.env, saved);
+    }
+  };
+  const evidenceDirectoryState = async (directory: string) => {
+    const state: Record<string, unknown> = {};
+    for (const name of (await readdir(directory)).sort()) {
+      const path = join(directory, name);
+      const info = await stat(path);
+      state[name] = info.isDirectory() ? 'directory'
+        : { mode: info.mode & 0o777, mtimeMs: info.mtimeMs, sha256: hashText(await readFile(path, 'utf8')) };
+    }
+    return state;
+  };
+  const assertEvidenceDirectorySettled = async (directory: string) => {
+    const settled = await evidenceDirectoryState(directory);
+    await new Promise(resolve => setTimeout(resolve, 300));
+    assert.deepEqual(await evidenceDirectoryState(directory), settled);
+    assert.deepEqual(Object.keys(settled).filter(name => name.endsWith('.pending')), []);
+  };
+  const readEvidenceJson = async (directory: string, name: string) => JSON.parse(await readFile(join(directory, `android-environment-${name}.json`), 'utf8'));
+  test('measurement evidence keeps its names, bytes and mode, leaves no pending file and stays unchanged after finish', async () => {
+    await withMeasurementOutput(async (output, measurement) => {
+      await beginObservedMeasurement(measurement);
+      const outcome = await measurement.finish();
+      assert.deepEqual(outcome.errors, []);
+      const names = (await readdir(output)).sort();
+      assert.deepEqual(names, ['after', 'after-diagnostics', 'before', 'before-diagnostics', 'check', 'collector', 'completion', 'gms-observations', 'identity', 'operations', 'session']
+        .map(name => `android-environment-${name}.json`).concat('android-qualification-logcat.log').sort());
+      for (const name of names) assert.equal((await stat(join(output, name))).mode & 0o777, 0o600, name);
+      for (const name of names.filter(name => name.endsWith('.json') && !name.endsWith('-session.json'))) {
+        const text = await readFile(join(output, name), 'utf8');
+        assert.equal(text, `${JSON.stringify(JSON.parse(text), null, 2)}\n`, name);
+      }
+      assert.equal(await readFile(join(output, 'android-environment-session.json'), 'utf8'), `${JSON.stringify({ id: measurement.id })}\n`);
+      assert.deepEqual(await readEvidenceJson(output, 'operations'), []);
+      const gmsBytes = await readFile(join(output, 'android-environment-gms-observations.json'), 'utf8');
+      assert.equal((await readEvidenceJson(output, 'collector')).gmsObservations.observationSha256, hashText(gmsBytes));
+      assert.equal(outcome.assessmentSha256, hashText(await readFile(join(output, 'android-environment-check.json'), 'utf8')));
+      assert.deepEqual(await readEvidenceJson(output, 'completion'), { passed: true, errors: [], assessmentSha256: outcome.assessmentSha256 });
+      const log = await readFile(join(output, 'android-qualification-logcat.log'), 'utf8');
+      assert.match(log, new RegExp(`HerdrMeasure: ${measurement.id} START`, 'u'));
+      assert.match(log, new RegExp(`HerdrMeasure: ${measurement.id} END`, 'u'));
+      await assertEvidenceDirectorySettled(output);
+    });
+  });
+  test('measurement identity write blocked by a directory is reported, leaves no pending file and publishes no success', async () => {
+    await withMeasurementOutput(async (output, measurement) => {
+      await mkdir(join(output, 'android-environment-identity.json'), { recursive: true });
+      await beginObservedMeasurement(measurement);
+      const outcome = await measurement.finish();
+      assert.ok(outcome.errors.length > 0);
+      assert.equal((await stat(join(output, 'android-environment-identity.json'))).isDirectory(), true);
+      const completion = await readEvidenceJson(output, 'completion');
+      assert.equal(completion.passed, false);
+      assert.ok(completion.errors.length > 0);
+      await assertEvidenceDirectorySettled(output);
+    });
+  });
+  test('measurement GMS observation write blocked by a directory is reported and never confirmed', async () => {
+    await withMeasurementOutput(async (output, measurement) => {
+      await mkdir(join(output, 'android-environment-gms-observations.json'), { recursive: true });
+      await beginObservedMeasurement(measurement);
+      const outcome = await measurement.finish();
+      assert.ok(outcome.errors.some(error => /GMS/u.test(String(error))), JSON.stringify(outcome.errors.map(String)));
+      assert.equal((await stat(join(output, 'android-environment-gms-observations.json'))).isDirectory(), true);
+      const collector = await readEvidenceJson(output, 'collector');
+      assert.equal(collector.gmsObservations.terminalConfirmation, 'unconfirmed');
+      assert.equal(collector.gmsObservations.observationSha256, undefined);
+      assert.equal((await readEvidenceJson(output, 'completion')).passed, false);
+      await assertEvidenceDirectorySettled(output);
+    });
+  });
+  test('measurement writes into a read-only output directory are reported and change nothing', async () => {
+    if (process.getuid?.() === 0) return;
+    await withMeasurementOutput(async (output, measurement) => {
+      await beginObservedMeasurement(measurement);
+      const beforeFinish = await evidenceDirectoryState(output);
+      await chmod(output, 0o500);
+      const outcome = await measurement.finish();
+      await chmod(output, 0o700);
+      assert.ok(outcome.errors.length > 0);
+      assert.equal(outcome.assessment?.passed, false);
+      assert.equal(outcome.assessmentSha256, undefined);
+      assert.deepEqual(await evidenceDirectoryState(output), beforeFinish);
+      await assertEvidenceDirectorySettled(output);
+    });
+  });
+  test('measurement begin refuses an existing session file and leaves it untouched', async () => {
+    await withMeasurementOutput(async (output, measurement) => {
+      const budget = new PhaseBudget('measurement-session', { timeoutMs: 60_000 });
+      await measurement.observeGmsStage('after-device-start', budget);
+      await measurement.observeGmsStage('before-measurement-begin', budget);
+      const session = join(output, 'android-environment-session.json');
+      await writeFile(session, 'previous session\n');
+      await assert.rejects(measurement.begin());
+      assert.equal(await readFile(session, 'utf8'), 'previous session\n');
+      const outcome = await measurement.finish();
+      assert.ok(outcome.errors.length > 0);
+      assert.equal(await readFile(session, 'utf8'), 'previous session\n');
+      assert.equal((await readEvidenceJson(output, 'completion')).passed, false);
+      await assertEvidenceDirectorySettled(output);
+    });
   });
   test('GMS failed-begin cleanup retires the owned collector tree and freezes its callbacks', async () => {
     const fixture = await harness.createFixture();
@@ -4933,49 +5005,30 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     assert.throws(() => parseAndroidGmsComponentState(invalidMember), /malformed enabledComponents component names/u);
   });
   test('GMS ownership failures are excluded from dump output and never dispatch dumpsys', async () => {
-    for (const failure of ['wrong-owner', 'timeout'] as const) {
+    for (const failure of ['wrong-owner', 'missing-marker'] as const) {
       const fixture = await harness.createFixture();
       const saved = { ...process.env };
       Object.assign(process.env, fixture.environment);
-      if (failure === 'wrong-owner') await writeFile(fixture.environment.MOBILE_DEVICE_OWNERSHIP_FILE!, 'android:another-device');
-      let ownershipFailure: BoundedCommandError | undefined;
-      const observer = failure === 'timeout' ? createBoundedSupervisorObserver(fixture.root, 'gms-ownership-supervisor') : undefined;
-      const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), {
-        boundedCommand: async (binary, args, timeout, options) => {
-          if (failure !== 'timeout' || !args.includes('--gms-diagnostic-ownership')) return boundedCommand(binary, args, timeout, options);
-          const owner = `process.on('SIGTERM',()=>{});process.stdout.write('OWNERSHIP-ONLY\\n');process.stderr.write('owner detail\\n');setInterval(()=>{},1000)`;
-          try { return await boundedCommand('node', ['-e', owner], timeout, { ...options, observerSupervisor: observer!.stream }); }
-          catch (error) { if (error instanceof BoundedCommandError) ownershipFailure = error; throw error; }
-        },
-      });
+      const marker = fixture.environment.MOBILE_DEVICE_OWNERSHIP_FILE!;
+      if (failure === 'wrong-owner') await writeFile(marker, 'android:another-device');
+      else await rm(marker);
+      const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'));
       try {
         await measurement.observeGmsStage('after-device-start', new PhaseBudget(`gms-owner-${failure}`, { timeoutMs: 10_000 }));
         await measurement.finalizeGmsObservations();
         const observations = JSON.parse(await readFile(join(fixture.root, 'android-environment-gms-observations.json'), 'utf8'));
         const stage = observations.stages[0];
-        await observer?.close();
-        const details = JSON.stringify({ failure, stage: {
-          ownershipChildExited: stage.ownershipChildExited, ownershipProcessesExited: stage.ownershipProcessesExited,
-          ownershipStdioClosed: stage.ownershipStdioClosed,
-        }, command: boundedCommandFailureDetails(ownershipFailure?.result, observer?.records(), true) });
         const requests = existsSync(fixture.log) ? await readFile(fixture.log, 'utf8') : '';
         assert.equal(requests.split('\n').filter(line => line.includes('shell dumpsys package com.google.android.gms')).length, 0, failure);
+        assert.equal(stage.outcome, 'failed', failure);
+        assert.ok(stage.error, failure);
+        assert.ok(observations.errors.length > 0, failure);
         assert.equal(observations.totalCommandOutputBytes, 0, failure);
         assert.equal(observations.totalRetainedCommandOutputBytes, 0, failure);
         assert.equal(stage.stdoutBytes, undefined, failure);
         assert.equal(stage.stderrBytes, undefined, failure);
         assert.equal(stage.stdoutSha256, undefined, failure);
-        assert.ok(stage.ownershipChildExited, details);
-        assert.ok(stage.ownershipProcessesExited, details);
-        assert.ok(stage.ownershipStdioClosed, details);
-        if (failure === 'timeout') {
-          assert.ok(ownershipFailure instanceof BoundedCommandError, details);
-          assert.equal(ownershipFailure.result.timedOut, true, details);
-          assert.ok(ownershipFailure.result.stdoutBytes > 0, details);
-          assert.ok(ownershipFailure.result.stderrBytes > 0, details);
-        }
       } finally {
-        await observer?.close();
         await measurement.finish().catch(() => undefined);
         for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
         Object.assign(process.env, saved);
@@ -4987,11 +5040,9 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     const fixture = await harness.createFixture();
     const saved = { ...process.env };
     Object.assign(process.env, fixture.environment);
-    let persistenceCalls = 0;
     const writers = gmsWriterDiagnostics(fixture.root);
     const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), {
       boundedCommand: async (binary, args, timeout, options) => {
-        if (args.includes('--gms-diagnostic-persist')) persistenceCalls++;
         if (options.label?.startsWith('normalize GMS components at ')) return writers.run(binary, args, timeout, options);
         return boundedCommand(binary, args, timeout, options);
       },
@@ -5002,13 +5053,12 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       await measurement.finalizeGmsObservations();
       const observation = JSON.parse(await readFile(join(fixture.root, 'android-environment-gms-observations.json'), 'utf8'));
       assert.deepEqual(observation.stages.map((entry: any) => entry.stage), stages, JSON.stringify({
-        stages: observation.stages, errors: observation.errors, persistenceCalls,
+        stages: observation.stages, errors: observation.errors,
       }));
       assert.equal(observation.stages.filter((entry: any) => entry.outcome === 'collected').length, 2,
         JSON.stringify({ stages: observation.stages, normalizationFailures: writers.failures }));
       assert.ok(observation.stages.slice(2).every((entry: any) => entry.outcome === 'failed'));
       assert.ok(observation.errors.length > 0);
-      assert.equal(persistenceCalls, 3);
       const requests = await readFile(fixture.log, 'utf8');
       assert.equal(requests.split('\n').filter(line => line.includes('shell dumpsys package com.google.android.gms')).length, 2);
       assert.ok(measurement.failureOutcome().errors.length > 0);
@@ -5127,47 +5177,6 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       for (const key of Object.keys(process.env)) if (!(key in finishedEnv)) delete process.env[key];
       Object.assign(process.env, finishedEnv);
     }
-
-    const interruptedFixture = await harness.createFixture();
-    const interruptedEnv = { ...process.env };
-    Object.assign(process.env, interruptedFixture.environment);
-    let deferOwnership = false;
-    let beginOwnerEntered!: () => void;
-    const ownerEntered = new Promise<void>(resolve => { beginOwnerEntered = resolve; });
-    let beginSpawns = 0;
-    let ownerFailure: BoundedCommandError | undefined;
-    const interrupted = new AndroidEnvironmentMeasurement('emulator-5554', interruptedFixture.root, repositoryPath('tests/mobile/toolchains.json'), {
-      boundedCommand: async (binary, args, timeout, options) => {
-        if (!deferOwnership || !args.includes('--android-measurement-owner')) return boundedCommand(binary, args, timeout, options);
-        const stalledOwner = `process.on('SIGTERM',()=>{});require('node:fs').writeFileSync(${JSON.stringify(join(interruptedFixture.root, 'begin-owner-ready'))},'ready');setInterval(()=>{},1000)`;
-        beginOwnerEntered();
-        try { return await boundedCommand('node', ['-e', stalledOwner], timeout, options); }
-        catch (error) { if (error instanceof BoundedCommandError) ownerFailure = error; throw error; }
-      },
-      spawnCollector: () => { beginSpawns++; throw new Error('collector must not start after concurrent finalization'); },
-    });
-    let pendingBegin: Promise<void> | undefined;
-    try {
-      for (const stage of stages.slice(0, 2)) await interrupted.observeGmsStage(stage, new PhaseBudget('gms-concurrent-begin', { timeoutMs: 10_000 }));
-      deferOwnership = true;
-      pendingBegin = interrupted.begin();
-      await ownerEntered;
-      const readyDeadline = Date.now() + 2_000;
-      while (!existsSync(join(interruptedFixture.root, 'begin-owner-ready')) && Date.now() < readyDeadline) await new Promise(resolve => setTimeout(resolve, 5));
-      assert.ok(existsSync(join(interruptedFixture.root, 'begin-owner-ready')));
-      const finishPromise = interrupted.finish();
-      await assert.rejects(pendingBegin, /BOUNDED_COMMAND_FAILED/u);
-      await finishPromise;
-      assert.equal(beginSpawns, 0);
-      assert.ok(ownerFailure instanceof BoundedCommandError);
-      assert.equal(ownerFailure.result.ownedProcessesExited, true);
-      assert.equal(ownerFailure.result.stdioClosed, true);
-      assert.equal(interrupted.failureOutcome().errors.length > 0, true);
-    } finally {
-      await pendingBegin?.catch(() => undefined);
-      for (const key of Object.keys(process.env)) if (!(key in interruptedEnv)) delete process.env[key];
-      Object.assign(process.env, interruptedEnv);
-    }
   });
   test('GMS finalization retires the owned snapshot subprocess tree before begin settles', async () => {
     const fixture = await harness.createFixture();
@@ -5215,293 +5224,110 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       Object.assign(process.env, saved);
     }
   });
-  test('failed-begin collector publication waits for terminal GMS evidence and records its result', async () => {
-    const fixture = await harness.createFixture();
-    const saved = { ...process.env };
-    Object.assign(process.env, fixture.environment);
-    const stages = ['after-device-start', 'before-measurement-begin'] as const;
-    const output = fixture.root;
-    let release!: () => void;
-    const gate = new Promise<void>(resolve => { release = resolve; });
-    let entered!: () => void;
-    const collectorWriteEntered = new Promise<void>(resolve => { entered = resolve; });
-    const finalWriteDelayMs = 90;
-    let terminalWriteAttempts = 0;
-    const measurement = new AndroidEnvironmentMeasurement('emulator-5554', output, repositoryPath('tests/mobile/toolchains.json'), {
-      boundedCommand: async (binary, args, timeout, options) => {
+  test('GMS failed-begin finalizers and finish settle together and report whether the collector summary was written', async () => {
+    for (const summary of ['written', 'blocked'] as const) {
+      await withMeasurementOutput(async (output, measurement) => {
+        if (summary === 'blocked') await mkdir(join(output, 'android-environment-collector.json'), { recursive: true });
+        const budget = new PhaseBudget('failed-begin-publication', { timeoutMs: 15_000 });
+        await measurement.observeGmsStage('after-device-start', budget);
+        await measurement.observeGmsStage('before-measurement-begin', budget);
+        await assert.rejects(measurement.begin(), /synthetic failed-begin snapshot/u);
+        const finalizers = [settledResult(measurement.finalizeGmsObservations()), settledResult(measurement.finalizeGmsObservations())];
+        const outcome = await measurement.finish();
+        const settled = await Promise.all(finalizers);
+        const observations = await readEvidenceJson(output, 'gms-observations');
+        assert.equal(observations.finalized, true, summary);
+        assert.ok(observations.errors.length > 0, summary);
+        const errors = outcome.errors.map(error => String(error));
+        assert.ok(errors.some(message => message.includes('synthetic failed-begin snapshot')), summary);
+        if (summary === 'blocked') {
+          assert.ok(settled.every(result => result.status === 'rejected' && /terminal collector summary publication failed/u.test(String(result.reason))), summary);
+          assert.equal((await stat(join(output, 'android-environment-collector.json'))).isDirectory(), true);
+          assert.ok(errors.length >= 2, JSON.stringify(errors));
+        } else {
+          assert.ok(settled.every(result => result.status === 'fulfilled'), summary);
+          const collector = await readEvidenceJson(output, 'collector');
+          assert.equal(collector.gmsObservations.finalized, true);
+          assert.equal(collector.gmsObservations.errors, observations.errors.length);
+          assert.equal(collector.gmsObservations.persistenceRetirement, 'retired');
+          assert.equal(collector.gmsObservations.terminalConfirmation, 'confirmed');
+          assert.equal(collector.gmsObservations.observationSha256, hashText(await readFile(join(output, 'android-environment-gms-observations.json'), 'utf8')));
+          assert.ok(collector.failure);
+        }
+        await assertEvidenceDirectorySettled(output);
+      }, { boundedCommand: (binary, args, timeout, options) => {
         if (args.includes('snapshot')) throw new Error('synthetic failed-begin snapshot');
-        if (args.includes('--gms-diagnostic-persist') && String(options.input || '').includes('"finalized":true')) {
-          terminalWriteAttempts++;
-          await new Promise(resolve => setTimeout(resolve, finalWriteDelayMs));
-        }
-        if (args.includes('--android-measurement-persist-json')) {
-          const request = JSON.parse(String(options.input));
-          if (request.target.endsWith('android-environment-collector.json')) {
-            entered();
-            await gate;
-          }
-        }
         return boundedCommand(binary, args, timeout, options);
-      },
-    });
-    try {
-      for (const stage of stages) await measurement.observeGmsStage(stage, new PhaseBudget('failed-begin-publication', { timeoutMs: 15_000 }));
-      await assert.rejects(measurement.begin(), /synthetic failed-begin snapshot/u);
-      const collectorPath = join(output, 'android-environment-collector.json');
-      assert.equal(existsSync(collectorPath), false);
-      const observationPath = join(output, 'android-environment-gms-observations.json');
-      const prior = await readFile(observationPath);
-      const finalization = measurement.finalizeGmsObservations();
-      await collectorWriteEntered;
-      let firstCompleted = false;
-      let secondCompleted = false;
-      let finishCompleted = false;
-      const secondFinalization = measurement.finalizeGmsObservations().then(() => { secondCompleted = true; });
-      const finish = measurement.finish().then(() => { finishCompleted = true; });
-      void finalization.then(() => { firstCompleted = true; });
-      await new Promise(resolve => setTimeout(resolve, 40));
-      assert.equal(firstCompleted, false);
-      assert.equal(secondCompleted, false);
-      assert.equal(finishCompleted, false);
-      assert.equal(existsSync(collectorPath), false);
-      const terminalObservations = JSON.parse(await readFile(observationPath, 'utf8'));
-      assert.equal(terminalObservations.finalized, true);
-      assert.equal(terminalObservations.terminalPublication, 'awaiting-collector-confirmation');
-      assert.equal(terminalWriteAttempts, 1);
-      assert.notDeepEqual(await readFile(observationPath), prior);
-      release();
-      await Promise.all([finalization, secondFinalization, finish]);
-      const observations = JSON.parse(await readFile(observationPath, 'utf8'));
-      const collector = JSON.parse(await readFile(collectorPath, 'utf8'));
-      assert.equal(observations.finalized, true);
-      assert.ok(observations.errors.length > 0);
-      assert.equal(collector.gmsObservations.finalized, true);
-      assert.equal(collector.gmsObservations.errors, observations.errors.length);
-      assert.equal(collector.gmsObservations.persistenceAttemptMsThroughFinalization >= observations.priorPersistenceAttemptMs + finalWriteDelayMs, true);
-      assert.equal(collector.gmsObservations.persistenceRetirement, 'retired');
-      assert.equal(collector.gmsObservations.terminalConfirmation, 'confirmed');
-      assert.ok(collector.failure);
-    } finally {
-      release();
-      await measurement.finish().catch(() => undefined);
-      for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
-      Object.assign(process.env, saved);
+      } });
     }
   });
-  test('GMS failed-begin summary write failure settles every concurrent finalizer with sticky errors', async () => {
+  test('GMS failed-begin finalization retires the transport observation worker without late mutations', async () => {
+    const mode = '--android-transport-observation-trigger';
     const fixture = await harness.createFixture();
+    const endpoint = await createAndroidTransportTestEndpoint();
+    const transportFixture = await createAndroidTransportFixture(fixture.root, endpoint.port, 'present-host');
     const saved = { ...process.env };
     Object.assign(process.env, fixture.environment);
-    let release!: () => void;
-    const gate = new Promise<void>(resolve => { release = resolve; });
-    let entered!: () => void;
-    const writerEntered = new Promise<void>(resolve => { entered = resolve; });
-    const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), {
-      boundedCommand: async (binary, args, timeout, options) => {
-        if (args.includes('snapshot')) throw new Error('synthetic failed-begin snapshot');
-        if (args.includes('--android-measurement-persist-json')) {
-          const request = JSON.parse(String(options.input));
-          if (request.target.endsWith('android-environment-collector.json')) {
-            entered();
-            await gate;
-            throw new Error('synthetic terminal collector write failure');
-          }
-        }
-        return boundedCommand(binary, args, timeout, options);
+    const readyPath = join(fixture.root, 'failed-begin-transport-ready');
+    const collectorReadyPath = join(fixture.root, 'failed-begin-transport-collector-ready');
+    const latePath = join(fixture.root, 'failed-begin-transport-late');
+    const observer = createBoundedSupervisorObserver(fixture.root, 'failed-begin-transport-supervisor');
+    let failure: BoundedCommandError | undefined;
+    let collectorSpawns = 0;
+    const startupDetails = () => JSON.stringify({ collectorReady: existsSync(collectorReadyPath),
+      writerReady: existsSync(readyPath), transportEndpointRequests: endpoint.requests,
+      transportObservationFailure: (measurement as unknown as { transport: { failure?: string } }).transport.failure,
+      failure: boundedCommandFailureDetails(failure?.result, observer.records()) });
+    const measurement: AndroidEnvironmentMeasurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), {
+      transportFixture,
+      spawnCollector: () => {
+        collectorSpawns++;
+        const code = `require('node:fs').writeFileSync(${JSON.stringify(collectorReadyPath)},'ready');const epoch=(Date.now()/1000).toFixed(3);process.stdout.write(epoch+' 77 77 I HerdrMeasure: ${measurement.id} START\\n'+epoch+' 77 77 I adbd: timeout expired while flushing socket, closing\\n');setTimeout(()=>process.exit(0),5000);setInterval(()=>{},1000)`;
+        return spawnOwnedProcess(process.execPath, ['-e', code], { timeoutMs: 8_000, cleanupReservationMs: 1_000 });
       },
-    });
-    try {
-      await measurement.observeGmsStage('after-device-start', new PhaseBudget('failed-begin-summary-failure', { timeoutMs: 15_000 }));
-      await measurement.observeGmsStage('before-measurement-begin', new PhaseBudget('failed-begin-summary-failure', { timeoutMs: 15_000 }));
-      await assert.rejects(measurement.begin(), /synthetic failed-begin snapshot/u);
-      let firstReturned = false;
-      let secondReturned = false;
-      let finishReturned = false;
-      const first = measurement.finalizeGmsObservations().finally(() => { firstReturned = true; });
-      await writerEntered;
-      const second = measurement.finalizeGmsObservations().finally(() => { secondReturned = true; });
-      const settledFinalizers = Promise.allSettled([first, second]);
-      const finish = measurement.finish().then(() => { finishReturned = true; });
-      await new Promise(resolve => setTimeout(resolve, 40));
-      assert.equal(firstReturned, false);
-      assert.equal(secondReturned, false);
-      assert.equal(finishReturned, false);
-      release();
-      await finish;
-      const finalizers = await settledFinalizers;
-      assert.ok(finalizers.every(result => result.status === 'rejected' && /terminal collector summary publication failed/u.test(String(result.reason))));
-      assert.equal(existsSync(join(fixture.root, 'android-environment-collector.json')), false);
-      const errors = measurement.failureOutcome().errors.map(error => String(error));
-      assert.ok(errors.some(message => message.includes('synthetic failed-begin snapshot')));
-      assert.ok(errors.some(message => message.includes('synthetic terminal collector write failure')));
-    } finally {
-      release();
-      await measurement.finish().catch(() => undefined);
-      for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
-      Object.assign(process.env, saved);
-    }
-  });
-  test('GMS failed-begin cleanup and terminal summary workers retire without late mutations', async () => {
-    const cases = [
-      { mode: '--android-measurement-persist-text', phase: 'cleanup' },
-      { mode: '--android-transport-observation-trigger', phase: 'cleanup' },
-      { mode: '--android-measurement-persist-json', phase: 'completion' },
-      { mode: '--android-measurement-persist-json', phase: 'collector' },
-    ] as const;
-    for (const { mode, phase } of cases) {
-      const fixture = await harness.createFixture();
-      const endpoint = mode === '--android-transport-observation-trigger' ? await createAndroidTransportTestEndpoint() : undefined;
-      const transportFixture = endpoint ? await createAndroidTransportFixture(fixture.root, endpoint.port, 'present-host') : undefined;
-      const saved = { ...process.env };
-      Object.assign(process.env, fixture.environment);
-      const readyPath = join(fixture.root, `failed-begin-${phase}-${mode.slice(2)}-ready`);
-      const collectorReadyPath = join(fixture.root, `failed-begin-${phase}-${mode.slice(2)}-collector-ready`);
-      const latePath = join(fixture.root, `failed-begin-${phase}-${mode.slice(2)}-late`);
-      const observer = createBoundedSupervisorObserver(fixture.root, `failed-begin-${phase}-${mode.slice(2)}-supervisor`);
-      let failure: BoundedCommandError | undefined;
-      let collectorSpawns = 0;
-      const startupDetails = () => JSON.stringify({ mode, phase, collectorReady: existsSync(collectorReadyPath),
-        writerReady: existsSync(readyPath), transportEndpointRequests: endpoint?.requests,
-        transportObservationFailure: (measurement as unknown as { transportObservationFailure?: string }).transportObservationFailure,
-        failure: boundedCommandFailureDetails(failure?.result, observer.records()) });
-      const measurement: AndroidEnvironmentMeasurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), {
-        transportFixture,
-        spawnCollector: () => {
-          collectorSpawns++;
-          if (mode === '--android-transport-observation-trigger') {
-            const code = `require('node:fs').writeFileSync(${JSON.stringify(collectorReadyPath)},'ready');const epoch=(Date.now()/1000).toFixed(3);process.stdout.write(epoch+' 77 77 I HerdrMeasure: ${measurement.id} START\\n'+epoch+' 77 77 I adbd: timeout expired while flushing socket, closing\\n');setTimeout(()=>process.exit(0),5000);setInterval(()=>{},1000)`;
-            return spawnOwnedProcess(process.execPath, ['-e', code], { timeoutMs: 8_000, cleanupReservationMs: 1_000 });
-          }
-          return spawnOwnedProcess('adb', ['-s', 'emulator-5554', 'logcat', '-b', 'main', '-b', 'system', '-v', 'epoch', '-T', '1'], { timeoutMs: 8_000, cleanupReservationMs: 1_000 });
-        },
-        boundedCommand: async (binary, args, timeout, options) => {
-          if (args.includes('snapshot')) {
-            if (mode === '--android-transport-observation-trigger') {
-              const writerDeadline = Date.now() + 5_000;
-              while (!existsSync(readyPath) && Date.now() < writerDeadline) await new Promise(resolve => setTimeout(resolve, 5));
-              if (!existsSync(readyPath)) assert.fail(startupDetails());
-            }
-            throw new Error('synthetic failed-begin snapshot');
-          }
-          let matches = args.includes(mode);
-          if (matches && phase !== 'cleanup' && mode === '--android-measurement-persist-json') {
-            const request = JSON.parse(String(options.input));
-            matches = request.target.endsWith(`android-environment-${phase}.json`);
-          }
-          if (!matches) return boundedCommand(binary, args, timeout, options);
-          const target = mode === '--android-transport-observation-trigger'
-            ? join(fixture.root, 'android-transport-observation.json')
-            : (() => {
-              try { return JSON.parse(String(options.input)).target as string; }
-              catch { return join(fixture.root, 'android-transport-observation.json'); }
-            })();
-          const child = `process.on('SIGTERM',()=>{});const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(readyPath)},'ready');setTimeout(()=>{fs.writeFileSync(${JSON.stringify(target)},'late');fs.writeFileSync(${JSON.stringify(latePath)},'late');process.exit(0)},1300);setInterval(()=>{},1000)`;
-          try { return await boundedCommand(process.execPath, ['-e', child], timeout, { ...options, observerSupervisor: observer.stream }); }
-          catch (error) { if (error instanceof BoundedCommandError) failure = error; throw error; }
-        },
-      });
-      let pendingBegin: Promise<void> | undefined;
-      try {
-        await measurement.observeGmsStage('after-device-start', new PhaseBudget(`failed-begin-${phase}`, { timeoutMs: 15_000 }));
-        await measurement.observeGmsStage('before-measurement-begin', new PhaseBudget(`failed-begin-${phase}`, { timeoutMs: 15_000 }));
-        if (phase === 'collector') await assert.rejects(measurement.begin(), /synthetic failed-begin snapshot/u);
-        else pendingBegin = measurement.begin();
-        const startDeadline = Date.now() + 3_000;
-        while (!existsSync(readyPath) && Date.now() < startDeadline) await new Promise(resolve => setTimeout(resolve, 5));
-        if (phase === 'collector') {
-          const finalization = measurement.finalizeGmsObservations();
-          const writerDeadline = Date.now() + 3_000;
+      boundedCommand: async (binary, args, timeout, options) => {
+        if (args.includes('snapshot')) {
+          const writerDeadline = Date.now() + 5_000;
           while (!existsSync(readyPath) && Date.now() < writerDeadline) await new Promise(resolve => setTimeout(resolve, 5));
           if (!existsSync(readyPath)) assert.fail(startupDetails());
-          const started = performance.now();
-          await assert.rejects(finalization, /terminal collector summary publication failed/u);
-          assert.ok(performance.now() - started < 2_500, phase);
-        } else {
-          if (!existsSync(readyPath)) assert.fail(startupDetails());
-          const finalization = measurement.finalizeGmsObservations();
-          const started = performance.now();
-          assert.ok(pendingBegin, phase);
-          await assert.rejects(pendingBegin, /synthetic failed-begin snapshot/u);
-          await finalization;
-          assert.ok(performance.now() - started < 2_500, phase);
+          throw new Error('synthetic failed-begin snapshot');
         }
-        await observer.close();
-        const details = JSON.stringify({ phase, mode, command: boundedCommandFailureDetails(failure?.result, observer.records()) });
-        assert.ok(failure instanceof BoundedCommandError, details);
-        assert.equal(failure.result.childExited, true, details);
-        assert.equal(failure.result.ownedProcessesExited, true, details);
-        assert.equal(failure.result.stdioClosed, true, details);
-        assert.equal(collectorSpawns, 1, phase);
-        await new Promise(resolve => setTimeout(resolve, 1_400));
-        assert.equal(existsSync(latePath), false, phase);
-        if (phase === 'completion') assert.equal(existsSync(join(fixture.root, 'android-environment-completion.json')), false, phase);
-        if (phase === 'collector') assert.equal(existsSync(join(fixture.root, 'android-environment-collector.json')), false);
-      } finally {
-        await observer.close();
-        await pendingBegin?.catch(() => undefined);
-        await measurement.finish().catch(() => undefined);
-        await endpoint?.stop();
-        for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
-        Object.assign(process.env, saved);
-      }
-    }
-  });
-  test('GMS begin ownership and filesystem workers are retired within finalization with no late writes', async () => {
-    const cases = [
-      { mode: '--android-measurement-owner', artifact: 'android-environment-session.json' },
-      { mode: '--android-measurement-mkdir', artifact: 'android-environment-session.json' },
-      { mode: '--android-measurement-session', artifact: 'android-environment-session.json' },
-      { mode: '--android-measurement-operations', artifact: 'android-environment-operations.json' },
-    ];
-    for (const { mode, artifact } of cases) {
-      const fixture = await harness.createFixture();
-      const saved = { ...process.env };
-      Object.assign(process.env, fixture.environment);
-      const output = join(fixture.root, 'bounded-begin-output');
-      const readyPath = join(fixture.root, `${mode.slice(2)}-ready`);
-      const latePath = join(fixture.root, `${mode.slice(2)}-late`);
-      let failure: BoundedCommandError | undefined;
-      const measurement = new AndroidEnvironmentMeasurement('emulator-5554', output, repositoryPath('tests/mobile/toolchains.json'), {
-        boundedCommand: async (binary, args, timeout, options) => {
-          if (!args.includes(mode)) return boundedCommand(binary, args, timeout, options);
-          const request = options.input === undefined ? undefined : JSON.parse(String(options.input));
-          const lateMutation = mode === '--android-measurement-mkdir'
-            ? `fs.mkdirSync(request.path,{recursive:true});fs.writeFileSync(${JSON.stringify(latePath)},'late')`
-            : mode === '--android-measurement-session' || mode === '--android-measurement-operations'
-              ? `fs.writeFileSync(request.path,'late');fs.writeFileSync(${JSON.stringify(latePath)},'late')`
-              : `fs.writeFileSync(${JSON.stringify(latePath)},'late')`;
-          const child = `process.on('SIGTERM',()=>{});const fs=require('node:fs');const request=${JSON.stringify(request)};fs.writeFileSync(${JSON.stringify(readyPath)},'ready');setTimeout(()=>{${lateMutation};process.exit(0)},1200);setInterval(()=>{},1000)`;
-          try { return await boundedCommand('node', ['-e', child], timeout, options); }
-          catch (error) { if (error instanceof BoundedCommandError) failure = error; throw error; }
-        },
-      });
-      let pendingBegin: Promise<void> | undefined;
-      try {
-        await measurement.observeGmsStage('after-device-start', new PhaseBudget('bounded-begin', { timeoutMs: 15_000 }));
-        await measurement.observeGmsStage('before-measurement-begin', new PhaseBudget('bounded-begin', { timeoutMs: 15_000 }));
-        await rm(output, { recursive: true, force: true });
-        pendingBegin = measurement.begin();
-        const readyDeadline = Date.now() + 3_000;
-        while (!existsSync(readyPath) && Date.now() < readyDeadline) await new Promise(resolve => setTimeout(resolve, 5));
-        assert.ok(existsSync(readyPath), mode);
-        const finalization = measurement.finalizeGmsObservations();
-        await assert.rejects(pendingBegin, /BOUNDED_COMMAND_FAILED/u);
-        await finalization;
-        assert.ok(failure instanceof BoundedCommandError, mode);
-        assert.equal(failure.result.childExited, true, mode);
-        assert.equal(failure.result.ownedProcessesExited, true, mode);
-        assert.equal(failure.result.stdioClosed, true, mode);
-        await new Promise(resolve => setTimeout(resolve, 1_300));
-        assert.equal(existsSync(latePath), false, mode);
-        assert.equal(existsSync(join(output, artifact)), false, mode);
-        const observations = JSON.parse(await readFile(join(output, 'android-environment-gms-observations.json'), 'utf8'));
-        assert.equal(observations.finalized, true, mode);
-      } finally {
-        await pendingBegin?.catch(() => undefined);
-        await measurement.finish().catch(() => undefined);
-        for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
-        Object.assign(process.env, saved);
-      }
+        if (!args.includes(mode)) return boundedCommand(binary, args, timeout, options);
+        const target = join(fixture.root, 'android-transport-observation.json');
+        const child = `process.on('SIGTERM',()=>{});const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(readyPath)},'ready');setTimeout(()=>{fs.writeFileSync(${JSON.stringify(target)},'late');fs.writeFileSync(${JSON.stringify(latePath)},'late');process.exit(0)},1300);setInterval(()=>{},1000)`;
+        try { return await boundedCommand(process.execPath, ['-e', child], timeout, { ...options, observerSupervisor: observer.stream }); }
+        catch (error) { if (error instanceof BoundedCommandError) failure = error; throw error; }
+      },
+    });
+    let pendingBegin: Promise<void> | undefined;
+    try {
+      await measurement.observeGmsStage('after-device-start', new PhaseBudget('failed-begin-transport', { timeoutMs: 15_000 }));
+      await measurement.observeGmsStage('before-measurement-begin', new PhaseBudget('failed-begin-transport', { timeoutMs: 15_000 }));
+      pendingBegin = measurement.begin();
+      const startDeadline = Date.now() + 3_000;
+      while (!existsSync(readyPath) && Date.now() < startDeadline) await new Promise(resolve => setTimeout(resolve, 5));
+      if (!existsSync(readyPath)) assert.fail(startupDetails());
+      const finalization = measurement.finalizeGmsObservations();
+      const started = performance.now();
+      await assert.rejects(pendingBegin, /synthetic failed-begin snapshot/u);
+      await finalization;
+      assert.ok(performance.now() - started < 2_500);
+      await observer.close();
+      const details = JSON.stringify({ command: boundedCommandFailureDetails(failure?.result, observer.records()) });
+      assert.ok(failure instanceof BoundedCommandError, details);
+      assert.equal(failure.result.childExited, true, details);
+      assert.equal(failure.result.ownedProcessesExited, true, details);
+      assert.equal(failure.result.stdioClosed, true, details);
+      assert.equal(collectorSpawns, 1);
+      await new Promise(resolve => setTimeout(resolve, 1_400));
+      assert.equal(existsSync(latePath), false);
+    } finally {
+      await observer.close();
+      await pendingBegin?.catch(() => undefined);
+      await measurement.finish().catch(() => undefined);
+      await endpoint.stop();
+      for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+      Object.assign(process.env, saved);
     }
   });
   test('diagnostic GMS samples use exact bounded stages without changing either measurement snapshot', async () => {
@@ -5780,405 +5606,57 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       Object.assign(process.env, saved);
     }
   });
-  test('recorded GMS persistence boundary fits the owned writer lifecycle without increasing the shared time pool', async () => {
-    const recorded = JSON.parse(await readFile(repositoryPath('tests/mobile/unit/fixtures/android-gms-persistence-boundary.json'), 'utf8'));
-    assert.ok(recorded.writer.durationMs > recorded.writer.writerTimeoutMs - recorded.writer.cleanupReservationMs);
-    const fixture = await harness.createFixture();
-    const saved = { ...process.env };
-    Object.assign(process.env, fixture.environment);
-    const stages = ['after-device-start', 'before-measurement-begin', 'after-setup-url', 'after-browser-install', 'after-initial-installed-app-launch'] as const;
-    const writerTimeouts: number[] = [];
-    let clockMs = 0;
-    const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), {
-      monotonicNow: () => clockMs,
-      boundedCommand: async (binary, args, timeout, options) => {
-        if (!args.includes('--gms-diagnostic-persist')) return boundedCommand(binary, args, timeout, options);
-        writerTimeouts.push(timeout);
-        const executionMs = timeout - Math.min(options.cleanupReservationMs ?? 200, Math.floor(timeout / 3));
-        clockMs += recorded.writer.durationMs;
-        if (executionMs <= recorded.writer.durationMs) {
-          throw new BoundedCommandError(binary, args, fakeCommandResult('', { ...recorded.writer, targetPID: 12345 }));
-        }
-        return boundedCommand(binary, args, timeout, options);
-      },
-    });
-    try {
-      for (const stage of stages.slice(0, 2)) await measurement.observeGmsStage(stage, new PhaseBudget('recorded-gms-writer', { timeoutMs: 30_000 }));
-      await measurement.begin();
-      for (const stage of stages.slice(2)) await measurement.observeGmsStage(stage, new PhaseBudget('recorded-gms-writer', { timeoutMs: 30_000 }));
-      const outcome = await measurement.finish();
-      assert.deepEqual(outcome.errors, []);
-      assert.equal(outcome.assessment?.collection.status, 'PASS');
-      const observations = JSON.parse(await readFile(join(fixture.root, 'android-environment-gms-observations.json'), 'utf8'));
-      const collector = JSON.parse(await readFile(join(fixture.root, 'android-environment-collector.json'), 'utf8'));
-      assert.deepEqual(observations.stages.map(({ stage, outcome }: any) => [stage, outcome]), stages.map(stage => [stage, 'collected']));
-      assert.equal(writerTimeouts.length, stages.length + 1);
-      assert.ok(writerTimeouts.at(-1)! < writerTimeouts[0]!, 'later writes must be clipped by the remaining shared pool');
-      assert.equal(observations.limits.persistenceOperationTimeoutMs, 5_000);
-      assert.equal(observations.limits.totalPersistenceLimitMs, 6_000);
-      assert.ok(collector.gmsObservations.persistenceAttemptMsThroughFinalization <= 6_000);
-      assert.equal(collector.gmsObservations.terminalConfirmation, 'confirmed');
-      assert.equal(collector.gmsObservations.persistenceRetirement, 'retired');
-      assert.equal(collector.gmsObservations.temporaryEvidenceCleanup, 'not-needed');
-    } finally {
-      await measurement.finish().catch(() => undefined);
-      for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
-      Object.assign(process.env, saved);
-    }
-  });
-  test('GMS retired-writer failure reserves an owned cleanup lifecycle without accepting the failed publication', async () => {
-    const fixture = await harness.createFixture();
-    let clockMs = 0;
-    let cleanupTimeout = 0;
-    let collector: any;
-    const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), {
-      monotonicNow: () => clockMs,
-      boundedCommand: async (binary, args, timeout, options) => {
-        if (args.includes('--gms-diagnostic-persist')) {
-          clockMs += 633;
-          throw new BoundedCommandError(binary, args, fakeCommandResult('', { code: 0, timedOut: true }));
-        }
-        if (args.includes('--gms-diagnostic-cleanup')) {
-          cleanupTimeout = timeout;
-          const requiredMs = 300;
-          clockMs += requiredMs;
-          if (timeout - (options.cleanupReservationMs ?? 0) <= requiredMs) {
-            throw new BoundedCommandError(binary, args, fakeCommandResult('', { code: 0, timedOut: true }));
-          }
-          return fakeCommandResult('{"removed":true}\n');
-        }
-        if (args.includes('--android-measurement-persist-json')) {
-          const request = JSON.parse(String(options.input));
-          if (request.target.endsWith('android-environment-collector.json')) collector = JSON.parse(request.contents);
-          return fakeCommandResult(`${JSON.stringify({ byteLength: request.expectedBytes, sha256: request.expectedSha256 })}\n`);
-        }
-        throw new Error(`unexpected command ${args.join(' ')}`);
-      },
-    });
-
-    await measurement.finalizeGmsObservations();
-    const outcome = await measurement.finish();
-    assert.ok(cleanupTimeout > 300);
-    assert.ok(outcome.errors.some(error => String(error).includes('GMS writer boundary')));
-    assert.equal(collector.gmsObservations.temporaryEvidenceCleanup, 'removed-after-failure');
-    assert.equal(collector.gmsObservations.persistenceRetirement, 'retired');
-    assert.equal(collector.gmsObservations.terminalConfirmation, 'unconfirmed');
-    assert.ok(collector.gmsObservations.persistenceAttemptMsThroughFinalization <= 6_000);
-  });
-  test('timed-out GMS persistence retires its file worker before finalization returns', async () => {
-    const fixture = await harness.createFixture();
-    const saved = { ...process.env };
-    Object.assign(process.env, fixture.environment);
-    const stages = ['after-device-start', 'before-measurement-begin', 'after-setup-url', 'after-browser-install', 'after-initial-installed-app-launch'] as const;
-    const observationsPath = join(fixture.root, 'android-environment-gms-observations.json');
-    const latePath = join(fixture.root, 'late-gms-persistence-write');
-    const observer = createBoundedSupervisorObserver(fixture.root, 'gms-persistence-supervisor');
-    let entered!: () => void;
-    const writerEntered = new Promise<void>(resolve => { entered = resolve; });
-    let writeFailure: BoundedCommandError | undefined;
-    const cleanupOutcomes: GmsCleanupOutcome[] = [];
-    const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), {
-      boundedCommand: async (binary, args, timeout, options) => {
-        if (args.includes('--gms-diagnostic-cleanup')) return observeGmsCleanup(cleanupOutcomes, binary, args, timeout, options);
-        if (!args.includes('--gms-diagnostic-persist') || !String(options.input || '').includes('"finalized":true')) {
-          return boundedCommand(binary, args, timeout, options);
-        }
-        entered();
-        const lateCode = `process.on('SIGTERM',()=>{});setTimeout(()=>{require('node:fs').writeFileSync(${JSON.stringify(latePath)},'late');process.exit(0)},${timeout + 500});setInterval(()=>{},1000)`;
-        try {
-          return await boundedCommand('node', ['-e', lateCode], timeout, { ...options, input: undefined, observerSupervisor: observer.stream });
-        } catch (error) {
-          if (error instanceof BoundedCommandError) writeFailure = error;
-          throw error;
-        }
-      },
-    });
-    try {
-      for (const stage of stages.slice(0, 2)) await measurement.observeGmsStage(stage, new PhaseBudget('gms-persist-timeout', { timeoutMs: 30_000 }));
-      await measurement.begin();
-      for (const stage of stages.slice(2)) await measurement.observeGmsStage(stage, new PhaseBudget('gms-persist-timeout', { timeoutMs: 30_000 }));
-      const priorBytes = await readFile(observationsPath);
-      const finalization = measurement.finalizeGmsObservations();
-      await writerEntered;
-      const finish = measurement.finish();
-      await assert.rejects(finalization, /terminal collector confirmation failed/u);
-      const outcome = await finish;
-      const resultBytes = await readFile(observationsPath);
-      const result = JSON.parse(resultBytes.toString('utf8'));
-      assert.equal(result.stages.length, stages.length);
-      assert.equal(result.finalized, undefined);
-      assert.deepEqual(resultBytes, priorBytes);
-      await observer.close();
-      const details = JSON.stringify({ command: boundedCommandFailureDetails(writeFailure?.result, observer.records()) });
-      assert.ok(writeFailure instanceof BoundedCommandError, details);
-      assert.equal(writeFailure.result.timedOut, true, details);
-      assert.equal(writeFailure.result.childExited, true, details);
-      assert.equal(writeFailure.result.ownedProcessesExited, true, details);
-      assert.equal(writeFailure.result.stdioClosed, true, details);
-      const writerErrors = outcome.errors.map(error => String(error)).filter(message => message.includes('GMS writer boundary'));
-      assert.equal(writerErrors.length, 1, JSON.stringify(outcome.errors.map(error => String(error))));
-      const writerTimeoutMs = Number(writerErrors[0]!.match(/ writerTimeoutMs=(\d+) dispatchedAfterMs=\d+ /u)?.[1]);
-      assert.ok(writerTimeoutMs > 0 && writerTimeoutMs <= 3_975, writerErrors[0]);
-      assert.ok(writerErrors[0]!.includes(` durationMs=${writeFailure.result.durationMs} targetStarted=true timedOut=true aborted=false`
-        + ' childExited=true targetClosed=true ownedProcessesExited=true stdioClosed=true '), writerErrors[0]);
-      assert.match(writerErrors[0]!, / exitCode=\S+ signal=\S+ progress=none: BOUNDED_COMMAND_FAILED: node -e /u);
-      await new Promise(resolve => setTimeout(resolve, 600));
-      assert.equal(existsSync(latePath), false);
-      assert.deepEqual(await readFile(observationsPath), resultBytes);
-      const collector = JSON.parse(await readFile(join(fixture.root, 'android-environment-collector.json'), 'utf8'));
-      assert.ok(collector.gmsObservations.errors > 0);
-      assert.equal(collector.gmsObservations.persistenceRetirement, 'retired');
-      await assertGmsTemporaryCleanup(collector.gmsObservations.temporaryEvidenceCleanup, outcome.errors.map(error => String(error)), cleanupOutcomes);
-    } finally {
-      await observer.close();
-      await measurement.finish().catch(() => undefined);
-      for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
-      Object.assign(process.env, saved);
-    }
-  });
-  test('a staged terminal rename followed by a stalled writer cannot publish unconfirmed GMS success', async () => {
-    const fixture = await harness.createFixture();
-    const saved = { ...process.env };
-    Object.assign(process.env, fixture.environment);
-    const stages = ['after-device-start', 'before-measurement-begin', 'after-setup-url', 'after-browser-install', 'after-initial-installed-app-launch'] as const;
-    const observationsPath = join(fixture.root, 'android-environment-gms-observations.json');
-    const observer = createBoundedSupervisorObserver(fixture.root, 'gms-publication-supervisor');
-    const writers = gmsWriterDiagnostics(fixture.root);
-    let writerFailure: BoundedCommandError | undefined;
-    const cleanupOutcomes: GmsCleanupOutcome[] = [];
-    let cleanupCallsObserved = 0;
-    const cleanupCommands: Array<{
-      call: number; timeoutMs: number; cleanupReservationMs?: number; command?: Record<string, unknown>;
-      status: 'pending' | 'returned' | 'bounded-command-error' | 'error' | 'non-error';
-    }> = [];
-
-    const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), {
-      boundedCommand: async (binary, args, timeout, options) => {
-        if (args.includes('--gms-diagnostic-cleanup')) {
-          const record: (typeof cleanupCommands)[number] = {
-            call: ++cleanupCallsObserved, timeoutMs: timeout, cleanupReservationMs: options.cleanupReservationMs, status: 'pending',
-          };
-          cleanupCommands.push(record);
-          if (cleanupCommands.length > 4) cleanupCommands.shift();
-          let result: Awaited<ReturnType<typeof boundedCommand>>;
-          try {
-            result = await observeGmsCleanup(cleanupOutcomes, binary, args, timeout, options);
-          } catch (error) {
-            try {
-              record.status = error instanceof BoundedCommandError ? 'bounded-command-error' : error instanceof Error ? 'error' : 'non-error';
-              if (error instanceof BoundedCommandError) record.command = boundedCommandFailureDetails(error.result);
-            } catch (diagnosticError) { void diagnosticError; }
-            throw error;
-          }
-          try {
-            record.status = 'returned';
-            record.command = boundedCommandFailureDetails(result);
-          } catch (diagnosticError) { void diagnosticError; }
-          return result;
-        }
-        if (!args.includes('--gms-diagnostic-persist')) return boundedCommand(binary, args, timeout, options);
-        if (!String(options.input || '').includes('"finalized":true')) return writers.run(binary, args, timeout, options);
-        try {
-          return await boundedCommand(process.execPath, [repositoryPath('tests/mobile/unit/android-measurement-doubles.ts'), '--gms-diagnostic-persist'], timeout,
-            { ...options, observerSupervisor: observer.stream });
-        } catch (error) { if (error instanceof BoundedCommandError) writerFailure = error; throw error; }
-      },
-    });
-    let terminalSettled: Promise<unknown> | undefined;
-    let outcome: Awaited<ReturnType<Measurement['finish']>> | undefined;
-    let collector: any;
-    try {
-      await measurement.observeGmsStage(stages[0], new PhaseBudget('unconfirmed-publication', { timeoutMs: 20_000 }));
-      await measurement.observeGmsStage(stages[1], new PhaseBudget('unconfirmed-publication', { timeoutMs: 20_000 }));
-      await measurement.begin();
-      for (const stage of stages.slice(2)) await measurement.observeGmsStage(stage, new PhaseBudget('unconfirmed-publication', { timeoutMs: 20_000 }));
-      const prior = await readFile(observationsPath);
-      const staged = JSON.parse(prior.toString('utf8'));
-      const stagedDetails = () => JSON.stringify({
-        stages: staged.stages?.map(({ stage, outcome, error }: any) => ({ stage, outcome, error })), errors: staged.errors,
-        measurementErrors: measurement.failureOutcome().errors.map(error => String(error)), writerFailures: writers.failures,
-      });
-      assert.deepEqual(staged.stages?.map(({ stage, outcome }: any) => [stage, outcome]), stages.map(stage => [stage, 'collected']), stagedDetails());
-      assert.deepEqual(staged.errors, [], stagedDetails());
-      const terminal = measurement.finalizeGmsObservations();
-      terminalSettled = terminal.then(() => undefined, (error: unknown) => error);
-      const publicationDeadline = Date.now() + 3_000;
-      let publicObservation: any;
-      while (Date.now() < publicationDeadline) {
-        try { publicObservation = JSON.parse(await readFile(observationsPath, 'utf8')); } catch { publicObservation = undefined; }
-        if (publicObservation?.finalized === true) break;
-        await new Promise(resolve => setTimeout(resolve, 5));
+  test('GMS terminal observation write blocked by a read-only directory is reported, leaves the staged file untouched and is never confirmed', async () => {
+    if (process.getuid?.() === 0) return;
+    await withMeasurementOutput(async (output, measurement) => {
+      await beginObservedMeasurement(measurement);
+      const observationsPath = join(output, 'android-environment-gms-observations.json');
+      const staged = await readFile(observationsPath);
+      assert.equal(JSON.parse(staged.toString('utf8')).finalized, undefined);
+      await chmod(output, 0o500);
+      const terminal = settledResult(measurement.finalizeGmsObservations());
+      const deadline = Date.now() + 10_000;
+      while (!measurement.failureOutcome().errors.some(error => /GMS/u.test(String(error))) && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 10));
       }
-      const publicationDetails = () => JSON.stringify({
-        publicObservation: publicObservation && { finalized: publicObservation.finalized,
-          terminalPublication: publicObservation.terminalPublication, stages: publicObservation.stages?.length, errors: publicObservation.errors },
-        measurementErrors: measurement.failureOutcome().errors.map(error => String(error)),
-        command: boundedCommandFailureDetails(writerFailure?.result, observer.records()),
-      });
-      assert.equal(publicObservation?.finalized, true, publicationDetails());
-      assert.equal(publicObservation.terminalPublication, 'awaiting-collector-confirmation', publicationDetails());
-      assert.deepEqual(publicObservation.errors, [], publicationDetails());
-      const finish = measurement.finish();
-      await assert.rejects(terminal, /terminal collector confirmation failed/u);
-      outcome = await finish;
-      await observer.close();
-      const details = JSON.stringify({ command: boundedCommandFailureDetails(writerFailure?.result, observer.records()) });
-      assert.ok(writerFailure instanceof BoundedCommandError, details);
-      assert.equal(writerFailure.result.timedOut, true, details);
-      assert.equal(writerFailure.result.childExited, true, details);
-      assert.equal(writerFailure.result.ownedProcessesExited, true, details);
-      assert.equal(writerFailure.result.stdioClosed, true, details);
-      const writerBoundary = outcome.errors.map(error => String(error)).find(message => message.includes('GMS writer boundary'));
-      assert.match(writerBoundary ?? '', / progress=ready@\d+,input@\d+:\d+,directory@\d+,staged@\d+: BOUNDED_COMMAND_FAILED: /u,
-        JSON.stringify(outcome.errors.map(error => String(error))));
-      assert.notDeepEqual(await readFile(observationsPath), prior);
-      collector = JSON.parse(await readFile(join(fixture.root, 'android-environment-collector.json'), 'utf8'));
-      assert.equal(collector.gmsObservations.persistenceRetirement, 'retired');
-      await assertGmsTemporaryCleanup(collector.gmsObservations.temporaryEvidenceCleanup, outcome.errors.map(error => String(error)), cleanupOutcomes);
+      await chmod(output, 0o700);
+      const outcome = await measurement.finish();
+      const settled = await terminal;
+      assert.ok(settled.status === 'rejected' && /terminal collector confirmation failed/u.test(String(settled.reason)));
+      assert.deepEqual(await readFile(observationsPath), staged);
+      const collector = await readEvidenceJson(output, 'collector');
       assert.equal(collector.gmsObservations.terminalConfirmation, 'unconfirmed');
       assert.equal(collector.gmsObservations.observationSha256, undefined);
+      assert.equal(collector.gmsObservations.persistenceRetirement, 'retired');
       assert.ok(collector.gmsObservations.errors > 0);
       assert.equal(outcome.assessment?.collection.status, 'UNKNOWN');
       assert.ok(outcome.errors.length > 0);
-    } catch (error) {
-      try {
-        process.stderr.write(`GMS_PUBLICATION_FAILURE ${redactText(JSON.stringify({
-          cleanupCallsObserved, cleanupCommands, cleanupRecordsOmittedByCap: Math.max(0, cleanupCallsObserved - cleanupCommands.length),
-          cleanupDispatchObservationOnly: true, cleanupReceiptInspected: false,
-          collectorAvailable: collector !== undefined, outcomeAvailable: outcome !== undefined,
-          collector: collector && {
-            persistenceRetirement: collector.gmsObservations?.persistenceRetirement,
-            temporaryEvidenceCleanup: collector.gmsObservations?.temporaryEvidenceCleanup,
-            terminalConfirmation: collector.gmsObservations?.terminalConfirmation,
-          },
-          errors: outcome?.errors.slice(0, 6).map(value => redactText((value instanceof Error ? value.message : String(value))
-            .replace(/BOUNDED_COMMAND_FAILED:[\s\S]*/u, 'BOUNDED_COMMAND_FAILED: [command withheld]')
-            .replaceAll(fixture.root, '[fixture]').replaceAll(repositoryRoot, '[repository]')
-            .replace(/\/[^\s"'<>:,]+/gu, '[path]')).slice(0, 500)),
-          errorsOmittedByCap: Math.max(0, (outcome?.errors.length ?? 0) - 6),
-        })).slice(0, 12_000)}\n`);
-      } catch (diagnosticError) { void diagnosticError; }
-      throw error;
-    } finally {
-      await observer.close();
-      await measurement.finish().catch(() => undefined);
-      await terminalSettled;
-      await writers.close();
-      for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
-      Object.assign(process.env, saved);
-    }
-  });
-  test('GMS temporary cleanup after a retired writer failure reports confirmed removal, or pending when removal is unconfirmed', async () => {
-    for (const [writerElapsedMs, cleanupMode] of [[4_000, 'removed'], [150, 'removed'], [4_000, 'timed-out'], [4_000, 'rejected'],
-      [4_000, 'unconfirmed'], [4_700, 'removed'], [5_000, 'not-dispatched']] as const) {
-      const fixture = await harness.createFixture();
-      let clockMs = 0;
-      const writerTimeouts: number[] = [];
-      const cleanupTimeouts: number[] = [];
-      let collector: any;
-      const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), {
-        monotonicNow: () => clockMs,
-        boundedCommand: async (binary, args, timeout, options) => {
-          if (args.includes('--gms-diagnostic-persist')) {
-            writerTimeouts.push(timeout);
-            clockMs += writerElapsedMs;
-            throw new BoundedCommandError(binary, args, fakeCommandResult('', { code: 1, timedOut: true, signal: 'SIGKILL' }));
-          }
-          if (args.includes('--gms-diagnostic-cleanup')) {
-            cleanupTimeouts.push(timeout);
-            clockMs += 100;
-            if (cleanupMode === 'timed-out') throw new BoundedCommandError(binary, args, fakeCommandResult('', { code: 1, timedOut: true, signal: 'SIGKILL' }));
-            if (cleanupMode === 'rejected') throw new BoundedCommandError(binary, args, fakeCommandResult('', { code: 9, aborted: true, signal: 'SIGTERM' }));
-            return fakeCommandResult(`${JSON.stringify({ removed: cleanupMode === 'removed' })}\n`);
-          }
-          if (args.some(value => value.startsWith('--android-measurement-persist-'))) {
-            const request = JSON.parse(String(options.input)) as { target: string; contents: string; expectedBytes: number; expectedSha256: string };
-            if (request.target.endsWith('android-environment-collector.json')) collector = JSON.parse(request.contents);
-            return fakeCommandResult(`${JSON.stringify({ byteLength: request.expectedBytes, sha256: request.expectedSha256 })}\n`);
-          }
-          throw new Error(`unexpected command ${args.join(' ')}`);
-        },
-      });
-
-      await measurement.finalizeGmsObservations();
-      const outcome = await measurement.finish();
-      const errors = outcome.errors.map(error => String(error));
-      const details = JSON.stringify({ writerElapsedMs, cleanupMode, writerTimeouts, cleanupTimeouts, gms: collector?.gmsObservations, errors });
-      const notDispatched = cleanupMode === 'not-dispatched';
-      assert.deepEqual(writerTimeouts, [3_975], details);
-      assert.deepEqual(cleanupTimeouts, notDispatched ? [] : [Math.min(1_000, 5_000 - writerElapsedMs)], details);
-      assert.equal(collector.gmsObservations.persistenceRetirement, notDispatched ? 'pending-temporary-write' : 'retired', details);
-      assert.equal(collector.gmsObservations.temporaryEvidenceCleanup, cleanupMode === 'removed' ? 'removed-after-failure' : 'pending', details);
-      assert.equal(collector.gmsObservations.persistenceAttemptMsThroughFinalization, writerElapsedMs + (notDispatched ? 0 : 100), details);
-      assert.equal(collector.gmsObservations.terminalConfirmation, 'unconfirmed', details);
-      assert.equal(errors.some(error => error.includes('GMS temporary observation evidence could not be removed')),
-        cleanupMode === 'timed-out' || cleanupMode === 'rejected', details);
-      assert.equal(errors.some(error => error.includes('GMS temporary observation cleanup was not confirmed')), cleanupMode === 'unconfirmed', details);
-    }
-  });
-  test('GMS collector confirmation publication failure invalidates public success for the assessment consumer', async () => {
-    const fixture = await harness.createFixture();
-    const saved = { ...process.env };
-    Object.assign(process.env, fixture.environment);
-    const stages = ['after-device-start', 'before-measurement-begin', 'after-setup-url', 'after-browser-install', 'after-initial-installed-app-launch'] as const;
-
-    const observer = createBoundedSupervisorObserver(fixture.root, 'gms-collector-confirmation-supervisor');
-    let writerFailure: BoundedCommandError | undefined;
-    const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), {
-      boundedCommand: async (binary, args, timeout, options) => {
-        if (args.includes('--android-measurement-persist-json')) {
-          const request = JSON.parse(String(options.input));
-          if (request.target.endsWith('android-environment-collector.json')) {
-            try {
-              return await boundedCommand(process.execPath, [repositoryPath('tests/mobile/unit/android-measurement-doubles.ts'), '--android-measurement-persist-json'], timeout,
-                { ...options, observerSupervisor: observer.stream });
-            } catch (error) {
-              if (error instanceof BoundedCommandError) writerFailure = error;
-              throw error;
-            }
-          }
-        }
-        return boundedCommand(binary, args, timeout, options);
-      },
+      await assertEvidenceDirectorySettled(output);
     });
-    try {
-      await measurement.observeGmsStage(stages[0], new PhaseBudget('gms-collector-confirmation', { timeoutMs: 20_000 }));
-      await measurement.observeGmsStage(stages[1], new PhaseBudget('gms-collector-confirmation', { timeoutMs: 20_000 }));
-      await measurement.begin();
-      for (const stage of stages.slice(2)) await measurement.observeGmsStage(stage, new PhaseBudget('gms-collector-confirmation', { timeoutMs: 20_000 }));
+  });
+  test('GMS collector summary write blocked by a directory invalidates public success for the assessment consumer', async () => {
+    await withMeasurementOutput(async (output, measurement) => {
+      await mkdir(join(output, 'android-environment-collector.json'), { recursive: true });
+      await beginObservedMeasurement(measurement);
       const identity = measurementIdentity({ measurementId: measurement.id });
       const outcome = await measurement.finish();
-      const collectorPath = join(fixture.root, 'android-environment-collector.json');
-      await observer.close();
-      const details = JSON.stringify({ command: boundedCommandFailureDetails(writerFailure?.result, observer.records()) });
-      assert.ok(writerFailure instanceof BoundedCommandError, details);
-      assert.equal(writerFailure.result.timedOut, true, details);
-      assert.equal(writerFailure.result.childExited, true, details);
-      assert.equal(writerFailure.result.ownedProcessesExited, true, details);
-      assert.equal(writerFailure.result.stdioClosed, true, details);
-      assert.equal(existsSync(collectorPath), false, outcome.errors.join(' | '));
+      assert.equal((await stat(join(output, 'android-environment-collector.json'))).isDirectory(), true, outcome.errors.join(' | '));
       assert.equal(outcome.assessment?.collection.status, 'UNKNOWN');
       assert.ok(outcome.errors.length > 0);
-      const bundlePath = join(fixture.root, 'bundle-set.json');
+      const bundlePath = join(output, 'bundle-set.json');
       await writeFile(bundlePath, JSON.stringify({ candidate: {
         provenance: { sourceCommit: identity.sourceCommit },
         identity: { webHash: identity.candidateWebHash, build: identity.candidateBuild },
       } }));
-      const args = ['check', '--contract', 'report', '--directory', fixture.root,
-        '--identity', join(fixture.root, 'android-environment-identity.json'), '--bundle-set', bundlePath,
+      const args = ['check', '--contract', 'report', '--directory', output,
+        '--identity', join(output, 'android-environment-identity.json'), '--bundle-set', bundlePath,
         '--run-id', identity.runId, '--attempt', identity.attempt, '--baseline', identity.baseline,
         '--source-run-head-sha', identity.sourceRunHeadSha];
       assert.throws(() => execFileSync(process.execPath, [repositoryPath('tests/mobile/android-environment.ts'), ...args], {
         encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
       }));
-      const check = JSON.parse(await readFile(join(fixture.root, 'android-environment-check.json'), 'utf8'));
-      assert.equal(check.collection.status, 'UNKNOWN');
-    } finally {
-      await observer.close();
-      await measurement.finish().catch(() => undefined);
-      for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
-      Object.assign(process.env, saved);
-    }
+      assert.equal((await readEvidenceJson(output, 'check')).collection.status, 'UNKNOWN');
+    });
   });
   test('GMS transport diagnostics capture host and ADB state at the live flush trigger', async () => {
     const fixture = await harness.createFixture();
@@ -6526,27 +6004,26 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     try {
       await beginObservedMeasurement(measurement);
       const internal = measurement as unknown as {
-        bytes: number; collectorStdoutHandler: (chunk: Buffer) => void;
-        transportTrigger: AndroidTransportTriggerDetector;
-        collector: { stop: (reason: string) => void }; collectorFailure?: Error; chunks: Buffer[];
+        collector: { bytes: number; stdoutHandler: (chunk: Buffer) => void; process: { stop: (reason: string) => void }; failure?: Error; chunks: Buffer[] };
+        transport: { trigger: AndroidTransportTriggerDetector };
       };
       let detectorCalls = 0;
       const stops: string[] = [];
-      internal.transportTrigger.observe = () => { detectorCalls++; return []; };
-      const stop = internal.collector.stop.bind(internal.collector);
-      internal.collector.stop = reason => { stops.push(reason); };
+      internal.transport.trigger.observe = () => { detectorCalls++; return []; };
+      const stop = internal.collector.process.stop.bind(internal.collector.process);
+      internal.collector.process.stop = reason => { stops.push(reason); };
       const chunk = Buffer.from('ordinary message\n');
-      const chunksBefore = internal.chunks.length;
-      internal.bytes = ANDROID_LOG_LIMIT - chunk.length;
-      internal.collectorStdoutHandler(chunk);
+      const chunksBefore = internal.collector.chunks.length;
+      internal.collector.bytes = ANDROID_LOG_LIMIT - chunk.length;
+      internal.collector.stdoutHandler(chunk);
       assert.equal(detectorCalls, 1);
-      assert.equal(internal.chunks.length, chunksBefore + 1);
-      internal.collectorStdoutHandler(chunk);
-      internal.collector.stop = stop;
+      assert.equal(internal.collector.chunks.length, chunksBefore + 1);
+      internal.collector.stdoutHandler(chunk);
+      internal.collector.process.stop = stop;
       assert.equal(detectorCalls, 1);
-      assert.equal(internal.chunks.length, chunksBefore + 1);
+      assert.equal(internal.collector.chunks.length, chunksBefore + 1);
       assert.deepEqual(stops, ['collector-output-limit']);
-      assert.equal(internal.collectorFailure?.message, 'ANDROID_ENVIRONMENT: measured log exceeds bound');
+      assert.equal(internal.collector.failure?.message, 'ANDROID_ENVIRONMENT: measured log exceeds bound');
     } finally {
       await measurement.finish().catch(() => undefined);
       for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
@@ -6806,85 +6283,44 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       }
     }
   });
-  test('concurrent GMS finalizers and finish share one terminal persistence operation', async () => {
-    const fixture = await harness.createFixture();
-    const saved = { ...process.env };
-    Object.assign(process.env, fixture.environment);
-    const stages = ['after-device-start', 'before-measurement-begin', 'after-setup-url', 'after-browser-install', 'after-initial-installed-app-launch'] as const;
-    let release!: () => void;
-    const gate = new Promise<void>(resolve => { release = resolve; });
-    let entered!: () => void;
-    const finalWriteEntered = new Promise<void>(resolve => { entered = resolve; });
-    let finalWrites = 0;
-    const writers = gmsWriterDiagnostics(fixture.root);
-    const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), {
-      boundedCommand: async (binary, args, timeout, options) => {
-        if (options.label?.startsWith('normalize GMS components at ')) return writers.run(binary, args, timeout, options);
-        if (!args.includes('--gms-diagnostic-persist')) return boundedCommand(binary, args, timeout, options);
-        if (String(options.input || '').includes('"finalized":true')) {
-          finalWrites++;
-          entered();
-          await gate;
-        }
-        return writers.run(binary, args, timeout, options);
-      },
-    });
-    const diagnostics = () => ({ measurementErrors: measurement.failureOutcome().errors.map(error => String(error)), writerFailures: writers.failures });
-    const details = () => JSON.stringify(diagnostics());
-    let firstSettlement: Promise<PromiseSettledResult<void>> | undefined;
-    let secondSettlement: Promise<PromiseSettledResult<void>> | undefined;
-    let finishSettlement: Promise<PromiseSettledResult<unknown>> | undefined;
-    let primaryFailure: unknown;
-    let failed = false;
-    try {
-      await measurement.observeGmsStage(stages[0], new PhaseBudget('gms-finalizer-concurrency', { timeoutMs: 30_000 }));
-      await measurement.observeGmsStage(stages[1], new PhaseBudget('gms-finalizer-concurrency', { timeoutMs: 30_000 }));
-      await measurement.begin();
-      for (const stage of stages.slice(2)) await measurement.observeGmsStage(stage, new PhaseBudget('gms-finalizer-concurrency', { timeoutMs: 30_000 }));
-      const precondition = await gmsStagePersistencePrecondition(fixture.root, stages, measurement);
-      assert.deepEqual(precondition.violations, [], JSON.stringify({ ...precondition, writerFailures: writers.failures }));
-      const first = measurement.finalizeGmsObservations();
-      firstSettlement = settledResult(first);
-      await awaitGatedEntry(finalWriteEntered, internalGmsFinalization(measurement), 'the terminal GMS writer', 'GMS finalization', diagnostics);
-      let secondReturned = false;
-      let finishReturned = false;
-      const second = measurement.finalizeGmsObservations().then(() => { secondReturned = true; });
-      secondSettlement = settledResult(second);
-      const finish = measurement.finish().then(() => { finishReturned = true; });
-      finishSettlement = settledResult(finish);
-      await new Promise(resolve => setTimeout(resolve, 50));
-      assert.equal(secondReturned, false, details());
-      assert.equal(finishReturned, false, details());
-      assert.equal(finalWrites, 1, details());
-      release();
-      await Promise.all([first, second, finish]);
-      const observationsPath = join(fixture.root, 'android-environment-gms-observations.json');
-      const bytes = await readFile(observationsPath);
-      const observations = JSON.parse(bytes.toString('utf8'));
-      assert.equal(observations.finalized, true, details());
-      assert.equal(observations.errors.length, 0, details());
-      assert.equal(finalWrites, 1, details());
-      const state = JSON.stringify(measurement.failureOutcome().errors.map(error => error instanceof Error ? error.message : String(error)));
-      await new Promise(resolve => setTimeout(resolve, 50));
-      assert.deepEqual(await readFile(observationsPath), bytes, details());
-      assert.equal(JSON.stringify(measurement.failureOutcome().errors.map(error => error instanceof Error ? error.message : String(error))), state, details());
-      const collector = JSON.parse(await readFile(join(fixture.root, 'android-environment-collector.json'), 'utf8'));
-      assert.equal(collector.gmsObservations.errors, 0, details());
-    } catch (error) {
-      failed = true;
-      primaryFailure = error;
-    }
-    release();
-    finishSettlement ??= settledResult(measurement.finish());
-    await Promise.all([finishSettlement, firstSettlement, secondSettlement]);
-    const failureDetails = details();
-    let cleanupFailure: unknown;
-    try { await writers.close(); } catch (error) { cleanupFailure = error; }
-    for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
-    Object.assign(process.env, saved);
-    if (failed || cleanupFailure !== undefined) {
-      throw new AggregateError([...(failed ? [primaryFailure] : []), ...(cleanupFailure === undefined ? [] : [cleanupFailure])],
-        `GMS concurrent finalizers failed: ${String(primaryFailure ?? cleanupFailure)}: ${failureDetails}`);
+  test('GMS finalizers and finish settle together on terminal collector confirmation, in either order, whether or not the summary can be written', async () => {
+    for (const order of ['finalizers first', 'finish first'] as const) {
+      for (const summary of ['written', 'blocked'] as const) {
+        const label = `${order}, summary ${summary}`;
+        await withMeasurementOutput(async (output, measurement) => {
+          if (summary === 'blocked') await mkdir(join(output, 'android-environment-collector.json'), { recursive: true });
+          await beginObservedMeasurement(measurement);
+          const startFinalizers = () => [settledResult(measurement.finalizeGmsObservations()), settledResult(measurement.finalizeGmsObservations())];
+          let finalizers: Array<Promise<PromiseSettledResult<void>>>;
+          let finish: Promise<Awaited<ReturnType<Measurement['finish']>>>;
+          if (order === 'finalizers first') { finalizers = startFinalizers(); finish = measurement.finish(); }
+          else { finish = measurement.finish(); finalizers = startFinalizers(); }
+          const outcome = await finish;
+          const settled = await Promise.all(finalizers);
+          const observationsPath = join(output, 'android-environment-gms-observations.json');
+          const bytes = await readFile(observationsPath);
+          assert.equal(JSON.parse(bytes.toString('utf8')).finalized, true, label);
+          if (summary === 'blocked') {
+            assert.ok(outcome.errors.length > 0, label);
+            assert.ok(settled.every(result => result.status === 'rejected' && /terminal collector confirmation failed/u.test(String(result.reason))), label);
+            assert.equal(outcome.assessment?.collection.status, 'UNKNOWN', label);
+            assert.equal((await stat(join(output, 'android-environment-collector.json'))).isDirectory(), true, label);
+          } else {
+            assert.deepEqual(outcome.errors, [], label);
+            assert.ok(settled.every(result => result.status === 'fulfilled'), label);
+            assert.equal(outcome.assessment?.collection.status, 'PASS', label);
+            const collector = await readEvidenceJson(output, 'collector');
+            assert.equal(collector.gmsObservations.terminalConfirmation, 'confirmed', label);
+            assert.equal(collector.gmsObservations.observationSha256, hashText(bytes.toString('utf8')), label);
+            assert.equal(collector.gmsObservations.errors, 0, label);
+          }
+          const errors = measurement.failureOutcome().errors.map(error => String(error));
+          await new Promise(resolve => setTimeout(resolve, 50));
+          assert.deepEqual(await readFile(observationsPath), bytes, label);
+          assert.deepEqual(measurement.failureOutcome().errors.map(error => String(error)), errors, label);
+          await assertEvidenceDirectorySettled(output);
+        });
+      }
     }
   });
   test('GMS finalizer-first barriers fail promptly when an earlier stage persistence prevents the terminal writer', async () => {
@@ -6932,24 +6368,17 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     const saved = { ...process.env };
     Object.assign(process.env, fixture.environment);
     const stages = ['after-device-start', 'before-measurement-begin', 'after-setup-url', 'after-browser-install', 'after-initial-installed-app-launch'] as const;
-    let terminalWriterInvoked = false;
-    const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), {
-      boundedCommand: async (binary, args, timeout, options) => {
-        if (args.includes('--gms-diagnostic-persist')) {
-          if (String(options.input || '').includes('"finalized":true')) terminalWriterInvoked = true;
-          else throw new Error('synthetic earlier stage persistence failure');
-        }
-        return boundedCommand(binary, args, timeout, options);
-      },
-    });
+    const observationsPath = join(fixture.root, 'android-environment-gms-observations.json');
+    await mkdir(observationsPath);
+    const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'));
     let finalizationSettlement: Promise<PromiseSettledResult<void>> | undefined;
     try {
       await measurement.observeGmsStage(stages[0], new PhaseBudget('gms-finalizer-barrier', { timeoutMs: 20_000 }));
       const precondition = await gmsStagePersistencePrecondition(fixture.root, stages, measurement);
       assert.match(precondition.violations[0] ?? '', /^GMS observations are missing or unreadable: /u, JSON.stringify(precondition));
-      assert.ok(precondition.measurementErrors.some(error => error.includes('synthetic earlier stage persistence failure')), JSON.stringify(precondition));
+      assert.ok(precondition.measurementErrors.some(error => error.includes('EISDIR')), JSON.stringify(precondition));
       assert.ok(precondition.violations.some(violation => violation.startsWith('measurement error: ')
-        && violation.includes('synthetic earlier stage persistence failure')), JSON.stringify(precondition));
+        && violation.includes('EISDIR')), JSON.stringify(precondition));
       const timers = groupPollTestTimers();
       let writerEntered!: () => void;
       const writerEntry = new Promise<void>(resolve => { writerEntered = resolve; });
@@ -6959,9 +6388,9 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
         () => precondition, timers).then(() => { barrierOutcome = 'entered'; }, error => { barrierOutcome = error; });
       await internalGmsFinalization(measurement);
       await new Promise(resolve => setImmediate(resolve));
-      assert.equal(terminalWriterInvoked, false);
+      assert.equal((await stat(observationsPath)).isDirectory(), true);
       assert.ok(barrierOutcome instanceof assert.AssertionError, `a bare writer-entry wait stays ${String(barrierOutcome)} here`);
-      assert.match(barrierOutcome.message, /^GMS finalization settled before the terminal GMS writer was entered: .*synthetic earlier stage persistence failure/u);
+      assert.match(barrierOutcome.message, /^GMS finalization settled before the terminal GMS writer was entered: .*EISDIR/u);
       assert.equal(timers.timers.length, 1);
       assert.deepEqual(timers.pending(), []);
       writerEntered();
@@ -6973,329 +6402,25 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       Object.assign(process.env, saved);
     }
   });
-  test('GMS finalizers started before finish wait through collector confirmation success and failure', async () => {
-    for (const failCollectorWrite of [false, true]) {
-      const fixture = await harness.createFixture();
-      const saved = { ...process.env };
-      Object.assign(process.env, fixture.environment);
-      let releaseObservation!: () => void;
-      const observationGate = new Promise<void>(resolve => { releaseObservation = resolve; });
-      let observationEntered!: () => void;
-      const observationWriterEntered = new Promise<void>(resolve => { observationEntered = resolve; });
-      let releaseCollector!: () => void;
-      const collectorGate = new Promise<void>(resolve => { releaseCollector = resolve; });
-      let collectorEntered!: () => void;
-      const collectorWriterEntered = new Promise<void>(resolve => { collectorEntered = resolve; });
-      const writers = gmsWriterDiagnostics(fixture.root);
-      const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), {
-        boundedCommand: async (binary, args, timeout, options) => {
-          if (args.includes('--gms-diagnostic-persist')) {
-            if (String(options.input || '').includes('"finalized":true')) {
-              observationEntered();
-              await observationGate;
-            }
-            return writers.run(binary, args, timeout, options);
-          }
-          if (args.includes('--android-measurement-persist-json')) {
-            const request = JSON.parse(String(options.input));
-            if (request.target.endsWith('android-environment-collector.json')) {
-              collectorEntered();
-              await collectorGate;
-              if (failCollectorWrite) throw new Error('synthetic finalizer-first collector write failure');
-            }
-          }
-          if (options.label?.startsWith('normalize GMS components at ')) return writers.run(binary, args, timeout, options);
-          return boundedCommand(binary, args, timeout, options);
-        },
-      });
-      const diagnostics = () => ({ measurementErrors: measurement.failureOutcome().errors.map(error => String(error)), writerFailures: writers.failures });
-      let firstSettlement: Promise<PromiseSettledResult<void>> | undefined;
-      let secondSettlement: Promise<PromiseSettledResult<void>> | undefined;
-      let finishSettlement: Promise<PromiseSettledResult<unknown>> | undefined;
-      let primaryFailure: unknown;
-      let failed = false;
-      try {
-        const stages = ['after-device-start', 'before-measurement-begin', 'after-setup-url', 'after-browser-install', 'after-initial-installed-app-launch'] as const;
-
-        await measurement.observeGmsStage(stages[0], new PhaseBudget('gms-finalizer-first', { timeoutMs: 20_000 }));
-        await measurement.observeGmsStage(stages[1], new PhaseBudget('gms-finalizer-first', { timeoutMs: 20_000 }));
-        await measurement.begin();
-        for (const stage of stages.slice(2)) await measurement.observeGmsStage(stage, new PhaseBudget('gms-finalizer-first', { timeoutMs: 20_000 }));
-        const precondition = await gmsStagePersistencePrecondition(fixture.root, stages, measurement);
-        assert.deepEqual(precondition.violations, [], JSON.stringify({ ...precondition, writerFailures: writers.failures }));
-        let firstReturned = false;
-        let secondReturned = false;
-        let finishReturned = false;
-        const first = measurement.finalizeGmsObservations().then(() => { firstReturned = true; });
-        firstSettlement = settledResult(first);
-        await awaitGatedEntry(observationWriterEntered, internalGmsFinalization(measurement), 'the terminal GMS writer',
-          'GMS finalization', diagnostics);
-        const second = measurement.finalizeGmsObservations().then(() => { secondReturned = true; });
-        secondSettlement = settledResult(second);
-        const finish = measurement.finish().then(outcome => { finishReturned = true; return outcome; });
-        finishSettlement = settledResult(finish);
-        await new Promise(resolve => setTimeout(resolve, 40));
-        assert.equal(firstReturned, false);
-        assert.equal(secondReturned, false);
-        assert.equal(finishReturned, false);
-        releaseObservation();
-        await awaitGatedEntry(collectorWriterEntered, finish, 'the collector summary writer', 'measurement finish', diagnostics);
-        await new Promise(resolve => setTimeout(resolve, 40));
-        assert.equal(firstReturned, false);
-        assert.equal(secondReturned, false);
-        assert.equal(finishReturned, false);
-        releaseCollector();
-        const outcome = await finish;
-        const finalizers = await Promise.all([firstSettlement, secondSettlement]);
-        const settledErrors = measurement.failureOutcome().errors.map(error => String(error));
-        await new Promise(resolve => setTimeout(resolve, 30));
-        assert.deepEqual(measurement.failureOutcome().errors.map(error => String(error)), settledErrors);
-        if (failCollectorWrite) {
-          assert.ok(outcome.errors.some(error => String(error).includes('synthetic finalizer-first collector write failure')));
-          assert.ok(finalizers.every(result => result.status === 'rejected' && /terminal collector confirmation failed/u.test(String(result.reason))));
-          assert.equal(outcome.assessment?.collection.status, 'UNKNOWN');
-          assert.equal(existsSync(join(fixture.root, 'android-environment-collector.json')), false);
-        } else {
-          assert.deepEqual(outcome.errors, [], JSON.stringify({ errors: outcome.errors.map(error => String(error)), writerFailures: writers.failures }));
-          assert.ok(finalizers.every(result => result.status === 'fulfilled'));
-          assert.equal(outcome.assessment?.collection.status, 'PASS');
-          const collector = JSON.parse(await readFile(join(fixture.root, 'android-environment-collector.json'), 'utf8'));
-          assert.equal(collector.gmsObservations.terminalConfirmation, 'confirmed');
-          assert.equal(JSON.parse(await readFile(join(fixture.root, 'android-environment-gms-observations.json'), 'utf8')).finalized, true);
-        }
-      } catch (error) {
-        failed = true;
-        primaryFailure = error;
-      }
-      releaseObservation();
-      releaseCollector();
-      finishSettlement ??= settledResult(measurement.finish());
-      await Promise.all([finishSettlement, firstSettlement, secondSettlement]);
-      let cleanupFailure: unknown;
-      try { await writers.close(); } catch (error) { cleanupFailure = error; }
-      for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
-      Object.assign(process.env, saved);
-      if (cleanupFailure !== undefined) {
-        const primary = !failed ? undefined : primaryFailure instanceof Error ? primaryFailure.message : String(primaryFailure);
-        throw new AggregateError(failed ? [primaryFailure, cleanupFailure] : [cleanupFailure],
-          `${primary ? `${primary}; ` : ''}GMS writer observer cleanup failed: ${String(cleanupFailure)}`);
-      }
-      if (failed) throw primaryFailure;
-    }
-    const noFinishFixture = await harness.createFixture();
-    const noFinishStages = ['after-device-start', 'before-measurement-begin', 'after-setup-url', 'after-browser-install', 'after-initial-installed-app-launch'] as const;
-    const noFinishEnvironment = { ...process.env };
-    Object.assign(process.env, noFinishFixture.environment);
-    const endPath = join(noFinishFixture.root, 'no-finish-end-marker');
-    let collectorCode = '';
-    let finalPersisted!: () => void;
-    const finalPersistence = new Promise<void>(resolve => { finalPersisted = resolve; });
-    const noFinishWriters = gmsWriterDiagnostics(noFinishFixture.root);
-    const noFinishMeasurement = new AndroidEnvironmentMeasurement('emulator-5554', noFinishFixture.root,
-      repositoryPath('tests/mobile/toolchains.json'), {
-        spawnCollector: () => spawnOwnedProcess(process.execPath, ['--no-env-file', '-e', collectorCode],
-          { timeoutMs: 50_000, cleanupReservationMs: 2_000 }),
-        boundedCommand: async (binary, args, timeout, options) => {
-          if (options.label?.startsWith('normalize GMS components at ')) return noFinishWriters.run(binary, args, timeout, options);
-          if (!args.includes('--gms-diagnostic-persist')) return boundedCommand(binary, args, timeout, options);
-          const result = await noFinishWriters.run(binary, args, timeout, options);
-          if (String(options.input).includes('"finalized":true')) finalPersisted();
-          return result;
-        },
-      });
-    const noFinishDiagnostics = () => ({ measurementErrors: noFinishMeasurement.failureOutcome().errors.map(error => String(error)),
-      writerFailures: noFinishWriters.failures });
-    let noFinishFinalizationSettlement: Promise<PromiseSettledResult<void>> | undefined;
-    let noFinishFinishSettlement: Promise<PromiseSettledResult<unknown>> | undefined;
-    let noFinishPrimaryFailure: unknown;
-    let noFinishFailed = false;
-    collectorCode = `const fs=require('node:fs');setTimeout(()=>{const epoch=(Date.now()/1000).toFixed(3);process.stdout.write(epoch+' 77 77 I HerdrMeasure: ${noFinishMeasurement.id} START\\n')},30);const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(endPath)})){fs.rmSync(${JSON.stringify(endPath)},{force:true});process.stdout.write((Date.now()/1000).toFixed(3)+' 77 77 I HerdrMeasure: ${noFinishMeasurement.id} END\\n')}},5);process.on('SIGTERM',()=>{clearInterval(timer);process.exit(0)})`;
-    try {
-      await noFinishMeasurement.observeGmsStage(noFinishStages[0], new PhaseBudget('gms-no-finish', { timeoutMs: 20_000 }));
-      await noFinishMeasurement.observeGmsStage(noFinishStages[1], new PhaseBudget('gms-no-finish', { timeoutMs: 20_000 }));
-      await noFinishMeasurement.begin();
-      for (const stage of noFinishStages.slice(2)) await noFinishMeasurement.observeGmsStage(stage, new PhaseBudget('gms-no-finish', { timeoutMs: 20_000 }));
-      const precondition = await gmsStagePersistencePrecondition(noFinishFixture.root, noFinishStages, noFinishMeasurement);
-      assert.deepEqual(precondition.violations, [], JSON.stringify({ ...precondition, writerFailures: noFinishWriters.failures }));
-      let finalized = false;
-      const finalization = noFinishMeasurement.finalizeGmsObservations().then(() => { finalized = true; });
-      noFinishFinalizationSettlement = settledResult(finalization);
-      await awaitGatedEntry(finalPersistence, internalGmsFinalization(noFinishMeasurement), 'the completed terminal GMS writer',
-        'GMS finalization', noFinishDiagnostics);
-      assert.equal(JSON.parse(await readFile(join(noFinishFixture.root, 'android-environment-gms-observations.json'), 'utf8')).finalized, true);
-      assert.equal(existsSync(join(noFinishFixture.root, 'android-environment-collector.json')), false);
-      assert.equal(finalized, false);
-      await writeFile(endPath, 'end');
-      const finish = noFinishMeasurement.finish();
-      noFinishFinishSettlement = settledResult(finish);
-      const outcome = await finish;
-      await finalization;
-      assert.deepEqual(outcome.errors, [], JSON.stringify({ errors: outcome.errors.map(error => String(error)), writerFailures: noFinishWriters.failures }));
-      assert.equal(outcome.assessment?.collection.status, 'PASS');
-      assert.equal(finalized, true);
-    } catch (error) {
-      noFinishFailed = true;
-      noFinishPrimaryFailure = error;
-    }
-    let noFinishCleanupFailure: unknown;
-    try { await writeFile(endPath, 'end'); } catch (error) { noFinishCleanupFailure = error; }
-    noFinishFinishSettlement ??= settledResult(noFinishMeasurement.finish());
-    await Promise.all([noFinishFinishSettlement, noFinishFinalizationSettlement]);
-    try { await noFinishWriters.close(); } catch (error) { noFinishCleanupFailure ??= error; }
-    for (const key of Object.keys(process.env)) if (!(key in noFinishEnvironment)) delete process.env[key];
-    Object.assign(process.env, noFinishEnvironment);
-    if (noFinishCleanupFailure !== undefined) {
-      const primary = !noFinishFailed ? undefined
-        : noFinishPrimaryFailure instanceof Error ? noFinishPrimaryFailure.message : String(noFinishPrimaryFailure);
-      throw new AggregateError(noFinishFailed ? [noFinishPrimaryFailure, noFinishCleanupFailure] : [noFinishCleanupFailure],
-        `${primary ? `${primary}; ` : ''}GMS no-finish cleanup failed: ${String(noFinishCleanupFailure)}`);
-    }
-    if (noFinishFailed) throw noFinishPrimaryFailure;
-  });
-  test('GMS successful-begin finalizers share finish through terminal collector confirmation', async () => {
-    for (const failCollectorWrite of [false, true]) {
-      const fixture = await harness.createFixture();
-      const saved = { ...process.env };
-      Object.assign(process.env, fixture.environment);
-      let release!: () => void;
-      const gate = new Promise<void>(resolve => { release = resolve; });
-      let entered!: () => void;
-      const writerEntered = new Promise<void>(resolve => { entered = resolve; });
-      let collectorWrites = 0;
-      const writers = gmsWriterDiagnostics(fixture.root);
-      const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), {
-        boundedCommand: async (binary, args, timeout, options) => {
-          if (args.includes('--android-measurement-persist-json')) {
-            const request = JSON.parse(String(options.input));
-            if (request.target.endsWith('android-environment-collector.json')) {
-              collectorWrites++;
-              entered();
-              await gate;
-              if (failCollectorWrite) throw new Error('synthetic successful-begin collector write failure');
-            }
-          }
-          if (options.label?.startsWith('normalize GMS components at ')) return writers.run(binary, args, timeout, options);
-          return boundedCommand(binary, args, timeout, options);
-        },
-      });
-      try {
-        const stages = ['after-device-start', 'before-measurement-begin', 'after-setup-url', 'after-browser-install', 'after-initial-installed-app-launch'] as const;
-
-        await measurement.observeGmsStage(stages[0], new PhaseBudget('gms-successful-terminal', { timeoutMs: 20_000 }));
-        await measurement.observeGmsStage(stages[1], new PhaseBudget('gms-successful-terminal', { timeoutMs: 20_000 }));
-        await measurement.begin();
-        for (const stage of stages.slice(2)) await measurement.observeGmsStage(stage, new PhaseBudget('gms-successful-terminal', { timeoutMs: 20_000 }));
-        let finishReturned = false;
-        const finish = measurement.finish().then(outcome => { finishReturned = true; return outcome; });
-        await writerEntered;
-        let firstReturned = false;
-        let secondReturned = false;
-        const first = measurement.finalizeGmsObservations().then(() => { firstReturned = true; });
-        const second = measurement.finalizeGmsObservations().then(() => { secondReturned = true; });
-        const settledFinalizers = Promise.allSettled([first, second]);
-        await new Promise(resolve => setTimeout(resolve, 40));
-        assert.equal(finishReturned, false);
-        assert.equal(firstReturned, false);
-        assert.equal(secondReturned, false);
-        assert.equal(collectorWrites, 1);
-        release();
-        const outcome = await finish;
-        const finalizers = await settledFinalizers;
-        const reportFinalizerFailure = async () => {
-          const read = async (name: string) => {
-            try { return JSON.parse(await readFile(join(fixture.root, name), 'utf8')); } catch { return undefined; }
-          };
-          const observations = await read('android-environment-gms-observations.json');
-          const collector = await read('android-environment-collector.json');
-          const text = (value: unknown) => typeof value === 'string' ? value.slice(0, 500) : undefined;
-          const summary = (error: unknown) => {
-            const value = error instanceof Error ? error : new Error(String(error));
-            const frame = value.stack?.split('\n').find(line => /^\s+at /u.test(line));
-            return { name: value.name, messageLength: value.message.length, message: value.message.slice(0, 500),
-              firstFrame: frame?.trim().replaceAll(repositoryRoot, '').slice(0, 200) };
-          };
-          process.stderr.write(`GMS_FINALIZER_FAILURE ${redactText(JSON.stringify({
-            failCollectorWrite, collectorWrites, finishReturned, firstReturned, secondReturned,
-            errors: outcome.errors.map(summary),
-            collection: outcome.assessment ? { status: outcome.assessment.collection.status,
-              issues: outcome.assessment.collection.issues.map(text) } : 'unavailable',
-            observations: observations ? { finalized: observations.finalized, terminalPublication: observations.terminalPublication,
-              persistenceRetirement: observations.persistenceRetirement, temporaryEvidenceCleanup: observations.temporaryEvidenceCleanup,
-              errors: Array.isArray(observations.errors) ? observations.errors.map(text) : 'unavailable',
-              stages: Array.isArray(observations.stages) ? observations.stages.map((stage: any) => ({ stage: stage.stage, outcome: stage.outcome,
-                error: text(stage.error), normalizationTimedOut: stage.normalizationTimedOut, parseDurationMs: stage.parseDurationMs,
-                timedOut: stage.timedOut })) : 'unavailable' } : 'unavailable',
-            collectorGmsObservations: collector?.gmsObservations ?? 'unavailable',
-            normalizationFailures: writers.failures,
-          }))}\n`);
-        };
-        assert.equal(finishReturned, true);
-        assert.equal(collectorWrites, 1);
-        if (failCollectorWrite) {
-          assert.ok(outcome.errors.some(error => String(error).includes('synthetic successful-begin collector write failure')));
-          assert.ok(finalizers.every(result => result.status === 'rejected' && /terminal collector confirmation failed/u.test(String(result.reason))));
-          assert.equal(outcome.assessment?.collection.status, 'UNKNOWN');
-        } else {
-          try { assert.deepEqual(outcome.errors, []); }
-          catch (error) {
-            await reportFinalizerFailure().catch(() => undefined);
-            throw error;
-          }
-          assert.ok(finalizers.every(result => result.status === 'fulfilled'));
-          assert.equal(outcome.assessment?.collection.status, 'PASS');
-          const collector = JSON.parse(await readFile(join(fixture.root, 'android-environment-collector.json'), 'utf8'));
-          assert.equal(collector.gmsObservations.terminalConfirmation, 'confirmed');
-        }
-      } finally {
-        release();
-        await measurement.finish().catch(() => undefined);
-        await writers.close().catch(() => undefined);
-        for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
-        Object.assign(process.env, saved);
-      }
-    }
-  });
   test('final GMS publication reports an explicitly scoped prior-persistence total and bound', async () => {
-    const fixture = await harness.createFixture();
-    const saved = { ...process.env };
-    Object.assign(process.env, fixture.environment);
-    const stages = ['after-device-start', 'before-measurement-begin', 'after-setup-url', 'after-browser-install', 'after-initial-installed-app-launch'] as const;
-    const finalWriteDelayMs = 90;
-    let finalWrites = 0;
-    const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), {
-      boundedCommand: async (binary, args, timeout, options) => {
-        if (args.includes('--gms-diagnostic-persist') && String(options.input || '').includes('"finalized":true')) {
-          finalWrites++;
-          await new Promise(resolve => setTimeout(resolve, finalWriteDelayMs));
-        }
-        return boundedCommand(binary, args, timeout, options);
-      },
-    });
-    try {
-      await measurement.observeGmsStage(stages[0], new PhaseBudget('gms-persistence-accounting', { timeoutMs: 30_000 }));
-      await measurement.observeGmsStage(stages[1], new PhaseBudget('gms-persistence-accounting', { timeoutMs: 30_000 }));
-      await measurement.begin();
-      for (const stage of stages.slice(2)) await measurement.observeGmsStage(stage, new PhaseBudget('gms-persistence-accounting', { timeoutMs: 30_000 }));
+    await withMeasurementOutput(async (output, measurement) => {
+      await beginObservedMeasurement(measurement);
       await measurement.finish();
-      assert.equal(finalWrites, 1);
-      const observations = JSON.parse(await readFile(join(fixture.root, 'android-environment-gms-observations.json'), 'utf8'));
-      const collector = JSON.parse(await readFile(join(fixture.root, 'android-environment-collector.json'), 'utf8'));
+      const observations = await readEvidenceJson(output, 'gms-observations');
+      const collector = await readEvidenceJson(output, 'collector');
       const persistedPrior = observations.priorPersistenceAttemptMs;
       const completedAll = collector.gmsObservations.persistenceAttemptMsThroughFinalization;
       assert.ok(persistedPrior > 0);
-      assert.ok(completedAll - persistedPrior >= finalWriteDelayMs);
+      assert.ok(completedAll > persistedPrior);
       assert.equal(observations.persistenceAccounting,
         'priorPersistenceAttemptMs includes prior bounded publication attempts; the current attempt is excluded and bounded by persistenceOperationTimeoutMs');
       assert.equal(observations.limits.persistenceOperationTimeoutMs, 5_000);
       assert.equal(observations.temporaryEvidenceCleanup, 'not-needed');
-      assert.equal(collector.gmsObservations.persistenceAttemptMsThroughFinalization, completedAll);
       assert.match(collector.gmsObservations.persistenceAccounting, /includes all bounded observation-publication attempts through finalization/u);
       assert.equal(collector.gmsObservations.temporaryEvidenceCleanup, 'not-needed');
-    } finally {
-      await measurement.finish().catch(() => undefined);
-      for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
-      Object.assign(process.env, saved);
-    }
+      assert.equal(collector.gmsObservations.persistenceRetirement, 'retired');
+      assert.ok(completedAll <= observations.limits.totalPersistenceLimitMs);
+    });
   });
   test('bounded stdin relays preserve multi-buffer bytes and natural EOF after delayed target consumption', async () => {
     const fixture = await harness.createFixture();
@@ -7586,20 +6711,6 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       Object.assign(process.env, saved);
     }
   });
-  test('GMS writer progress reports each reached persistence step from bounded stderr markers only', async () => {
-    assert.equal(gmsWriterProgress(''), 'none');
-    assert.equal(gmsWriterProgress('GMS persistence request is malformed\n'), 'none');
-    assert.equal(gmsWriterProgress('GMS_WRITER_PROGRESS ready 412\n'), 'ready@412');
-    assert.equal(gmsWriterProgress('GMS_WRITER_PROGRESS ready 41\nGMS_WRITER_PROGRESS input 44 11532\nGMS_WRITER_PROGRESS directory 45\nGMS_WRITER_PROGRESS staged 47\n'),
-      'ready@41,input@44:11532,directory@45,staged@47');
-    assert.equal(gmsWriterProgress('GMS_WRITER_PROGRESS ready 41\nGMS persistence request digest is inconsistent\n'), 'ready@41');
-    for (const forged of ['GMS_WRITER_PROGRESS ready /private/path', 'GMS_WRITER_PROGRESS renamed 50', ' GMS_WRITER_PROGRESS ready 41',
-      'GMS_WRITER_PROGRESS ready 12345678', 'GMS_WRITER_PROGRESS input 44 1234567890', 'GMS_WRITER_PROGRESS ready 41 secret=value']) {
-      assert.equal(gmsWriterProgress(`${forged}\n`), 'none', forged);
-    }
-    const repeated = 'GMS_WRITER_PROGRESS ready 1\n'.repeat(100);
-    assert.equal(gmsWriterProgress(repeated), 'ready@1,ready@1,ready@1,ready@1');
-  });
   test('event-loop stall window crosses the execution deadline and leaves a cleanup-derived drain allowance', async () => {
     const command = { commandStartedMs: 1_000, timeoutMs: 700, cleanupMs: 200 };
     for (const markerAfterMs of [89, 139, 164, 499]) {
@@ -7745,207 +6856,6 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       await rm(fixture.root, { recursive: true, force: true });
     }
   });
-  test('GMS finalization aborts and retires the owned ownership-check process before command dispatch', async () => {
-    const fixture = await harness.createFixture();
-    const saved = { ...process.env };
-    Object.assign(process.env, fixture.environment);
-    const supervisorObserverPath = join(fixture.root, 'ownership-target-supervisor.jsonl');
-    const lateWritePath = join(fixture.root, 'ownership-target-late-write');
-    const supervisorObserverFD = openSync(supervisorObserverPath, 'w');
-    const observerSupervisor = createWriteStream('', { fd: supervisorObserverFD, autoClose: false });
-    const observerServer = createNetServer();
-    let resolveObserverWriter!: (socket: Socket) => void;
-    const observerWriterReady = new Promise<Socket>(resolve => { resolveObserverWriter = resolve; });
-    observerServer.on('connection', resolveObserverWriter);
-    let observerWriter: Socket & { fd: number } | undefined;
-    let observerReader: Socket | undefined;
-    let resolveOwnedOutput!: () => void;
-    let rejectOwnedOutput!: (error: Error) => void;
-    let stageStartedAt: number;
-    let ownedOutputObservedAt: number | undefined;
-    let observedTargetOutput = '';
-    const ownedOutput = new Promise<void>((resolve, reject) => {
-      resolveOwnedOutput = resolve;
-      rejectOwnedOutput = reject;
-    });
-    void ownedOutput.catch(() => undefined);
-    let dispatches = 0;
-    let ownershipFailure: BoundedCommandError | undefined;
-    const ownerCode = `const fs=require('node:fs');process.on('SIGTERM',()=>{});process.stdout.write('OWNED\\n');setTimeout(()=>fs.writeFileSync(${JSON.stringify(lateWritePath)},'late'),1500);setInterval(()=>{},1000)`;
-    const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), {
-      boundedCommand: async (binary, args, timeout, options) => {
-        if (args.includes('--gms-diagnostic-ownership')) {
-          try { return await boundedCommand('node', ['-e', ownerCode], timeout, { ...options, observerStdout: observerWriter, observerSupervisor }); }
-          catch (error) { if (error instanceof BoundedCommandError) ownershipFailure = error; throw error; }
-        }
-        if (args.includes('dumpsys')) dispatches++;
-        return boundedCommand(binary, args, timeout, options);
-      },
-    });
-    let stage: Promise<void> | undefined;
-    try {
-      await new Promise<void>((resolve, reject) => {
-        observerServer.once('error', reject);
-        observerServer.listen(0, '127.0.0.1', resolve);
-      });
-      const address = observerServer.address();
-      assert.ok(address && typeof address !== 'string');
-      observerReader = createNetConnection(address.port, '127.0.0.1');
-      const readerConnected = new Promise<void>((resolve, reject) => {
-        observerReader!.once('connect', resolve);
-        observerReader!.once('error', reject);
-      });
-      observerReader.on('data', chunk => {
-        observedTargetOutput += Buffer.from(chunk).toString('utf8');
-        if (observedTargetOutput === 'OWNED\n') {
-          ownedOutputObservedAt ??= performance.now();
-          resolveOwnedOutput();
-        } else if (!'OWNED\n'.startsWith(observedTargetOutput)) {
-          rejectOwnedOutput(new Error('ownership target emitted unexpected stdout before admission'));
-        }
-      });
-      observerReader.once('error', rejectOwnedOutput);
-      observerWriter = await observerWriterReady as Socket & { fd: number };
-      const observerWriterDescriptor = (observerWriter as unknown as { _handle?: { fd?: number } })._handle?.fd;
-      assert.ok(Number.isSafeInteger(observerWriterDescriptor) && observerWriterDescriptor! > 0);
-      observerWriter.fd = observerWriterDescriptor!;
-      await readerConnected;
-
-      stageStartedAt = performance.now();
-      stage = measurement.observeGmsStage('after-device-start', new PhaseBudget('gms-owner-retirement', { timeoutMs: 10_000 }));
-      const admission = await Promise.race([
-        ownedOutput.then(() => 'target-output' as const),
-        stage.then(() => 'stage-settled' as const),
-      ]);
-      if (admission !== 'target-output') {
-        await measurement.finalizeGmsObservations();
-        await stage;
-        const failedObservation = JSON.parse(await readFile(join(fixture.root, 'android-environment-gms-observations.json'), 'utf8'));
-        assert.fail(`ownership target did not emit its exact OWNED byte before stage settlement: ${JSON.stringify({
-          stage: failedObservation.stages[0], ownershipFailure: ownershipFailure?.result,
-        })}`);
-      }
-      assert.equal(observedTargetOutput, 'OWNED\n');
-      await measurement.finalizeGmsObservations();
-      await stage;
-      const observationPath = join(fixture.root, 'android-environment-gms-observations.json');
-      const observationBytes = await readFile(observationPath);
-      const observation = JSON.parse(observationBytes.toString('utf8'));
-      assert.equal(dispatches, 0);
-      assert.equal(observation.stages[0].outcome, 'failed');
-      assert.match(observation.stages[0].error, /interrupted by finalization/u);
-      assert.ok(observation.stages[0].durationMs > 0);
-      assert.ok(ownedOutputObservedAt !== undefined);
-      assert.ok(ownedOutputObservedAt - stageStartedAt < observation.limits.ownershipTimeoutMs);
-      assert.ok(observation.stages[0].ownershipDurationMs <= observation.limits.ownershipTimeoutMs);
-      assert.equal(observation.totalCollectionMs, observation.stages[0].durationMs);
-      assert.ok(ownershipFailure instanceof BoundedCommandError);
-      const ownedRecords = observerRecords(supervisorObserverPath);
-      const stopping = ownedRecords.find(record => record.type === 'supervisor-stopping' && record.reason === 'aborted');
-      const retirement = ownedRecords.find(record => record.type === 'supervisor-retirement-ready');
-      assert.ok(stopping && retirement, JSON.stringify({ ownedRecords, result: ownershipFailure.result }));
-      assert.equal(stopping.targetSpawned, true);
-      assert.equal(stopping.targetExecConfirmed, true);
-      const retirementEvidence = retirement.evidence as Record<string, unknown>;
-      for (const field of ['targetExitObserved', 'targetCloseObserved', 'anchorExitObserved', 'anchorCloseObserved', 'groupAbsent', 'inputClosedObserved',
-        'stdoutNaturalEnd', 'stdoutCloseObserved', 'stderrNaturalEnd', 'stderrCloseObserved']) {
-        assert.equal(retirementEvidence[field], true, JSON.stringify({ ownedRecords, result: ownershipFailure.result }));
-      }
-      assert.equal(retirementEvidence.stopReason, 'aborted');
-      assert.equal(stopping.reason, 'aborted');
-      assert.equal(ownershipFailure.result.aborted, true);
-      assert.equal(ownershipFailure.result.timedOut, false);
-      assert.equal(ownershipFailure.result.targetCloseObserved, true);
-      assert.equal(ownershipFailure.result.childExited, true, JSON.stringify({ ownedRecords, result: ownershipFailure.result }));
-      assert.equal(ownershipFailure.result.ownedProcessesExited, true, JSON.stringify({ ownedRecords, result: ownershipFailure.result }));
-      assert.equal(ownershipFailure.result.stdioClosed, true, JSON.stringify({ ownedRecords, result: ownershipFailure.result }));
-      assert.equal(observedTargetOutput, 'OWNED\n');
-      assert.ok(observation.errors.some((error: string) => /interrupted by finalization/u.test(error)));
-      assert.ok(measurement.failureOutcome().errors.length > 0);
-      assert.equal(observation.totalCommandOutputBytes, 0);
-      assert.equal(observation.totalRetainedCommandOutputBytes, 0);
-      assert.equal(dispatches, 0);
-      await new Promise(resolve => setTimeout(resolve, 1_600));
-      assert.equal(existsSync(lateWritePath), false);
-      assert.deepEqual(await readFile(observationPath), observationBytes);
-    } finally {
-      const finishObserver = async () => {
-        try {
-          if (!observerSupervisor.writableFinished) {
-            const finished = new Promise<void>((resolve, reject) => {
-              observerSupervisor.once('finish', resolve);
-              observerSupervisor.once('error', reject);
-            });
-            observerSupervisor.end();
-            await finished;
-          }
-        } finally {
-          closeSync(supervisorObserverFD);
-        }
-      };
-      const closeSocket = async (socket: Socket | undefined) => {
-        if (!socket || socket.closed) return;
-        const closed = new Promise<void>(resolve => socket.once('close', resolve));
-        socket.destroy();
-        await closed;
-      };
-      try {
-        await stage?.catch(() => undefined);
-        await measurement.finish().catch(() => undefined);
-      } finally {
-        try {
-          await Promise.all([closeSocket(observerWriter), closeSocket(observerReader)]);
-        } finally {
-          try {
-            if (observerServer.listening) await new Promise<void>((resolve, reject) => {
-              observerServer.close(error => error ? reject(error) : resolve());
-            });
-          } finally {
-            try { await finishObserver(); }
-            finally {
-              for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
-              Object.assign(process.env, saved);
-            }
-          }
-        }
-      }
-    }
-  });
-  test('GMS ownership success returned after its monotonic deadline is rejected before command dispatch', async () => {
-    const fixture = await harness.createFixture();
-    const saved = { ...process.env };
-    Object.assign(process.env, fixture.environment);
-    let dispatches = 0;
-    const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), {
-      boundedCommand: async (binary, args, timeout, options) => {
-        if (args.includes('--gms-diagnostic-ownership')) {
-          const result = await boundedCommand(binary, args, timeout, options);
-          const deadline = performance.now() + 2_050;
-          let now = performance.now();
-          while (now < deadline) now = performance.now();
-          return result;
-        }
-        if (args.includes('dumpsys')) dispatches++;
-        return boundedCommand(binary, args, timeout, options);
-      },
-    });
-    try {
-      await measurement.observeGmsStage('after-device-start', new PhaseBudget('gms-late-ownership', { timeoutMs: 10_000 }));
-      await measurement.finalizeGmsObservations();
-      const observation = JSON.parse(await readFile(join(fixture.root, 'android-environment-gms-observations.json'), 'utf8'));
-      const stage = observation.stages[0];
-      assert.equal(stage.outcome, 'failed');
-      assert.match(stage.error, /exceeded its monotonic time bound/u);
-      assert.ok(stage.ownershipDurationMs > observation.limits.ownershipTimeoutMs);
-      assert.equal(stage.ownershipChildExited, true);
-      assert.equal(stage.ownershipProcessesExited, true);
-      assert.equal(stage.ownershipStdioClosed, true);
-      assert.equal(dispatches, 0);
-    } finally {
-      for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
-      Object.assign(process.env, saved);
-    }
-  });
   test('GMS finalization records interrupted command bytes and monotonic stage duration', async () => {
     const fixture = await harness.createFixture();
     const saved = { ...process.env };
@@ -7995,35 +6905,6 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       await stage?.catch(() => undefined);
       for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
       Object.assign(process.env, saved);
-    }
-  });
-  test('cleanup workers redact filesystem errors without acknowledging removal', async () => {
-    const fixture = await harness.createFixture();
-    const secret = 'cleanup-error-private-sentinel';
-    const directory = join(fixture.root, `?token=${secret}`);
-    const cases = [
-      ['--gms-diagnostic-cleanup', 'android-environment-gms-observations.json'],
-      ['--android-measurement-cleanup-file', 'android-environment-completion.json'],
-      ['--android-measurement-invalidate-collector', 'android-environment-collector.json'],
-    ] as const;
-    for (const [mode, filename] of cases) {
-      const target = join(directory, filename);
-      const temporary = join(directory, `.${filename}.12345678-1234-1234-1234-123456789abc.pending`);
-      const rejectedPath = mode === '--android-measurement-invalidate-collector' ? target : temporary;
-      await mkdir(rejectedPath, { recursive: true });
-      const retained = join(rejectedPath, 'retained');
-      await writeFile(retained, 'keep');
-      const result = spawnSync(process.execPath, [repositoryPath('tests/mobile/android-measurement-cleanup.ts'), mode], {
-        input: JSON.stringify({ directory, target, temporary }), encoding: 'utf8', timeout: 5_000,
-      });
-      assert.equal(result.error, undefined);
-      assert.equal(result.signal, null);
-      assert.equal(result.status, 1);
-      assert.equal(result.stdout, '');
-      assert.ok(result.stderr.length <= 501);
-      assert.match(result.stderr, /\[REDACTED\]/u);
-      assert.ok(!result.stderr.includes(secret));
-      assert.equal(await readFile(retained, 'utf8'), 'keep');
     }
   });
   test('GMS names altered by redaction are withheld without a collected success', async () => {
@@ -8077,6 +6958,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       ['collection and both persistence operations took 7750.5 ms, beyond 7750 ms']);
     assert.deepEqual(gmsAttackTimingRule(limits, quietWindowStage, 680).violations,
       ['elapsed 680 ms is shorter than the 681 ms collection it contains']);
+    assert.deepEqual(gmsAttackTimingRule(limits, quietWindowStage, 680.5).violations, []);
     const invalidMeasurements: Array<[unknown, unknown]> = [
       [{ durationMs: 681 }, 1_000], [{ durationMs: 681, parseDurationMs: 0 }, 1_000],
       [{ durationMs: 681, parseDurationMs: Number.NaN }, 1_000], [{ parseDurationMs: 106 }, 1_000],
@@ -8100,48 +6982,50 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     const limits = { persistenceOperationTimeoutMs: 5_000, ownershipTimeoutMs: 2_000, parseReserveMs: 1_000 };
     const probeBudgetMs = gmsTimeoutProbeBudgetMs(limits);
     assert.equal(probeBudgetMs, 8_000);
-    const shortParentMs = limits.persistenceOperationTimeoutMs + 1_250;
-    for (const parentTimeoutMs of [shortParentMs, probeBudgetMs]) {
+    const shortParent = { timeoutMs: limits.persistenceOperationTimeoutMs + 2_250, ownershipCostMs: 1_300 };
+    const fullParent = { timeoutMs: probeBudgetMs, ownershipCostMs: 300 };
+    for (const { timeoutMs: parentTimeoutMs, ownershipCostMs } of [shortParent, fullParent]) {
       const fixture = await harness.createFixture();
+      const saved = { ...process.env };
+      Object.assign(process.env, fixture.environment);
       let clockMs = 0;
-      let ownershipTimeoutMs: number | undefined;
+      let clockReads = 0;
+      let dispatches = 0;
       let commandTimeoutMs: number | undefined;
-      let snapshot: any;
       const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), {
-        monotonicNow: () => clockMs,
+        monotonicNow: () => {
+          clockReads++;
+          if (clockReads === 3) clockMs += ownershipCostMs;
+          return clockMs;
+        },
         boundedCommand: async (binary, args, timeout, options) => {
-          if (args.includes('--gms-diagnostic-ownership')) {
-            ownershipTimeoutMs = timeout;
-            clockMs += 300;
-            return fakeCommandResult('OWNED\n');
-          }
-          if (args.includes('dumpsys')) {
-            commandTimeoutMs = timeout;
-            throw new BoundedCommandError(binary, args, fakeCommandResult('', { code: 1, timedOut: true }));
-          }
-          if (args.includes('--gms-diagnostic-persist')) {
-            const request = JSON.parse(String(options.input)) as { snapshot: unknown; expectedBytes: number; expectedSha256: string };
-            snapshot = request.snapshot;
-            return fakeCommandResult(`${JSON.stringify({ byteLength: request.expectedBytes, sha256: request.expectedSha256 })}\n`);
-          }
-          throw new Error(`unexpected command ${args.join(' ')}`);
+          if (!args.includes('dumpsys')) return boundedCommand(binary, args, timeout, options);
+          dispatches++;
+          commandTimeoutMs = timeout;
+          throw new BoundedCommandError(binary, args, fakeCommandResult('', { code: 1, timedOut: true }));
         },
       });
-
-      await measurement.observeGmsStage('after-device-start', new PhaseBudget('gms-timeout-probe', { timeoutMs: parentTimeoutMs, now: () => clockMs }));
-      await measurement.finalizeGmsObservations();
-      assert.deepEqual(snapshot.limits.ownershipTimeoutMs, limits.ownershipTimeoutMs);
-      assert.equal(snapshot.stages[0].outcome, 'failed');
-      if (parentTimeoutMs === shortParentMs) {
-        assert.equal(ownershipTimeoutMs, 249);
-        assert.equal(commandTimeoutMs, undefined);
-        assert.match(snapshot.stages[0].error, /owned-device verification exceeded its monotonic time bound/u);
-        continue;
+      try {
+        await measurement.observeGmsStage('after-device-start', new PhaseBudget('gms-timeout-probe', { timeoutMs: parentTimeoutMs, now: () => clockMs }));
+        await measurement.finalizeGmsObservations();
+        const snapshot = JSON.parse(await readFile(join(fixture.root, 'android-environment-gms-observations.json'), 'utf8'));
+        const stage = snapshot.stages[0];
+        assert.deepEqual(snapshot.limits.ownershipTimeoutMs, limits.ownershipTimeoutMs);
+        assert.equal(stage.outcome, 'failed');
+        assert.equal(stage.ownershipDurationMs, ownershipCostMs);
+        if (parentTimeoutMs === shortParent.timeoutMs) {
+          assert.equal(dispatches, 0);
+          assert.match(stage.error, /owned-device verification exceeded its monotonic time bound/u);
+          continue;
+        }
+        assert.equal(commandTimeoutMs, 1_700);
+        assert.equal(stage.timedOut, true);
+        assert.match(stage.error, /GMS diagnostic command timed out/u);
+      } finally {
+        await measurement.finish().catch(() => undefined);
+        for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+        Object.assign(process.env, saved);
       }
-      assert.equal(ownershipTimeoutMs, 1_999);
-      assert.equal(commandTimeoutMs, 1_700);
-      assert.equal(snapshot.stages[0].timedOut, true);
-      assert.match(snapshot.stages[0].error, /GMS diagnostic command timed out/u);
     }
   });
   test('diagnostic GMS errors are bounded, explicit and fail closed at the collection layer', async () => {

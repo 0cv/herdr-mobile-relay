@@ -3,13 +3,13 @@ import { createHash } from 'node:crypto';
 import { PassThrough } from 'node:stream';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
-import { mkdtemp, readFile, writeFile, rm, truncate, symlink } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile, rm, stat, truncate, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, posix } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { assessAndroidEnvironment, environmentLeaves, readEnvironmentInputs, type AndroidEnvironmentSnapshot, type AndroidPackageIdentity, type AndroidPlannedTermination, type EnvironmentInputBytes } from '../android-environment';
 import { AndroidEnvironmentMeasurement, type AndroidMeasurementIO } from '../android-measurement';
-import { BoundedCommandError, boundedCommand as runBoundedCommand } from '../support/bounded-process';
+import { boundedCommand as runBoundedCommand } from '../support/bounded-process';
 import { PhaseBudget } from '../support/budget';
 import type { OwnedProcess, RetirementEvidence } from '../support/owned-process';
 import { AndroidProductRecorder, androidProductImpact, publicMobileSummary, validateProductObservations, type ProductObservations } from '../support/android-product';
@@ -326,22 +326,30 @@ class MeasurementCollectorMock implements OwnedProcess {
 }
 
 export const measurementFailureCases = ['none', 'begin-snapshot', 'begin-marker', 'close', 'log', 'collector', 'identity', 'check', 'completion', 'end-snapshot'] as const;
+const measurementPublishedFiles = { log: environmentLeaves.log, collector: environmentLeaves.collector, identity: 'android-environment-identity.json',
+  check: 'android-environment-check.json', completion: 'android-environment-completion.json' } as const;
 export async function measurementControl(failure: typeof measurementFailureCases[number]): Promise<void> {
   const directory = await mkdtemp(join(tmpdir(), 'sm59-measurement-'));
-  const diagnostics = await import('./android-environment').catch(() => undefined);
+  const ownership = join(directory, 'ownership');
+  await writeFile(ownership, 'android:emulator-5554');
+  const savedOwnership = process.env.MOBILE_DEVICE_OWNERSHIP_FILE;
+  process.env.MOBILE_DEVICE_OWNERSHIP_FILE = ownership;
+  try {
+    await measurementControlRun(directory, failure);
+  } finally {
+    if (savedOwnership === undefined) delete process.env.MOBILE_DEVICE_OWNERSHIP_FILE;
+    else process.env.MOBILE_DEVICE_OWNERSHIP_FILE = savedOwnership;
+  }
+}
+async function measurementControlRun(directory: string, failure: typeof measurementFailureCases[number]): Promise<void> {
   const trace: string[] = [];
   const original = new Error(`injected-${failure}`), cleanup = new Error('injected-cleanup');
   const child = new MeasurementCollectorMock();
   const failBegin = failure.startsWith('begin-');
+  const blocked = Object.hasOwn(measurementPublishedFiles, failure) ? measurementPublishedFiles[failure as keyof typeof measurementPublishedFiles] : undefined;
+  if (blocked) await mkdir(join(directory, blocked));
   const io: Partial<AndroidMeasurementIO> = {
     boundedCommand: async (binary, args, timeout, options) => {
-      if (args.includes('--android-measurement-persist-json') || args.includes('--android-measurement-persist-text')) {
-        const request = JSON.parse(String(options.input));
-        const name = request.target.endsWith('.log') ? 'log' : request.target.match(/android-environment-(\w+)\.json$/u)![1];
-        trace.push(name);
-        if (name === failure) throw original;
-        if (failBegin && name === 'completion') throw new Error('injected-receipt');
-      }
       if (args.includes('dumpsys')) {
         const stdout = `Packages:
   Package [com.google.android.gms] (fixture):
@@ -380,30 +388,6 @@ Compiler stats:
           childExited: true, targetCloseObserved: true, ownedProcessesExited: true, stdioClosed: true, stdoutBytes: 0, stderrBytes: 0,
           stdoutRetainedBytes: 0, stderrRetainedBytes: 0, stdoutSha256: hash(''), stderrSha256: hash('') };
       }
-      if (args.includes('--android-measurement-owner') || args.includes('--gms-diagnostic-ownership')) {
-        const stdout = args.includes('--gms-diagnostic-ownership') ? 'OWNED\n' : 'BEGIN_OK\n';
-        return { stdout, stderr: '', code: 0, durationMs: 1, timedOut: false, outputLimitExceeded: false, aborted: false,
-          childExited: true, targetCloseObserved: true, ownedProcessesExited: true, stdioClosed: true, stdoutBytes: Buffer.byteLength(stdout), stderrBytes: 0,
-          stdoutRetainedBytes: Buffer.byteLength(stdout), stderrRetainedBytes: 0, stdoutSha256: hash(stdout), stderrSha256: hash('') };
-      }
-      if (args.includes('--android-measurement-mkdir') && diagnostics) {
-        const observer = (() => {
-          try { return diagnostics.createBoundedSupervisorObserver(directory, 'mkdir-supervisor'); } catch { return undefined; }
-        })();
-        try {
-          return await runBoundedCommand(binary, args, timeout, observer ? { ...options, observerSupervisor: observer.stream } : options);
-        } catch (error) {
-          if (observer && error instanceof BoundedCommandError) {
-            await Promise.resolve().then(() => process.stderr.write(`SM59_MKDIR_FAILURE ${redactText(JSON.stringify({
-              failure, trace, launchError: error.result.launchError ?? null,
-              details: diagnostics.boundedCommandFailureDetails(error.result, observer.records(), true),
-            }))}\n`)).catch(() => undefined);
-          }
-          throw error;
-        } finally {
-          await observer?.close().catch(() => undefined);
-        }
-      }
       return runBoundedCommand(binary, args, timeout, options);
     },
     spawnCollector: () => child,
@@ -418,7 +402,6 @@ Compiler stats:
       return { stdout: '', stderr: '' } as Awaited<ReturnType<AndroidMeasurementIO['command']>>;
     },
     stopProcess: async () => { trace.push('close'); if (failure === 'close') throw original; if (failBegin) throw cleanup; return child.retire('measurement-finished').then(evidence => evidence); },
-    writeJson: async (path, data) => { const name = path.match(/android-environment-(\w+)\.json$/u)![1]; trace.push(name); if (name === failure) throw original; if (failBegin && name === 'completion') throw new Error('injected-receipt'); await writeSanitizedJson(path, data); },
   };
   const measurement = new AndroidEnvironmentMeasurement('emulator-5554', directory, 'unused-public-toolchains', io,
     new PhaseBudget('product-measurement-control', { timeoutMs: 600_000 }));
@@ -434,15 +417,18 @@ Compiler stats:
     assert.equal(measurement.failureOutcome().errors[0], caught);
     assert.ok(measurement.failureOutcome().errors.includes(cleanup));
     await measurement.finish();
-    assert.ok(trace.includes('collector') && trace.includes('completion'));
+    for (const name of ['collector', 'completion'] as const) assert.ok((await stat(join(directory, measurementPublishedFiles[name]))).isFile(), name);
+    assert.equal(JSON.parse(await readFile(join(directory, measurementPublishedFiles.completion), 'utf8')).passed, false);
     return;
   }
   await measurement.begin();
   for (const stage of ['after-setup-url', 'after-browser-install', 'after-initial-installed-app-launch'] as const) await measurement.observeGmsStage(stage, stageBudget);
   const outcome = await measurement.finish();
   assert.ok(trace.indexOf('snapshot:end') < trace.indexOf('close'));
-  for (const step of ['close', 'log', 'collector', 'identity', 'check', 'completion']) assert.ok(trace.includes(step), `${failure}/${step}`);
+  assert.ok(trace.includes('close'), failure);
+  for (const [step, file] of Object.entries(measurementPublishedFiles)) assert.equal((await stat(join(directory, file))).isDirectory(), step === failure, `${failure}/${step}`);
   if (failure === 'none') { assert.deepEqual(outcome.errors, []); assert.equal(outcome.assessment?.status, 'PASS'); assert.equal(outcome.assessmentSha256, hash(await readFile(join(directory, 'android-environment-check.json')))); }
+  else if (blocked) assert.ok(outcome.errors.length > 0, failure);
   else assert.ok(outcome.errors.includes(original), failure);
   if (failure === 'none') {
     const log = await readFile(join(directory, environmentLeaves.log)), collector = JSON.parse(await readFile(join(directory, environmentLeaves.collector), 'utf8'));
