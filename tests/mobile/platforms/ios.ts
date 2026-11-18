@@ -61,6 +61,8 @@ const IOS_FINAL_ADD_ACKNOWLEDGEMENT_MS = 12_000;
 const IOS_ADD_TO_HOME_SCREEN_ACKNOWLEDGEMENT_MS = 12_000;
 const IOS_CONFIRMATION_ROUND_MS = 4 * IOS_NATIVE_LOOKUP_ROUND_MS + IOS_CONFIRMATION_LOOKUP_MS + 2 * IOS_CONFIRMATION_IDENTITY_MS + IOS_FINAL_ADD_ACKNOWLEDGEMENT_MS;
 const IOS_CONFIRMATION_COMPLETION_MS = 2 * IOS_NATIVE_LOOKUP_ROUND_MS + IOS_CONFIRMATION_IDENTITY_MS + IOS_FINAL_ADD_ACKNOWLEDGEMENT_MS;
+// A passing hosted run found Add enabled on its second poll, so a third disabled poll is unusual enough to save the sheet once.
+const IOS_CONFIRMATION_DISABLED_CAPTURE_POLLS = 3;
 // iOS 27 shows the confirmation button labelled "Add" without guaranteeing that its accessibility name is also "Add".
 export const IOS_CONFIRMATION_ADD_XPATH = "//XCUIElementTypeNavigationBar[(@name='Add to Home Screen' or @label='Add to Home Screen' or .//XCUIElementTypeStaticText[@name='Add to Home Screen' or @label='Add to Home Screen' or @value='Add to Home Screen']) and @visible='true' and not(ancestor::*[@visible='false'])]//XCUIElementTypeButton[@name='Add' or @label='Add']";
 const IOS_NATIVE_SCROLL_COMMAND_MS = 5_000;
@@ -1009,6 +1011,7 @@ export class IOSPlatform implements MobilePlatform {
       throw this.installationAddFailure;
     }
     let lastState = 'missing';
+    let disabledPolls = 0;
     while (phase.remainingMs >= IOS_NATIVE_LOOKUP_ROUND_MS) {
       try {
         if (this.driver.snapshot().selectedContext !== 'NATIVE_APP') throw new Error('IOS_SHARE: Add: confirmation is not in the native context');
@@ -1029,6 +1032,8 @@ export class IOSPlatform implements MobilePlatform {
           const enabled = await this.readNativeControlAttribute(element, 'enabled', IOS_NATIVE_LOOKUP_ROUND_MS, true, policy);
           if (enabled === 'false') {
             lastState = 'disabled';
+            disabledPolls += 1;
+            if (disabledPolls === IOS_CONFIRMATION_DISABLED_CAPTURE_POLLS) await this.captureDisabledConfirmation(phase, policy);
           } else if (enabled !== 'true') {
             lastState = 'indeterminate';
           } else if (phase.remainingMs < IOS_CONFIRMATION_COMPLETION_MS) {
@@ -1068,6 +1073,25 @@ export class IOSPlatform implements MobilePlatform {
       await delay(250, phase);
     }
     throw new Error(`IOS_SHARE: Add: confirmation control was not ready within the complete native lookup/read allowance (${lastState})`);
+  }
+
+  private async captureDisabledConfirmation(phase: PhaseBudget, policy: WebDriverRequestPolicy): Promise<void> {
+    const record = (outcome: string, extra: Record<string, unknown> = {}) => this.diagnostics.record({
+      phase: 'ios-install-confirmation', operation: 'disabled-confirmation-hierarchy', detail: { outcome, remainingMs: phase.remainingMs, ...extra },
+    });
+    if (phase.remainingMs < IOS_NATIVE_HIERARCHY_COMMAND_MS + IOS_CONFIRMATION_ROUND_MS) {
+      record('skipped-budget');
+      return;
+    }
+    try {
+      const source = await this.driver.command<unknown>('/source', 'GET', undefined, IOS_NATIVE_HIERARCHY_COMMAND_MS, policy);
+      if (typeof source !== 'string') throw new Error('IOS_SHARE: Add: malformed confirmation hierarchy response');
+      await writeBoundedText(join(this.outputDir, 'ios-confirmation-disabled-hierarchy.xml'), source);
+      record('captured');
+    } catch (error) {
+      if (isFatalDriverError(error)) throw error;
+      record('unavailable', { error: error instanceof Error ? error.message : String(error) });
+    }
   }
 
   private installConfirmationElementId(response: unknown): string {
