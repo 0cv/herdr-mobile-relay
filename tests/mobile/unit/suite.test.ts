@@ -63,6 +63,7 @@ import { validateFakeAdbDiagnostic, type FakeAdbDiagnostic, type FakeAdbDiagnost
 import { androidTransportTests } from './android-transport';
 import { FakeClock } from './fake-clock';
 import { androidEmulatorLifetimeTests } from './android-emulator-lifetime';
+import { androidHostSnapshotTests } from './android-host-snapshot';
 import { nativeStartupTests } from './native-startup';
 import { xctestOwnerTests } from './xctest-owner';
 import { xctestOutputTests } from './xctest-output';
@@ -2609,7 +2610,7 @@ for (const [name, body] of webdriverFatalTests) test(name, body);
 for (const [name, body] of iosInstalledClientTests) test(name, body);
 for (const [name, body] of [...iosProducerPrivacyTests, ...iosIntegrityEvidenceTests]) test(name, body);
 for (const [name, body] of [...confirmationSettingsTests, ...initialSettingsTests]) test(name, body);
-for (const [name, body] of [...androidEmulatorLifetimeTests, ...androidTransportTests, ...nativeStartupTests, ...xctestOwnerTests, ...xctestOutputTests, ...ownedInputTests]) test(name, body);
+for (const [name, body] of [...androidEmulatorLifetimeTests, ...androidHostSnapshotTests, ...androidTransportTests, ...nativeStartupTests, ...xctestOwnerTests, ...xctestOutputTests, ...ownedInputTests]) test(name, body);
 for (const [name, body] of iosTests) test(`iOS ${name}`, body);
 test('Android CI gates the shared local Appium launch path', async () => {
   await import('./android-appium-ci');

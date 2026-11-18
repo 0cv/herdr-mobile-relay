@@ -151,6 +151,12 @@ runs:
           sleep 2
         done
       shell: bash
+    - name: Record Android host state after boot
+      if: inputs.platform == 'android'
+      run: |
+        set -euo pipefail
+        bun tests/mobile/support/android-host-snapshot.ts after-boot "$MOBILE_OUTPUT"
+      shell: bash
     - name: Install pinned Android Chrome and Trichrome Library
       if: inputs.platform == 'android'
       run: |
@@ -339,6 +345,12 @@ runs:
           --baseline "${{ inputs.baseline }}" \
           --output "$MOBILE_OUTPUT" \
           --private-output "$MOBILE_PRIVATE"
+      shell: bash
+    - name: Record Android host state after scenarios
+      if: always() && inputs.platform == 'android'
+      run: |
+        set -euo pipefail
+        bun tests/mobile/support/android-host-snapshot.ts after-scenarios "$MOBILE_OUTPUT"
       shell: bash
     - name: Validate immutable Android environment report
       if: always() && inputs.platform == 'android'
