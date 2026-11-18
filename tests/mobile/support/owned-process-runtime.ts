@@ -1556,10 +1556,16 @@ function managerSpawnInGroup(state: ManagerState, native: NativeRuntime, binary:
   return restoreFailed;
 }
 
+function managerReportTargetLaunchFailure(state: ManagerState, error: unknown) {
+  managerSendTargetLaunchError(state, error instanceof Error ? error.message : 'target process could not be spawned');
+  managerSendNoChild(state);
+  managerStop(state, 'target-launch-error');
+  managerCloseIfRetired(state);
+}
+
 // Undefined means the launch failed and was already reported; otherwise whether leaving the target process group failed.
-async function managerSpawnTarget(state: ManagerState, binary: string, args: string[]): Promise<boolean | undefined> {
+function managerSpawnTarget(state: ManagerState, native: NativeRuntime, binary: string, args: string[]): boolean | undefined {
   try {
-    const native = await loadNativeRuntime();
     if (state.stopping || nowNs() >= BigInt(state.targetExecutionDeadlineNs)) {
       managerSendNoChild(state);
       managerStop(state, 'timeout');
@@ -1570,10 +1576,7 @@ async function managerSpawnTarget(state: ManagerState, binary: string, args: str
     }
     return managerSpawnInGroup(state, native, binary, args);
   } catch (error) {
-    managerSendTargetLaunchError(state, error instanceof Error ? error.message : 'target process could not be spawned');
-    managerSendNoChild(state);
-    managerStop(state, 'target-launch-error');
-    managerCloseIfRetired(state);
+    managerReportTargetLaunchFailure(state, error);
     return undefined;
   }
 }
@@ -1634,7 +1637,15 @@ async function managerLaunchTarget(state: ManagerState, message: RecordValue) {
     managerStop(state, 'timeout');
     return;
   }
-  const managerGroupRestoreFailed = await managerSpawnTarget(state, message.binary, message.args as string[]);
+  let native: NativeRuntime;
+  try {
+    native = await loadNativeRuntime();
+  } catch (error) {
+    managerReportTargetLaunchFailure(state, error);
+    return;
+  }
+  // Spawn and attach the target's listeners in the same tick so its spawn event cannot be missed.
+  const managerGroupRestoreFailed = managerSpawnTarget(state, native, message.binary, message.args as string[]);
   if (managerGroupRestoreFailed === undefined) return;
   const targetProcess = state.target;
   if (!targetProcess) {
