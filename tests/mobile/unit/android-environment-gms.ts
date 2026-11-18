@@ -1247,6 +1247,7 @@ export function androidEnvironmentGmsObservationTests(harness: Harness): Test[] 
       ['collection and both persistence operations took 7750.5 ms, beyond 7750 ms']);
     assert.deepEqual(gmsAttackTimingRule(limits, quietWindowStage, 680).violations,
       ['elapsed 680 ms is shorter than the 681 ms collection it contains']);
+    assert.deepEqual(gmsAttackTimingRule(limits, quietWindowStage, 680.5).violations, []);
     const invalidMeasurements: Array<[unknown, unknown]> = [
       [{ durationMs: 681 }, 1_000], [{ durationMs: 681, parseDurationMs: 0 }, 1_000],
       [{ durationMs: 681, parseDurationMs: Number.NaN }, 1_000], [{ parseDurationMs: 106 }, 1_000],

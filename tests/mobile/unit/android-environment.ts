@@ -211,7 +211,8 @@ export function gmsAttackTimingRule(limits: unknown, stage: unknown, elapsedMs: 
   const elapsed = Number(elapsedMs);
   if (parseDurationMs > parseReserveMs) violations.push(`normalization took ${parseDurationMs} ms, beyond its ${parseReserveMs} ms parse reserve`);
   if (durationMs > stageAllowanceMs) violations.push(`collection took ${durationMs} ms, beyond its ${stageAllowanceMs} ms stage allowance`);
-  if (elapsed < durationMs) violations.push(`elapsed ${elapsed} ms is shorter than the ${durationMs} ms collection it contains`);
+  // durationMs is rounded up to whole milliseconds, so compare it with the rounded-up elapsed time.
+  if (Math.ceil(elapsed) < durationMs) violations.push(`elapsed ${elapsed} ms is shorter than the ${durationMs} ms collection it contains`);
   if (elapsed > compositeCeilingMs) violations.push(`collection and both persistence operations took ${elapsed} ms, beyond ${compositeCeilingMs} ms`);
   return { violations, stageAllowanceMs, compositeCeilingMs };
 }
