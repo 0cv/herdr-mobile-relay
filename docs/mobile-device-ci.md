@@ -414,4 +414,20 @@ exit and truncation state. A closed stream without an exit frame has unknown
 remote status. This preceding-window diagnostic does not replace the mandatory
 qualified environment collector or establish exhaustive coverage or cleanliness.
 
+Each Android job records the host side of the ADB connection right after the
+emulator boots and again after the scenario step, even when it failed, as
+`android-host-after-boot.json` and `android-host-after-scenarios.json`. Each
+records which `adb` binary is on PATH and whether it is the SDK copy Appium uses,
+`adb version`, every running ADB server process with its start time, `adb
+devices -l` (skipped when no server runs, so recording never starts one), load
+average, memory and pressure figures, and host kernel log lines about crashes,
+out-of-memory kills, KVM, QEMU or ADB. The last 256 KiB of the ADB server's own
+log is kept, redacted, as `android-adb-server-<stage>.log`. A changed server PID
+or start time shows that the ADB server restarted; the same server with a higher
+`transport_id` shows that it reconnected to the emulator. Recording never fails
+the job. Hosted runs have lost the ADB connection in two ways: the emulator
+process hung and then exited with SIGSEGV, or the connection dropped and
+reconnected within a second while the emulator kept running. Why the connection
+dropped is not known yet; these files are there to answer that.
+
 Physical-phone signoff remains separate: verify the same old-to-candidate flow on an approved Android handset and iPhone, with production access disabled and no uploaded device state. Record OS/browser/PWA provider, standalone launch, credential reconnect, preference preservation, cold relaunch, and keyboard results alongside the emulator artifacts; never treat simulator success as physical-device coverage.
