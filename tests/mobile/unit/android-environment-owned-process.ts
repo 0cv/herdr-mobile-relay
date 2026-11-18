@@ -2003,12 +2003,12 @@ export function androidEnvironmentOwnedProcessTests(harness: Harness): Test[] {
     }
 
     const descendantSentinel = join(fixture.root, 'late-descendant-sentinel');
-    const descendantCode = `process.on('SIGTERM',()=>{});setTimeout(()=>{require('node:fs').writeFileSync(${JSON.stringify(descendantSentinel)},'late');process.exit(0)},500);setInterval(()=>{},1000)`;
+    const descendantCode = `process.on('SIGTERM',()=>{});setTimeout(()=>{require('node:fs').writeFileSync(${JSON.stringify(descendantSentinel)},'late');process.exit(0)},2_500);setInterval(()=>{},1000)`;
     const parentCode = `require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendantCode)}],{stdio:'inherit'});process.exit(0)`;
     const descendantObserver = createBoundedSupervisorObserver(fixture.root, 'bounded-descendant-supervisor');
     let descendantResult: BoundedCommandError | undefined;
     try {
-      await boundedCommand('node', ['-e', parentCode], 250, {
+      await boundedCommand('node', ['-e', parentCode], 1_250, {
         maxBytes: 1_000, cleanupReservationMs: 150, observerSupervisor: descendantObserver.stream,
       });
     } catch (error) {
@@ -2022,7 +2022,7 @@ export function androidEnvironmentOwnedProcessTests(harness: Harness): Test[] {
     assert.equal(descendantResult.result.childExited, true, descendantDetails);
     assert.equal(descendantResult.result.ownedProcessesExited, true, descendantDetails);
     assert.equal(descendantResult.result.stdioClosed, true, descendantDetails);
-    await new Promise(resolve => setTimeout(resolve, 400));
+    await new Promise(resolve => setTimeout(resolve, 2_500));
     assert.equal(existsSync(descendantSentinel), false);
 
     const nodePath = execFileSync('node', ['-e', 'process.stdout.write(process.execPath)'], { encoding: 'utf8' }).trim();
