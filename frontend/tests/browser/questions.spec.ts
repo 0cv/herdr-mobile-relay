@@ -479,6 +479,34 @@ test('restores structured questions from the cached agent snapshot after reload'
   await expect(page.getByRole('button', { name: 'yes, single permission' })).toBeHidden();
 });
 
+test('shows a fresh relay selection for the same question after closing Keyboard', async ({ page }) => {
+  await connectFedora(page, { capabilities: ['attention_classification', 'structured_questions', 'manual_terminal_input'] });
+  const interaction = {
+    id: 'keyboard-question', kind: 'single_select', question: 'Choose an option', submit_label: 'Submit',
+    options: [{ index: 0, label: 'First' }, { index: 1, label: 'Second' }],
+  };
+  const agent = { pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question', project: 'Questions', agent: 'claude', interaction };
+  await server(page, 0, { type: 'agents', agents: [agent] });
+  await page.getByRole('button', { name: 'Open Questions on Fedora' }).click();
+  const first = page.getByRole('radio', { name: 'First', exact: true });
+  const second = page.getByRole('radio', { name: 'Second', exact: true });
+  await first.check();
+  await expect(first).toBeChecked();
+
+  await page.getByRole('button', { name: 'Keyboard', exact: true }).click();
+  const keyboard = page.getByRole('region', { name: 'Keyboard', exact: true });
+  await expect(keyboard).toBeVisible();
+  await expect(first).toBeHidden();
+  await server(page, 0, {
+    type: 'agent_update', ...agent,
+    interaction: { ...interaction, options: interaction.options.map((option) => ({ ...option, selected: option.index === 1 })) },
+  });
+  await keyboard.getByRole('button', { name: 'Close', exact: true }).click();
+  await expect(second).toBeChecked();
+  await expect(first).not.toBeChecked();
+  expect((await commands(page)).filter((command) => command.type === 'answer_question')).toEqual([]);
+});
+
 test('restores a confirmed choice after navigating away from an incomplete draft', async ({ page }) => {
   const first = {
     id: 'confirmed-reconnect', kind: 'single_select', question: 'Choose reconnect strategy',

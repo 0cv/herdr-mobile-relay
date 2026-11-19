@@ -30,7 +30,7 @@ function listItem(line: string): ListItem | null {
   return { type: bullet ? 'ul' : 'ol', indent, content: markerEnd + (spaces > 4 ? 1 : spaces), start: bullet ? 1 : Number(number), text };
 }
 
-function escapedWithHighlight(value: string, highlight: string): string {
+export function escapedWithHighlight(value: string, highlight: string): string {
   const needle = highlight.trim();
   if (!needle) return escapeHtml(value);
   const lower = value.toLocaleLowerCase();
@@ -191,7 +191,7 @@ export function speakableText(value: string): string {
   return lines.filter(Boolean).join('\n').replace(/[ \t]+/gu, ' ').trim();
 }
 
-export function safeMarkdownHtml(value: string, highlight = ''): string {
+export function safeMarkdownHtml(value: string, highlight = '', _role?: string): string {
   const lines = value.replace(/\r\n?/g, '\n').split('\n');
   const output: string[] = [];
   let inCode = false;

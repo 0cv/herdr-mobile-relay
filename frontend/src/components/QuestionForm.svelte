@@ -6,6 +6,7 @@
   import {
     answerFailureToast,
     createQuestionDraft,
+    createQuestionDraftCache,
     questionDraftKey,
     questionSubmitAllowed,
     returnedInteraction,
@@ -15,8 +16,7 @@
   } from '$lib/questions';
   import type { Agent, QuestionDraft, QuestionInteraction } from '$lib/types';
 
-  const drafts = new Map<string, QuestionDraft>();
-  const dirtyDrafts = new Set<string>();
+  const { drafts, dirtyDrafts } = createQuestionDraftCache();
   const OTHER_CHOICE = 'other';
 
   let {

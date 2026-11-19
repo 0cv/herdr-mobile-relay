@@ -1,0 +1,39 @@
+.app-header { flex-wrap: wrap; row-gap: 0; }
+.app-header .demo-label { flex-basis: 100%; margin: .3rem 0 0; }
+.demo-label { color: var(--foreground); font-size: .75rem; font-weight: 650; margin: 0 0 .5rem; }
+.app-dialog .demo-label { background: var(--card); position: sticky; top: 0; z-index: 1; }
+.demo-interaction-hint { color: var(--muted); font-size: .68rem; margin: .2rem .55rem; }
+.demo-user-text { margin: 0; white-space: pre-wrap; }
+.terminal-bottom .arrow-menu, .question-only .arrow-menu { position: static; }
+.terminal-bottom .arrow-popup { bottom: calc(100% + .35rem); right: .55rem; }
+.question-only .term-keys:has(.arrow-popup) { margin-bottom: 9rem; position: relative; }
+.question-only .arrow-popup { bottom: auto; right: .55rem; top: calc(100% + .35rem); }
+#demo-startup { color: #eceff4; background: #2e3440; }
+
+@media (orientation: portrait) {
+  .terminal-view.question-only .question-form { align-content: safe center; }
+  .question-only .question-progress { margin-bottom: .6rem; }
+  .question-only .question-form legend { font-size: 1.05rem; margin-bottom: 1rem; }
+  .question-only .question-choice { margin-bottom: .65rem; padding: .95rem; }
+  .question-only .question-choice:has(input:checked) { border-color: var(--primary); }
+  .question-only .question-choice small { font-size: .78rem; margin-top: .35rem; }
+  .question-only .question-actions { margin-top: 1rem; }
+}
+
+@media (max-width: 679px) {
+  .agent-list { padding-top: .65rem; }
+  .agent-list .server-filters, .agent-list .agent-section { margin-bottom: .65rem; }
+  .workspace-grid { gap: .45rem; }
+  .workspace-card > summary { padding: .5rem .7rem; }
+  .workspace-tabs { padding: .35rem .6rem .42rem; }
+  .workspace-worktree-card > header { padding: .38rem 0; }
+  .compact-agent-card .agent-open { padding: .4rem .55rem; }
+  .conversation-stream { gap: .4rem; }
+  .conversation-entry { padding: .48rem .6rem; }
+  .conversation-tools { margin-top: .4rem; padding-top: .35rem; }
+  .conversation-markdown pre { margin: .35rem 0; padding: .45rem; }
+  .workspace-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  .workspace-body.sidebar-collapsed { grid-template-rows: minmax(0, 1fr); }
+  .workspace-body > aside { border-right: 0; border-bottom: 1px solid var(--border); max-height: min(8rem, 25dvh); }
+  .workspace-diff { width: 100%; white-space: pre-wrap; overflow-wrap: anywhere; }
+}

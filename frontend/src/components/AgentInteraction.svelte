@@ -2,22 +2,21 @@
   import { onDestroy } from 'svelte';
   import Button from '$components/ui/Button.svelte';
   import KeyboardIcon from '$components/ui/KeyboardIcon.svelte';
-  import { agentNeedsResponse, attentionKind, approvalButtonVariant, approvalOptions, questionInteraction } from '$lib/agents';
+  import { approvalButtonVariant, approvalOptions, questionInteraction } from '$lib/agents';
   import { relayStore } from '$lib/store';
   import { AppReloadHeld, importOrReload } from '$lib/updates';
   import type { Agent } from '$lib/types';
 
   let { agent, readOnly = false, responding = false, blocked = false }:
     { agent: Agent; readOnly?: boolean; responding?: boolean; blocked?: boolean } = $props();
-  const pending = $derived(!readOnly && agentNeedsResponse(agent));
-  const interaction = $derived(questionInteraction(agent));
-  const options = $derived(approvalOptions(agent));
+  const interaction = $derived(readOnly ? null : questionInteraction(agent));
+  const options = $derived(readOnly ? [] : approvalOptions(agent));
   let destroyed = false;
   onDestroy(() => { destroyed = true; });
-  const questionPending = () => !destroyed && pending && attentionKind(agent) === 'question';
+  const questionPending = () => !destroyed && Boolean(interaction);
 </script>
 
-{#if pending && attentionKind(agent) === 'question' && interaction}
+{#if interaction}
   {#await importOrReload(() => import('./QuestionForm.svelte'), questionPending)}
     <p role="status">Loading question controls…</p>
   {:then { default: Form }}
@@ -25,7 +24,7 @@
   {:catch error}
     <p role="alert">{#if error instanceof AppReloadHeld}{error.message}{:else}Question controls could not load. In Terminal, tap <KeyboardIcon label="Keyboard" inline /> to type an answer.{/if}</p>
   {/await}
-{:else if pending && attentionKind(agent) === 'approval'}
+{:else if options.length}
   <div class="quick-actions" aria-label="Approval choices">
     {#each options as option, index (`${index}:${option}`)}
       <Button disabled={responding || blocked}

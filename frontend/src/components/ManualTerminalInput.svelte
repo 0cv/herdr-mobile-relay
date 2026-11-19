@@ -5,6 +5,7 @@
   import { dispatchFlag } from '$lib/composer';
   import { piPromptDelivery } from '$lib/pi-prompt.svelte';
   import { terminalTextError } from '$lib/terminal-input-policy';
+  import { keyResultMessage } from '$lib/terminal-key-messages';
   import { freshAgentStatus } from '$lib/input-target-state';
   import { guardReload } from '$lib/reload-guard';
   import { paneActive, pollPane } from '$lib/pane-activity.svelte';
@@ -74,7 +75,10 @@
       if (!mounted) return;
       if (!unconfirmed) {
         if (!enter && text === submitted) text = '';
-        feedback = enter ? 'Enter delivered.' : 'Text delivered; Enter not sent.';
+        const message = keyResultMessage?.(result);
+        feedback = enter
+          ? `Enter delivered.${message ? ` ${message}` : ''}`
+          : 'Text delivered; Enter not sent.';
       }
     } catch (error) {
       unconfirmed = !dispatchFlag(error, 'not_started');

@@ -6,6 +6,7 @@ endif
 WEB_PROJECT ?= herdr-0cv
 WEB_ORIGIN ?= https://$(WEB_PROJECT).pages.dev
 WEB_BRANCH ?= main
+DEMO_PROJECT ?= herdr-0cv-demo
 WRANGLER_VERSION ?= 4.125.0
 PATH := /opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$(HOME)/.local/bin:$(PATH)
 export PATH
@@ -22,7 +23,8 @@ help:
 	@echo "  make web-deploy                 Deploy ./web to Cloudflare Pages and verify the public bundle"
 	@echo "    WEB_ORIGIN=https://...        Public origin to verify after deployment"
 	@echo "  make web-release                Replace ./web with a verified frontend release build"
-	@echo "  make demo-screenshots           Capture the demo home with pinned Chromium"
+	@echo "  make demo-screenshots           Regenerate ten demo screenshots in images/ with pinned Chromium"
+	@echo "  make demo-deploy                Build and deploy the separate demo to Cloudflare Pages"
 	@echo "  make service-install            Install/start the relay service for this platform"
 	@echo "  make setup-link                 Print the phone setup link and QR code for a stable relay"
 	@echo "  make app-deploy-setup           Authorize this relay to deploy a separate Pages app"
@@ -178,10 +180,17 @@ frontend-check:
 	bun build frontend/public/notification-icons.js --outfile=/dev/null
 	bash -n frontend/scripts/run-browser-tests.sh
 
-.PHONY: demo-screenshots
+.PHONY: demo-screenshots demo-deploy
 demo-screenshots:
 	bun run --cwd frontend build
 	bash frontend/scripts/demo-screenshots.sh
+
+demo-deploy:
+	bun run --cwd frontend build
+	@set -eu; \
+	work="$$(mktemp -d)"; trap 'rm -rf "$$work"' EXIT; \
+	node frontend/scripts/demo-site.mjs frontend/dist "$$work/site"; \
+	npx --yes wrangler@$(WRANGLER_VERSION) pages deploy "$$work/site" --project-name "$(DEMO_PROJECT)" --branch main --skip-caching
 
 frontend-browser:
 	frontend/scripts/run-browser-tests.sh playwright.config.ts

@@ -19,6 +19,7 @@
     HOME_LAYOUTS,
     HOME_LAYOUT_LABELS,
     INTERFACE_SIZES,
+    runningAsInstalledApp,
     TERMINAL_HISTORY_OPTIONS,
     TERMINAL_REFRESH_LABELS,
     TERMINAL_REFRESH_OPTIONS,
@@ -259,11 +260,9 @@
       : /Android/i.test(userAgent)
         ? 'android'
         : 'other';
-    const standalone = (window.matchMedia?.('(display-mode: standalone)').matches ?? false)
-      || (navigator as Navigator & { standalone?: boolean }).standalone === true;
     return {
       platform,
-      installed: standalone,
+      installed: runningAsInstalledApp(),
       supports_push: pushSupported(),
       permission: notificationsSupported() ? Notification.permission : 'unavailable',
     };

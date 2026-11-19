@@ -23,6 +23,10 @@ export function answerFailureToast(
   return [error.message, true];
 }
 
+export function createQuestionDraftCache() {
+  return { drafts: new Map<string, QuestionDraft>(), dirtyDrafts: new Set<string>() };
+}
+
 export function questionDraftKey(agent: Agent, interaction: QuestionInteraction): string {
   return `${agent.pane_id}::${interaction.id}`;
 }

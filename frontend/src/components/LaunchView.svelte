@@ -4,7 +4,7 @@
   import DirectoryPicker from '$components/DirectoryPicker.svelte';
   import Button from '$components/ui/Button.svelte';
   import Card from '$components/ui/Card.svelte';
-  import { suggestedLaunchName } from '$lib/launch';
+  import { launchAbandoned, launchConfirmed, launchDirectoryUnavailable, launchError, launchTaskHint, launchWorkspaceSuffix, suggestedLaunchName } from '$lib/launch';
   import { replaceView } from '$lib/router';
   import { relayStore } from '$lib/store';
 
@@ -155,7 +155,7 @@
     const launch = activeLaunch;
     if (!launch || (launch.relayId === relayId && connection?.status === 'connected' && !readOnly)) return;
     abandonLaunch();
-    status = 'Launch confirmation stopped. Check Agents before starting again; the desktop launch may still finish.';
+    status = launchAbandoned;
     error = true;
   });
 
@@ -184,7 +184,7 @@
       }, undefined, false, launch.controller.signal);
       if (activeLaunch !== launch) return;
       const warning = String(result.data?.warning || '');
-      status = warning || 'Start confirmed. Refreshing agent list.';
+      status = warning || launchConfirmed;
       error = Boolean(warning);
       prompt = '';
       name = '';
@@ -193,7 +193,7 @@
       replaceView({ view: 'agents' });
     } catch (caught) {
       if (activeLaunch !== launch) return;
-      status = `${(caught as Error).message}. Check Agents before starting again; a tab may already exist.`;
+      status = launchError(caught as Error);
       error = true;
       relayStore.showToast(status, true);
     } finally {
@@ -219,7 +219,7 @@
       {/if}
       {#if readOnly}<p class="warning" role="status">This paired device has read-only access to the selected relay.</p>{/if}
       {#if targetWorkspace}
-        <p class="hint">New tab in workspace <strong>{targetWorkspace.label}</strong>. The desktop keeps its current focus.</p>
+        <p class="hint">New tab in workspace <strong>{targetWorkspace.label}</strong>.{launchWorkspaceSuffix}</p>
       {/if}
 
       <label for="launch-profile">Agent</label>
@@ -247,7 +247,7 @@
         listId="launch-directory-list"
         bind:open={directoryOpen}
         onselect={directoryLoader.load}
-        notice={!connection?.capabilities.includes('directory_browser') ? 'Update and restart this computer’s relay to browse directories.' : ''}
+        notice={!connection?.capabilities.includes('directory_browser') ? launchDirectoryUnavailable : ''}
         emptyNotice="This folder has no subdirectories. It remains selected."
       />
       {#if atHome}
@@ -261,7 +261,7 @@
 
       <label for="launch-prompt">Initial task <span class="optional">(optional)</span></label>
       <textarea id="launch-prompt" bind:value={prompt} maxlength="100000" placeholder="Describe the task to start…"></textarea>
-      <p class="hint">Sent to the agent as its first prompt after it starts.</p>
+      <p class="hint">{launchTaskHint}</p>
       <Button type="submit" aria-describedby={atHome ? 'launch-cwd-hint' : undefined} disabled={submitting || readOnly || atHome || connection?.directoryLoading || directoryRelayId !== relayId || !relayId || !profileId || !cwd || !name}>Start Agent</Button>
       {#if status}
         <p class:error class="form-status" role="status">{status}</p>
