@@ -41,6 +41,78 @@ make relay-plugin      # link this checkout as a Herdr plugin
 make stable-setup      # run the stable tunnel wizard with the installed relay
 ```
 
+## Preview the demo
+
+Build the frontend, then generate and serve the static demo on its own
+loopback origin:
+
+```bash
+bun run --cwd frontend build
+demo_dir="$(mktemp -d)/site"
+node frontend/scripts/demo-site.mjs frontend/dist "$demo_dir"
+PORT=4174 node frontend/scripts/browser-server.mjs "$demo_dir"
+```
+
+Open `http://127.0.0.1:4174/`. The demo runs the real phone UI against an
+in-browser sample relay. Terminal and Conversation replies, answers, and agent
+launches are scripted: nothing you type leaves the browser, and reloading
+resets the scene. Pairing, attachments, notifications, Read Aloud playback,
+and updates are unavailable; the sample QR contains only `Herdr demo`.
+
+Keep the demo on a separate origin from the phone app. It needs no live relay
+and does not register a service worker. `make web-deploy` publishes only the
+phone app.
+
+### Deploy the demo
+
+`make demo-deploy` builds the frontend, generates the demo in a temporary
+directory, and publishes it to the separate Cloudflare Pages project
+`herdr-0cv-demo` (`https://demo.herdr-mobile.dev`), on branch `main`. It uses
+the Wrangler version pinned in `Makefile` (`WRANGLER_VERSION`) and does not
+publish `web/`. To deploy to another demo project, use
+`make demo-deploy DEMO_PROJECT=your-demo-project`.
+
+### Regenerate the demo screenshots
+
+Install the frontend dependencies (`bun install --frozen-lockfile --cwd frontend`)
+with Bun and Node.js from [Toolchains](#toolchains). Start Docker with
+`linux/amd64` support (emulation on ARM hosts) and cache the renderer image named
+below for that platform before running the target. The target does not pull
+images. No host browser or relay is needed.
+
+```bash
+make demo-screenshots
+```
+
+This rebuilds the frontend and serves the generated demo on loopback inside
+`mcr.microsoft.com/playwright:v1.63.0-noble` (the Playwright version pinned in
+`frontend/package.json`). The `linux/amd64` container supplies Chromium and its
+system fonts and has no external network. Each shot starts in a fresh 390 × 844
+mobile context at scale 2 with a fixed clock, `en-US` locale, UTC, and the Nord
+theme. Sample activity is dated relative to when the page loads; the fixed
+capture clock keeps those dates the same across runs. The capture drives the
+app's controls and checks that the intended content is in frame and the fonts,
+including Herdr Nerd Symbols, have loaded.
+It also checks the QR JPEG for a dark finder mark and a light margin.
+
+All ten JPEGs must pass the scene and 780 × 1688 size checks in a temporary
+output directory before they replace `frontend/test-results/demo/` captures
+and the matching files in `images/`. A missing scene or font leaves both sets
+unchanged. To verify reproducibility, run twice and check the hashes of both
+sets against the first capture:
+
+```bash
+shots=(home.jpeg terminal.jpeg agent_plan.jpeg conversations.jpeg git-history.jpeg
+       devices.jpeg devices-invite.jpeg devices-qr.jpeg speech.jpeg notifications.jpg)
+hashes="$(mktemp)"
+make demo-screenshots &&
+  (cd frontend/test-results/demo && shasum -a 256 "${shots[@]}") > "$hashes" &&
+  (cd images && shasum -a 256 -c "$hashes") &&
+  make demo-screenshots &&
+  (cd frontend/test-results/demo && shasum -a 256 -c "$hashes") &&
+  (cd images && shasum -a 256 -c "$hashes")
+```
+
 ## Launch deadlines
 
 Agent startup has a 40-second backend budget, followed by at most 12 seconds

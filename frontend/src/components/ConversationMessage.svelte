@@ -54,19 +54,21 @@
 
   let {
     text,
+    role,
     viewState,
     tools = [],
     highlight = '',
     awaiting = null,
   }: {
     text: string;
+    role?: string;
     viewState: ConversationMessageViewState;
     tools?: ConversationTool[];
     highlight?: string;
     awaiting?: 'below' | 'elsewhere' | null;
   } = $props();
 
-  const markdown = $derived(safeMarkdownHtml(text, highlight));
+  const markdown = $derived(safeMarkdownHtml(text, highlight, role));
 </script>
 
 {#if text}

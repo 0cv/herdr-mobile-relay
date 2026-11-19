@@ -5,6 +5,13 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.26.1] - 2026-11-19
+
+### Added
+
+- Try the phone app in your browser with sample computers and scripted agent
+  replies, without installing or pairing a relay.
+
 ## [0.26.0] - 2026-11-18
 
 ### Changed
@@ -2079,7 +2086,8 @@ Version 0.22.5 was withdrawn; this release skips its version and asset generatio
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.26.0...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.26.1...HEAD
+[0.26.1]: https://github.com/0cv/herdr-mobile-relay/compare/v0.26.0...v0.26.1
 [0.26.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.25.1...v0.26.0
 [0.25.1]: https://github.com/0cv/herdr-mobile-relay/compare/v0.25.0...v0.25.1
 [0.25.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.24.0...v0.25.0

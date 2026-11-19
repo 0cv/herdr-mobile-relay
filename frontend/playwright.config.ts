@@ -34,9 +34,19 @@ export default defineConfig({
     { name: 'chromium-mobile', use: { ...devices['Pixel 7'] } },
     { name: 'webkit-mobile', use: { ...devices['iPhone 15'] } },
   ],
-  webServer: {
-    command: `node scripts/browser-server.mjs ${JSON.stringify(webRoot)}`,
-    port: 4173,
-    reuseExistingServer: false,
-  },
+  webServer: [
+    {
+      command: `node scripts/browser-server.mjs ${JSON.stringify(webRoot)}`,
+      port: 4173,
+      reuseExistingServer: false,
+    },
+    {
+      command: `demo=$(mktemp -d) && trap 'rm -rf "$demo"' EXIT &&
+        node scripts/demo-site.mjs ${JSON.stringify(webRoot)} "$demo/site" && node scripts/browser-server.mjs "$demo/site"`,
+      port: 4174,
+      env: { PORT: '4174' },
+      reuseExistingServer: false,
+      gracefulShutdown: { signal: 'SIGTERM', timeout: 5_000 },
+    },
+  ],
 });

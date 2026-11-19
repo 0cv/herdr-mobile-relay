@@ -148,8 +148,7 @@
   const responsePending = $derived(agentNeedsResponse(agent));
   const approvalMode = $derived(responsePending && attentionKind(agent) === 'approval');
   const inspectionMode = $derived(agentNeedsInspection(agent));
-  const interaction = $derived(questionInteraction(agent));
-  const questionMode = $derived(Boolean(!readOnly && responsePending && attentionKind(agent) === 'question' && interaction));
+  const questionMode = $derived(!readOnly && Boolean(questionInteraction(agent)));
   // Resize Session needs three things: this device opted in, it controls the
   // relay, and the relay advertises the opt-in capability. The legacy
   // pane_size_lease name is ignored: a relay offering only that resizes on any
@@ -1002,9 +1001,9 @@
   {#if readOnly}
     <p class="key-feedback" role="status">Reader access is read only. Use a controller device to send input or answer prompts.</p>
   {/if}
-  {#if questionMode && interaction && !manualInput}
-    <AgentInteraction {agent} {readOnly} responding={responding.has(agent.pane_id)} blocked={inputBlocked} />
-    <TerminalKeys queue={keyQueue} {agent} {readOnly} blocked={inputBlocked} bind:sending={keySending} extra={manualInputTrigger} />
+  {#if questionMode && !manualInput}
+    <AgentInteraction {agent} responding={responding.has(agent.pane_id)} blocked={inputBlocked} />
+    <TerminalKeys queue={keyQueue} {agent} blocked={inputBlocked} bind:sending={keySending} extra={manualInputTrigger} />
   {/if}
   <div class:hidden={questionMode} class="terminal-view term">
   <TerminalFind

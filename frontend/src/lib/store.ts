@@ -26,6 +26,7 @@ import {
   quickSetupConfig,
   quickSetupInvitation,
   RELAY_KEY_BYTES,
+  runningAsInstalledApp,
   saveRelayConfigs,
   shouldDeferPairingConnection,
   shouldRetainSetupFragment,
@@ -2640,13 +2641,6 @@ function relayConnectionIdentityChanged(before: RelayConfig, after: RelayConfig)
 
 function paneLeaseKey(agent: Agent): string {
   return `${agent.relay_id}\u0000${agent.pane_id}`;
-}
-
-function runningAsInstalledApp(): boolean {
-  return Boolean(
-    window.matchMedia?.('(display-mode: standalone)').matches
-    || (navigator as Navigator & { standalone?: boolean }).standalone,
-  );
 }
 
 export function pushClientId(): string {

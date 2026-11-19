@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { createProjectInventory } from '../../src/demo/scene';
 import { commands, connectFedora, server, socketCount } from '../support/journey-relay';
 
 test('manages workspace modals, grouped worktrees, and drag ordering', async ({ page }) => {
@@ -6,14 +7,7 @@ test('manages workspace modals, grouped worktrees, and drag ordering', async ({ 
   await connectFedora(page, {
     capabilities: ['tab_rename', 'agent_launch', 'attention_classification', 'directory_browser', 'workspace_management', 'workspace_reorder_block', 'worktree_management'],
   });
-  const parent = {
-    workspace_id: 'w1', number: 1, label: 'Project', pane_count: 1, tab_count: 1,
-    cwd: '/work/project',
-    worktree: {
-      repo_key: 'repo', repo_name: 'project', repo_root: '/work/project',
-      checkout_path: '/work/project', is_linked_worktree: false,
-    },
-  };
+  const { project: parent, linked, projectAgent } = createProjectInventory();
   const shellOnly = {
     workspace_id: 'w2', number: 2, label: 'Shell Only', pane_count: 1, tab_count: 1,
     cwd: '/home/test/shell-only',
@@ -22,8 +16,7 @@ test('manages workspace modals, grouped worktrees, and drag ordering', async ({ 
   await server(page, 0, {
     type: 'agents',
     agents: [{
-      pane_id: 'w1:p1', workspace_id: 'w1', tab_id: 'w1:t1', tab_number: 1, cwd: '/work/project',
-      tab_label: 'Agent', status: 'working', project: 'fallback-project', agent: 'codex',
+      ...projectAgent, tab_label: 'Agent', status: 'working', project: 'fallback-project',
     }],
   });
 
@@ -99,14 +92,6 @@ test('manages workspace modals, grouped worktrees, and drag ordering', async ({ 
     path: '/work/worktrees/project/fix-one',
   });
 
-  const linked = {
-    workspace_id: 'w4', number: 4, label: 'fix/one', pane_count: 1, tab_count: 1,
-    cwd: '/work/worktrees/project/fix-one',
-    worktree: {
-      repo_key: 'repo', repo_name: 'project', repo_root: '/work/project',
-      checkout_path: '/work/worktrees/project/fix-one', is_linked_worktree: true,
-    },
-  };
   await server(page, 0, { type: 'workspaces', workspaces: [parent, linked, shellOnly, phoneWorkspace] });
   await worktreeDialog.getByLabel('Branch').fill('fix/issue-14');
   await worktreeDialog.getByLabel('Base ref').fill('main');

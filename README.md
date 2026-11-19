@@ -6,7 +6,7 @@ Control agents from the [Herdr](https://herdr.dev) TUI, herdr-app or herdr-core
 from your phone. Each Linux or macOS computer runs its own relay; the phone
 connects to them and merges every agent into one installable web app.
 
-**Current version:** [`0.26.0`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.26.0) · [Changelog](CHANGELOG.md)
+**Current version:** [`0.26.1`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.26.1) · [Changelog](CHANGELOG.md)
 
 > [!IMPORTANT]
 > Native Windows is not supported. WSL2 may work but is not tested.
@@ -100,16 +100,19 @@ Tested with herdr-core **0.1.18** and herdr-app **0.1.13** (also **0.1.12**).
 
 If you use the Herdr TUI, the setup menu above sets up the TUI relay, the core
 relay, or both, and each QR says which computer it adds. Without the TUI,
-download `install.sh` from this repository at tag `v0.26.0` and run
-`sh install.sh 0.26.0`; it downloads and verifies the release bundle and prints
+download `install.sh` from this repository at tag `v0.26.1` and run
+`sh install.sh 0.26.1`; it downloads and verifies the release bundle and prints
 the command that opens the same menu. Core pairs over Tailscale or Cloudflare;
 see the [core guide](docs/herdr-core.md).
 
 ## What you get
 
+**[Try the demo](https://demo.herdr-mobile.dev)** in your browser with sample
+data and scripted replies. No setup required.
+
 | Agents | Terminal | Pairing |
 | --- | --- | --- |
-| <img src="images/home.jpeg" alt="Agents grouped by workspace and worktree across computers" width="260"> | <img src="images/terminal.jpeg" alt="Mobile terminal with Copy, Speak, attachments, and terminal keys" width="260"> | <img src="images/devices-qr.jpeg" alt="One-use device invitation shown as a QR code" width="260"> |
+| <img src="images/home.jpeg" alt="Atlas and Birch workspaces, including the fix/one worktree, below a pinned test approval and rollout question" width="260"> | <img src="images/terminal.jpeg" alt="OpenCode terminal showing sample file reads and test results above the prompt and terminal keys" width="260"> | <img src="images/devices-qr.jpeg" alt="Reader invitation preview with a QR code labelled Herdr demo, not a setup link" width="260"> |
 
 - Monitor and control agents across several computers, grouped by status and
   Herdr workspace, with agents that need input pinned on top.
