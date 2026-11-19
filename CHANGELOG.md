@@ -5,6 +5,11 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Try the phone app in your browser with sample computers and scripted agent
+  replies, without installing or pairing a relay.
+
 ## [0.26.0] - 2026-11-18
 
 ### Changed

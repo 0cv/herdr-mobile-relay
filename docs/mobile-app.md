@@ -54,21 +54,27 @@ setup and want to know what every screen and control is for.
   Speak button.
 - Detect Codex, Claude Code, Devin, OpenCode, Qoder CLI, Pi, Oh My Pi, and Kimi.
 
+[Try the demo](https://demo.herdr-mobile.dev) in your browser with the fictional
+computers and agents shown below. Replies are scripted: nothing you type is
+sent anywhere or executed, and reloading resets the sample scene. Real pairing,
+attachments, Read Aloud playback, notifications, and updates require the live
+app and a connected relay.
+
 | Agents |
 | --- |
-| <img src="../images/home.jpeg" alt="Mobile list of Herdr agents" width="392"> |
+| <img src="../images/home.jpeg" alt="Atlas and Birch workspaces, including the fix/one worktree, below a pinned test approval and rollout question" width="392"> |
 
-| Plan Questions | Notifications |
+| Plan Questions | In-app Notification Settings |
 | --- | --- |
-| <img src="../images/agent_plan.jpeg" alt="Structured plan question navigation" width="392"> | <img src="../images/notifications.jpg" alt="Blocked-agent notification" width="392"> |
+| <img src="../images/agent_plan.jpeg" alt="Search rollout question with descriptions of the Preview first and All at once choices" width="392"> | <img src="../images/notifications.jpg" alt="In-app Notifications settings showing delivery off and unavailable in the demo" width="392"> |
 
 | Git Inspection | Native Conversations |
 | --- | --- |
-| <img src="../images/git-history.jpeg" alt="Read-only mobile Git diff with diff-aware colors and zoom controls" width="392"> | <img src="../images/conversations.jpeg" alt="Mobile native conversation history rendered from the agent transcript" width="392"> |
+| <img src="../images/git-history.jpeg" alt="Workspace Changes tab listing two files and showing three groups of additions and removals in the release notes diff" width="392"> | <img src="../images/conversations.jpeg" alt="Full history showing three exchanges about the search rollout, with completed Read, Edit, and Bash steps" width="392"> |
 
 | Terminal | Read Aloud |
 | --- | --- |
-| <img src="../images/terminal.jpeg" alt="Mobile terminal with Copy, Speak, attachments, and terminal keys" width="392"> | <img src="../images/speech.jpeg" alt="Speech settings with the language choice and the relay's cached voices" width="392"> |
+| <img src="../images/terminal.jpeg" alt="OpenCode terminal showing sample file reads and test results above the prompt and terminal keys" width="392"> | <img src="../images/speech.jpeg" alt="Read Aloud settings listing sample English and French voices with playback and downloads unavailable" width="392"> |
 
 ### Cursor picker filters
 
@@ -127,9 +133,12 @@ handshake consumes the invitation. Create a separate invitation for every
 additional controller or reader, or print the setup link again on the
 computer: every print arms the relay's bootstrap for one more phone.
 
-| Invite a device | Paired devices |
-| --- | --- |
-| <img src="../images/devices-invite.jpeg" alt="Invite Device dialog choosing a name and the reader role" width="392"> | <img src="../images/devices.jpeg" alt="Paired devices with rename, revoke, forget, and reset controls" width="392"> |
+The demo shows fictional devices and an invitation preview. It creates no
+invitation: the sample QR contains only the text `Herdr demo`, not a setup link.
+
+| Sample paired devices | Invite Device preview | Sample QR |
+| --- | --- | --- |
+| <img src="../images/devices.jpeg" alt="Paired devices on Atlas and Birch, with a controller on Atlas and readers on both computers" width="260"> | <img src="../images/devices-invite.jpeg" alt="Sample Invite Device dialog with the read-only Reader role selected" width="260"> | <img src="../images/devices-qr.jpeg" alt="Sample QR labelled Herdr demo, not a setup link" width="260"> |
 
 An uncaught phone-side error appears in a bottom **App error** banner because
 mobile browsers often provide no useful console. Copy or photograph its text
