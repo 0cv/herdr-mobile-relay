@@ -1,9 +1,10 @@
 import { expect, test, type Browser, type Page } from '@playwright/test';
 import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 const appOrigin = 'http://127.0.0.1:4173';
 const demoOrigin = 'http://127.0.0.1:4174';
-const release = JSON.parse(readFileSync('dist/release.json', 'utf8')) as {
+const release = JSON.parse(readFileSync(resolve(process.env.HERDR_WEB_ROOT || 'dist', 'release.json'), 'utf8')) as {
   build: string;
   files: { javascript: { path: string }; stylesheet: { path: string } };
 };

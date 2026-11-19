@@ -2,11 +2,10 @@ import { defineConfig, devices } from '@playwright/test';
 import { resolve } from 'node:path';
 
 const webRoot = resolve(process.env.HERDR_WEB_ROOT || 'dist');
-const testDemo = webRoot === resolve('dist');
 
 export default defineConfig({
   testDir: './tests/browser',
-  testIgnore: ['attention-relay.spec.ts', 'terminal-input.spec.ts', ...(testDemo ? [] : ['demo-home.spec.ts'])],
+  testIgnore: ['attention-relay.spec.ts', 'terminal-input.spec.ts'],
   timeout: 30_000,
   expect: { timeout: 5_000 },
   fullyParallel: true,
@@ -41,15 +40,13 @@ export default defineConfig({
       port: 4173,
       reuseExistingServer: false,
     },
-    ...(testDemo ? [
-      {
-        command: `demo=$(mktemp -d) && trap 'rm -rf "$demo"' EXIT &&
-          node scripts/demo-site.mjs dist "$demo/site" && node scripts/browser-server.mjs "$demo/site"`,
-        port: 4174,
-        env: { PORT: '4174' },
-        reuseExistingServer: false,
-        gracefulShutdown: { signal: 'SIGTERM', timeout: 5_000 },
-      },
-    ] : []),
+    {
+      command: `demo=$(mktemp -d) && trap 'rm -rf "$demo"' EXIT &&
+        node scripts/demo-site.mjs ${JSON.stringify(webRoot)} "$demo/site" && node scripts/browser-server.mjs "$demo/site"`,
+      port: 4174,
+      env: { PORT: '4174' },
+      reuseExistingServer: false,
+      gracefulShutdown: { signal: 'SIGTERM', timeout: 5_000 },
+    },
   ],
 });
