@@ -1,8 +1,8 @@
 # How your phone reaches your computer
 
-Four transports can carry traffic between your phone and a relay: a Cloudflare
-tunnel, Tailscale Serve, the community gateway, or a gateway you run yourself.
-All four use end-to-end relay encryption. Only the two gateway choices then try
+Five transports can carry traffic between your phone and a relay: a Cloudflare
+tunnel, Tailscale Serve, the community gateway, a gateway you run yourself, or
+an HTTPS reverse proxy you already run. All five use end-to-end relay encryption. Only the two gateway choices then try
 to leave the transport behind: phone and computer negotiate a direct peer-to-peer
 connection and the gateway is left carrying the fallback. Cloudflare tunnel
 traffic always goes through Cloudflare; Tailscale Serve is tailnet-only.
@@ -15,12 +15,14 @@ traffic always goes through Cloudflare; Tailscale Serve is tailnet-only.
 | **Tailscale Serve** | Tailscale on phone and computer in the same tailnet; MagicDNS and HTTPS certificates enabled. | Your Tailscale tailnet | Private HTTPS without a Cloudflare account, domain, or gateway. |
 | **Community gateway** | No account and no domain, but the phone app must already be hosted somewhere — a gateway serves no app. | A gateway operated by the project, until the direct path forms | Free, shared, best-effort; not for heavy transfers. Pick it to avoid Cloudflare setup entirely. |
 | **Your own gateway** | A small VPS with Docker and a public hostname. | Your own gateway, until the direct path forms | Dedicated bandwidth, and the transport logs stay on your machine. See [gateway-self-hosting.md](gateway-self-hosting.md). |
+| **Your own reverse proxy** | An HTTPS reverse proxy you run, with a certificate your phone trusts. | Your proxy | LAN-only or self-managed setups with no tunnel and no `cloudflared`. |
 
-In the setup menu, pick **Cloudflare**, **WebRTC**, or **Tailscale**, then choose
-an action within that path. Use **Back** to switch paths. Cloudflare offers
-**Temporary Cloudflare Tunnel** and **Stable Tunnel**; WebRTC offers
-**Community WebRTC Gateway** and **Deploy or Upgrade Your Own WebRTC Gateway**;
-Tailscale offers **Always on Tailscale**. A completed choice starts or restarts
+In the setup menu, pick **Cloudflare**, **WebRTC**, **Tailscale**, or **Reverse
+Proxy**, then choose an action within that path. Use **Back** to switch paths.
+Cloudflare offers **Temporary Cloudflare Tunnel** and **Stable Tunnel**; WebRTC
+offers **Community WebRTC Gateway** and **Deploy or Upgrade Your Own WebRTC
+Gateway**; Tailscale offers **Always on Tailscale**; Reverse Proxy offers **Use
+Your Own Reverse Proxy**. A completed choice starts or restarts
 the relay and prints the phone QR; there is no second Quick Start step.
 
 ## Tailscale Serve
@@ -62,6 +64,58 @@ even if the subsequent service install or uninstall fails. If removal is
 impossible, set `HERDR_TAILSCALE_ABANDON=1` for the turn-off action to clear the
 selection without removing the mapping; clean up port 8443 manually. Full
 uninstall attempts the same scoped removal and warns if manual cleanup is needed.
+
+## Your own reverse proxy
+
+**Reverse Proxy → Use Your Own Reverse Proxy** asks for the hostname your phone
+opens and whether the proxy runs on this computer, then installs or reuses the
+background relay service without starting `cloudflared`. When the proxy runs on
+another machine, the relay listens on every interface (`0.0.0.0`) instead of
+`127.0.0.1`. Point the proxy at `http://<relay address>:8375` (8377 for the core
+relay) with WebSocket upgrades allowed, and serve it over HTTPS on port 443. The
+relay serves the phone app itself, so the printed QR needs nothing else. Run the
+action again to change the hostname. If the phone cannot open the address while
+on the same network, check for a VPN on the phone, such as Tailscale: it can
+keep the phone from reaching local addresses.
+
+Like Always on Tailscale, the selection is exclusive: before choosing another
+path, choose **Reverse Proxy → Stop Using Your Own Reverse Proxy**. Turning it off
+returns the relay to `127.0.0.1` and reinstalls the service for its Cloudflare
+tunnel when one is configured, or removes the service otherwise. Your proxy
+configuration is never changed.
+
+Unattended setups set the same values in `relay.env` and run
+`relay/service.sh install`:
+
+```bash
+HERDR_REVERSE_PROXY_HOST=relay.home.example
+HERDR_RELAY_HOST=0.0.0.0
+```
+
+Without a proxy yet, [Caddy](https://caddyserver.com) on the relay's computer
+is enough for a home network. Answer **yes** to "Does the proxy run on this
+computer?" and use the computer's local name, such as `my-mac.local`:
+
+```caddyfile
+my-mac.local {
+    tls internal
+    reverse_proxy 127.0.0.1:8375
+}
+```
+
+Run it with `caddy run --config Caddyfile`; on Linux, port 443 needs root or the
+packaged Caddy service. Some Android versions do not resolve `.local` names; use
+a name your network's DNS knows instead.
+
+`tls internal` signs the certificate with Caddy's own local authority, so the
+phone must trust it once. Copy `pki/authorities/local/root.crt` from Caddy's
+data directory (`caddy environ` prints it as `caddy.AppDataDir`) to the phone.
+On iPhone, install the downloaded profile, then turn it on under Settings →
+General → About → Certificate Trust Settings. On Android, install it under
+Settings → Security → Encryption & credentials → Install a certificate → CA
+certificate. Opening `https://my-mac.local` on the phone should then show the
+app without a warning. If your devices already use Tailscale, Always on
+Tailscale avoids this step.
 
 ## The gateway path
 

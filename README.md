@@ -147,7 +147,7 @@ terminal controls, and notification settings.
 
 ## Choosing how your phone connects
 
-The setup menu starts with **Cloudflare**, **WebRTC**, and **Tailscale**. Select a path to see only its actions; use **Back** to choose another path.
+The setup menu starts with **Cloudflare**, **WebRTC**, **Tailscale**, and **Reverse Proxy**. Select a path to see only its actions; use **Back** to choose another path.
 
 | Choice | Needs | Best for |
 | --- | --- | --- |
@@ -155,16 +155,19 @@ The setup menu starts with **Cloudflare**, **WebRTC**, and **Tailscale**. Select
 | Cloudflare tunnel | nothing for a temporary URL; a Cloudflare account and domain for a permanent hostname | the fastest one-computer trial or a permanent background service |
 | Tailscale Serve | Tailscale on phone and computer, in the same tailnet | private HTTPS without Cloudflare or a gateway; fast reconnects |
 | Your own gateway | a small VPS | dedicated bandwidth and control of the transport logs |
+| Your own reverse proxy | an HTTPS reverse proxy you already run | LAN-only or self-managed setups with no tunnel |
 
-All four use end-to-end relay encryption. On either gateway the phone and the
+All five use end-to-end relay encryption. On either gateway the phone and the
 computer then negotiate a direct peer-to-peer connection, leaving the gateway
 with the fallback; Cloudflare tunnel traffic stays on Cloudflare. Tailscale
-Serve is available only inside your tailnet.
+Serve is available only inside your tailnet, and a reverse proxy only where
+your proxy is reachable.
 [Set up Tailscale →](QUICKSTART.md#use-tailscale-instead).
 
 - **[Transports explained →](docs/transports.md)**
 - **[Permanent Cloudflare tunnel →](docs/cloudflare-tunnel.md)**
 - **[Run your own gateway →](docs/gateway-self-hosting.md)**
+- **[Use your own reverse proxy →](docs/transports.md#your-own-reverse-proxy)**
 
 ## Agents with a non-default config directory
 

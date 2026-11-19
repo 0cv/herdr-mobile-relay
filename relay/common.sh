@@ -474,11 +474,18 @@ relay_transport() {
 
     if [ -n "$(env_file_value "$env_file" HERDR_TAILSCALE_PORT)" ]; then
         echo tailscale
+    elif [ -n "$(env_file_value "$env_file" HERDR_REVERSE_PROXY_HOST)" ]; then
+        echo proxy
     elif [ -n "$(gateway_urls "$env_file")" ]; then
         echo gateway
     else
         echo cloudflare
     fi
+}
+
+# Tailscale Serve and your own reverse proxy reach the relay without a Cloudflare tunnel.
+relay_uses_cloudflared() {
+    [ -z "${HERDR_TAILSCALE_PORT:-}" ] && [ -z "${HERDR_REVERSE_PROXY_HOST:-}" ]
 }
 
 installed_service_env_file() {
@@ -1418,12 +1425,16 @@ prompt_gateway_selection() {
     gateway_selection_choice "$default_selection" "$answer"
 }
 
-refuse_if_tailscale_selected() {
-    if [ ! -f "$1" ] || ! grep -q '^HERDR_TAILSCALE_PORT=' "$1"; then
-        return 0
+refuse_if_always_on_selected() {
+    [ -f "$1" ] || return 0
+    if grep -q '^HERDR_TAILSCALE_PORT=' "$1"; then
+        echo "Always on Tailscale is selected. Choose Tailscale → Turn Always on Tailscale Off first." >&2
+        return 1
     fi
-    echo "Always on Tailscale is selected. Choose Tailscale → Turn Always on Tailscale Off first." >&2
-    return 1
+    if grep -q '^HERDR_REVERSE_PROXY_HOST=' "$1"; then
+        echo "Your own reverse proxy is selected. Choose Reverse Proxy → Stop Using Your Own Reverse Proxy first." >&2
+        return 1
+    fi
 }
 
 # Persists the transport choice. An empty URL removes the key, which returns
@@ -1434,7 +1445,7 @@ set_gateway_url() {
     local env_file="$1"
     local url="$2"
 
-    refuse_if_tailscale_selected "$env_file" || return 1
+    refuse_if_always_on_selected "$env_file" || return 1
     if [ -z "$url" ]; then
         remove_env_value_atomic "$env_file" HERDR_GATEWAY_URL
         remove_env_value_atomic "$env_file" HERDR_GATEWAY_SELECTION
@@ -1691,7 +1702,7 @@ choose_phone_app_base_url() {
 
     echo "Which app should your phone open?" >&2
     echo "This picks the web app only. How the phone reaches this computer" >&2
-    echo "(Cloudflare, WebRTC or Tailscale) stays the same." >&2
+    echo "(Cloudflare, WebRTC, Tailscale or your reverse proxy) stays the same." >&2
     echo "" >&2
     if [ -s "$configured_origin" ]; then
         if ! current_origin="$(phone_app_base_url "$relay_fallback" "$env_file")"; then

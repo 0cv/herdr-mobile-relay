@@ -16,6 +16,7 @@ if [ -n "$(env_file_value "$ENV_FILE" HERDR_TAILSCALE_PORT)" ]; then
     echo "Always on Tailscale is already set up. Use Tailscale → Choose Phone App and Show QR, or Tailscale → Turn Always on Tailscale Off first." >&2
     exit 1
 fi
+refuse_if_always_on_selected "$ENV_FILE" || exit 1
 GATEWAYS="$(gateway_urls "$ENV_FILE")"
 RELAY_BIN="$(relay_binary)"
 require_core_relay_release || exit 1
@@ -100,7 +101,7 @@ set_gateway_url "$ENV_FILE" ""
 unset HERDR_GATEWAY_URL HERDR_GATEWAY_SELECTION
 set_env_value_atomic "$ENV_FILE" HERDR_TAILSCALE_PORT "$RELAY_TAILSCALE_PORT"
 export HERDR_RELAY_ENV="$ENV_FILE"
-if ! "$SCRIPT_DIR/setup.sh" --tailscale-prerequisites; then
+if ! "$SCRIPT_DIR/setup.sh" --always-on-prerequisites; then
     echo "✗ Prerequisite setup failed." >&2
     exit 1
 fi

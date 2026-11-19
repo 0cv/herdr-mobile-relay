@@ -42,7 +42,7 @@ case "$*" in
     *) exit 1 ;;
 esac
 FAKE
-for action in plugin-choose-transport plugin-install-service plugin-change-hostname plugin-stable-teardown plugin-configure-app-deploy plugin-setup-link plugin-status tailscale-setup tailscale-off; do
+for action in plugin-choose-transport plugin-install-service plugin-change-hostname plugin-stable-teardown plugin-configure-app-deploy plugin-setup-link plugin-status tailscale-setup tailscale-off reverse-proxy-setup reverse-proxy-off; do
     cat > "$WORK/relay/$action.sh" <<'FAKE'
 #!/bin/sh
 printf 'ACTION: %s %s\n' "${0##*/}" "$*"
@@ -61,7 +61,7 @@ without() { mv "$WORK/bin/$1" "$WORK/$1.hidden"; }
 restore() { mv "$WORK/$1.hidden" "$WORK/bin/$1"; }
 
 menu() { printf '%b' "$1" | bash "$WORK/relay/plugin-setup-menu.sh"; }
-items() { printf '%s\n' "$1" | grep -E '^  [123bq]\. ' || true; }
+items() { printf '%s\n' "$1" | grep -E '^  [1-4bq]\. ' || true; }
 
 > "$HERDR_RELAY_ENV"
 without hc
@@ -72,7 +72,7 @@ for entry in plugin-build open-plugin-pane; do
     grep -q 'TUI-only' "$WORK/core-output"
 done
 output="$(menu 'q\n')"
-[[ "$(items "$output")" == $'  1. Cloudflare\n  2. WebRTC\n  3. Tailscale\n  q. Exit, change nothing' ]]
+[[ "$(items "$output")" == $'  1. Cloudflare\n  2. WebRTC\n  3. Tailscale\n  4. Reverse Proxy\n  q. Exit, change nothing' ]]
 reject "$output" '  b. Back'
 reject "$output" 'Temporary Cloudflare Tunnel'
 reject "$output" 'ACTION:'
@@ -97,6 +97,13 @@ expect "$output" '  2. Turn Always on Tailscale Off'
 reject "$output" 'Temporary Cloudflare Tunnel'
 reject "$output" 'Community WebRTC Gateway'
 
+output="$(menu '4\nq\n')"
+expect "$output" '  1. Use Your Own Reverse Proxy'
+expect "$output" '  2. Stop Using Your Own Reverse Proxy'
+expect "$output" '  3. Choose Phone App and Show QR'
+expect "$output" '  4. Show Full Status'
+reject "$output" 'Always on Tailscale'
+
 while read -r path choice action; do
     output="$(menu "$path\\n$choice\\nq\\n")"
     expect "$output" "ACTION: $action"
@@ -116,6 +123,10 @@ done <<'EOF'
 3 2 tailscale-off.sh
 3 3 plugin-setup-link.sh
 3 4 plugin-status.sh
+4 1 reverse-proxy-setup.sh
+4 2 reverse-proxy-off.sh
+4 3 plugin-setup-link.sh
+4 4 plugin-status.sh
 EOF
 
 output="$(menu '\nq\n')"
@@ -127,7 +138,7 @@ expect "$output" 'ACTION: plugin-status.sh '
 [[ "$(printf '%s\n' "$output" | grep -c '^WebRTC$')" == 2 ]]
 [[ "$(printf '%s\n' "$output" | grep -c 'Choose a path:')" == 1 ]]
 output="$(menu '8\n2\n9\nb\nq\n')"
-expect "$output" 'Enter 1–3 or q.'
+expect "$output" 'Enter 1–4 or q.'
 expect "$output" 'Enter 1–4, b or q.'
 reject "$output" 'ACTION:'
 reject "$output" $'\033'
@@ -215,6 +226,14 @@ output="$(menu '\n2\nq\n')"
 expect "$output" 'ACTION: tailscale-off.sh '
 [[ "$(printf '%s\n' "$output" | grep -c '^Tailscale$')" == 2 ]]
 
+printf "HERDR_REVERSE_PROXY_HOST='relay.home.test'\n" > "$HERDR_RELAY_ENV"
+output="$(menu 'q\n')"
+expect "$output" '  4. Reverse Proxy (active)'
+expect "$output" '  Phone path: your reverse proxy https://relay.home.test'
+output="$(menu '\n2\nq\n')"
+expect "$output" 'ACTION: reverse-proxy-off.sh '
+[[ "$(printf '%s\n' "$output" | grep -c '^Reverse Proxy$')" == 2 ]]
+
 printf "CLOUDFLARED_CONFIG='%s/cloudflared.yml'\n" "$WORK" > "$HERDR_RELAY_ENV"
 printf 'hostname: "relay.example.test" # public hostname\n' > "$WORK/cloudflared.yml"
 output="$(menu 'q\n')"
@@ -238,7 +257,7 @@ reject "$output" 'Herdr TUI'
 expect "$output" "Herdr app relay (phone shows $HOST (core))"
 expect "$output" '  Core:       running'
 expect "$output" '  Phone path: not chosen yet - choose a path'
-[[ "$(items "$output")" == $'  1. Cloudflare\n  2. Tailscale\n  q. Exit, change nothing' ]]
+[[ "$(items "$output")" == $'  1. Cloudflare\n  2. Tailscale\n  3. Reverse Proxy\n  q. Exit, change nothing' ]]
 reject "$output" 'WebRTC'
 touch "$HC_DOWN"
 output="$(menu 'q\n')"
@@ -277,11 +296,15 @@ done <<'EOF'
 2 2 tailscale-off.sh
 2 3 plugin-setup-link.sh
 2 4 plugin-status.sh
+3 1 reverse-proxy-setup.sh
+3 2 reverse-proxy-off.sh
+3 3 plugin-setup-link.sh
+3 4 plugin-status.sh
 EOF
 output="$(menu '1\nb\nq\n')"
 [[ "$(printf '%s\n' "$output" | grep -c 'Choose a path:')" == 2 ]]
-output="$(menu '3\n2\nq\n')"
-expect "$output" 'Enter 1–2 or q.'
+output="$(menu '4\n2\nq\n')"
+expect "$output" 'Enter 1–3 or q.'
 output="$(menu '1\n7\nq\n')"
 expect "$output" 'Enter 1–6, b or q.'
 reject "$output" 'ACTION:'
