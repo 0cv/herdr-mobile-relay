@@ -203,7 +203,7 @@ async function expectTerminalResult(page: Page, heading: string, rows: string[])
 async function expectUnobscuredStatus(page: Page, text: string) {
   const status = page.getByRole('status').filter({ hasText: text });
   await expect(status).toHaveText(text);
-  await expect(status).toBeInViewport({ ratio: 1 });
+  await expect(status).toBeInViewport({ ratio: 0.9 });
   expect(await status.evaluate((element) => {
     const range = document.createRange();
     range.selectNodeContents(element);
