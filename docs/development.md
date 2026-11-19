@@ -41,6 +41,44 @@ make relay-plugin      # link this checkout as a Herdr plugin
 make stable-setup      # run the stable tunnel wizard with the installed relay
 ```
 
+## Preview the demo
+
+Build the frontend, then generate and serve the static demo on its own
+loopback origin:
+
+```bash
+bun run --cwd frontend build
+demo_dir="$(mktemp -d)/site"
+node frontend/scripts/demo-site.mjs frontend/dist "$demo_dir"
+PORT=4174 node frontend/scripts/browser-server.mjs "$demo_dir"
+```
+
+Open `http://127.0.0.1:4174/`. The demo uses the real agent list and stylesheet
+with fictional data; it has no live app entry, pairing, or service worker.
+Keep it on a separate origin so the browser isolates it from the real app's
+storage and service worker. `make web-deploy` publishes only the real app.
+
+### Capture the demo home
+
+Install the frontend dependencies (`bun install --frozen-lockfile --cwd frontend`)
+with Bun and Node.js from [Toolchains](#toolchains). Start Docker with
+`linux/amd64` support (emulation on ARM hosts) and make sure it can pull from
+`mcr.microsoft.com` on first use. No host browser or relay is needed.
+
+```bash
+make demo-screenshots
+```
+
+This rebuilds the frontend, generates the static demo site, and serves it on
+loopback inside `mcr.microsoft.com/playwright:v1.63.0-noble` (the Playwright
+version pinned in `frontend/package.json`). The container supplies Chromium
+and its system fonts. The capture uses a fresh mobile context with a fixed clock,
+locale, time zone, and Nord theme. It waits for the sample scene and fonts,
+including the bundled Herdr Nerd Symbols font, before writing the 780 × 1688
+JPEG to `frontend/test-results/demo/home.jpeg`. If the scene or bundled font
+is missing, the command fails without replacing the staged image. It never
+changes the tracked `images/`.
+
 ## Launch deadlines
 
 Agent startup has a 40-second backend budget, followed by at most 12 seconds

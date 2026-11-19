@@ -22,6 +22,7 @@ help:
 	@echo "  make web-deploy                 Deploy ./web to Cloudflare Pages and verify the public bundle"
 	@echo "    WEB_ORIGIN=https://...        Public origin to verify after deployment"
 	@echo "  make web-release                Replace ./web with a verified frontend release build"
+	@echo "  make demo-screenshots           Capture the demo home with pinned Chromium"
 	@echo "  make service-install            Install/start the relay service for this platform"
 	@echo "  make setup-link                 Print the phone setup link and QR code for a stable relay"
 	@echo "  make app-deploy-setup           Authorize this relay to deploy a separate Pages app"
@@ -176,6 +177,11 @@ frontend-check:
 	bun build frontend/public/sw.js --outfile=/dev/null
 	bun build frontend/public/notification-icons.js --outfile=/dev/null
 	bash -n frontend/scripts/run-browser-tests.sh
+
+.PHONY: demo-screenshots
+demo-screenshots:
+	bun run --cwd frontend build
+	bash frontend/scripts/demo-screenshots.sh
 
 frontend-browser:
 	frontend/scripts/run-browser-tests.sh playwright.config.ts

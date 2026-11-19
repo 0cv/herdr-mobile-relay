@@ -37,10 +37,10 @@
     agents: Agent[];
     relays: RelayConfig[];
     workspaces?: RelayWorkspace[];
-    connections?: Map<string, RelayConnectionView>;
+    connections?: ReadonlyMap<string, Pick<RelayConnectionView, 'status' | 'inventory' | 'capabilities' | 'home' | 'pairingDeferred'>>;
     workspaceDisclosure?: Record<string, boolean>;
     responding: Set<string>;
-    onopen: (agent: Agent) => void;
+    onopen?: (agent: Agent) => void;
   } = $props();
 
   const serverFilterVisible = $derived(allRelays.length > 1);
@@ -147,7 +147,7 @@
   function tabOrderingAvailable(workspace: WorkspaceGroup): boolean {
     const connection = connections.get(workspace.relayId);
     return Boolean(
-      connection?.status === 'connected'
+      onopen && connection?.status === 'connected'
       && connection.inventory.state === 'ready'
       && connection.capabilities.includes('tab_reorder'),
     );
@@ -399,14 +399,14 @@
         <button
           class="agent-open"
           aria-label={`Open ${displayName(agent)} on ${hostLabel(agent)}`}
-          disabled={!inventoryReady}
-          title={!inventoryReady
+          disabled={!onopen || !inventoryReady}
+          title={!onopen ? 'Agent actions are unavailable in this preview.' : !inventoryReady
             ? 'This cached agent is unavailable until Herdr inventory recovers.'
             : reorderWorkspace ? 'Hold to reorder this tab; Alt+arrow keys also work.' : undefined}
           aria-keyshortcuts={reorderWorkspace ? 'Alt+ArrowUp Alt+ArrowDown' : undefined}
           use:reorderPress={{ workspace: reorderWorkspace, tabId: reorderTabId ?? '' }}
           onkeydown={reorderWorkspace ? (event) => handleTabOrderKey(event, reorderWorkspace, reorderTabId ?? '') : undefined}
-          onclick={() => onopen(agent)}
+          onclick={() => onopen?.(agent)}
         >
           <span class="agent-identity">
             <AgentLogo agent={agent.agent} />
@@ -426,12 +426,13 @@
               {/if}
             </span>
             {#if meta}<span class="agent-meta">{meta}</span>{/if}
+            {#if blocked && !onopen}<span class="agent-meta">{interaction ? 'Plan question' : 'Approval required'}</span>{/if}
             {#if blocked || needsInspection}
               <span class="prompt-preview" class:prompt-full={interaction && quickQuestion(interaction)}>{interaction?.question || approvalPromptPreview(agent)}</span>
             {/if}
           </span>
         </button>
-        {#if blocked && !responding.has(agent.pane_id)}
+        {#if blocked && onopen && !responding.has(agent.pane_id)}
           <div class="agent-actions" aria-label={`Actions for ${displayName(agent)}`}>
             {#if interaction && quickQuestion(interaction)}
               {#each interaction.options as option, position (`${interaction.id}:${option.index ?? position}`)}
@@ -442,9 +443,9 @@
                   onclick={() => quickAnswer(agent, interaction, Number.isInteger(option.index) ? option.index : position)}
                 >{option.label}</Button>
               {/each}
-              <Button variant="secondary" size="sm" onclick={() => onopen(agent)}>More…</Button>
+              <Button variant="secondary" size="sm" onclick={() => onopen?.(agent)}>More…</Button>
             {:else if interaction}
-              <Button variant="trust" size="sm" onclick={() => onopen(agent)}>
+              <Button variant="trust" size="sm" onclick={() => onopen?.(agent)}>
                 {interaction.kind === 'multi_select' ? 'Choose options' : 'Choose answer'} ({interaction.options.length})
               </Button>
             {:else}
@@ -459,7 +460,7 @@
               {/each}
             {/if}
           </div>
-        {:else if blocked}
+        {:else if blocked && onopen}
           <p class="responding" role="status">Waiting for agent…</p>
         {/if}
       </article>
@@ -619,7 +620,7 @@
     <div class="empty-state" role="status">Loading agents…</div>
   {:else if !agents.length && readyRelays.length}
     <div class="empty-state" role="status">No chat agents are running.</div>
-  {:else if !agents.length && deferredRelays.length === relays.length}
+  {:else if onopen && !agents.length && deferredRelays.length === relays.length}
     <div class="empty-state" role="status">
       <p>Add Herdr to the Home Screen, then open it there to finish pairing.</p>
       <p>This browser tab keeps the setup link unused so the installed app can redeem it.</p>
