@@ -371,6 +371,13 @@ export function importQuickSetup(
   return existing ? relays.map((relay) => (relay.id === existing.id ? next : relay)) : [...relays, next];
 }
 
+export function runningAsInstalledApp(): boolean {
+  return Boolean(
+    window.matchMedia?.('(display-mode: standalone)').matches
+    || navigator.standalone === true,
+  );
+}
+
 declare const __APP_PROTOCOL_VERSION__: number;
 declare const __APP_VERSION__: string;
 declare const __APP_ASSET_VERSION__: number;

@@ -107,9 +107,12 @@ see the [core guide](docs/herdr-core.md).
 
 ## What you get
 
+**[Try the demo](https://demo.herdr-mobile.dev)** in your browser with sample
+data and scripted replies. No setup required.
+
 | Agents | Terminal | Pairing |
 | --- | --- | --- |
-| <img src="images/home.jpeg" alt="Agents grouped by workspace and worktree across computers" width="260"> | <img src="images/terminal.jpeg" alt="Mobile terminal with Copy, Speak, attachments, and terminal keys" width="260"> | <img src="images/devices-qr.jpeg" alt="One-use device invitation shown as a QR code" width="260"> |
+| <img src="images/home.jpeg" alt="Atlas and Birch workspaces, including the fix/one worktree, below a pinned test approval and rollout question" width="260"> | <img src="images/terminal.jpeg" alt="OpenCode terminal showing sample file reads and test results above the prompt and terminal keys" width="260"> | <img src="images/devices-qr.jpeg" alt="Reader invitation preview with a QR code labelled Herdr demo, not a setup link" width="260"> |
 
 - Monitor and control agents across several computers, grouped by status and
   Herdr workspace, with agents that need input pinned on top.

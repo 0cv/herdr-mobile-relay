@@ -2,6 +2,7 @@
   import { onDestroy, onMount, tick, untrack } from 'svelte';
   import AttachmentProgress from '$components/AttachmentProgress.svelte';
   import Button from '$components/ui/Button.svelte';
+  import { attachmentsAvailable, slashCommandsAvailable, promptAutocorrect, promptSpellcheck } from '$lib/composer-policy';
   import { clearPromptDraft, loadPromptDraft, promptComposerScope, savePromptDraft } from '$lib/prompt-drafts';
   import { interfaceSize } from '$lib/preferences';
   import { targetRefForAgent, targetRefMatchesAgent } from '$lib/resource-id';
@@ -16,7 +17,7 @@
   import { guardReload, holdReloadsWhileSending } from '$lib/reload-guard';
   import { dispatchFlag, type ComposerSubmitAdapter } from '$lib/composer';
   import type { AttachmentBatchController, AttachmentBatchSnapshot, AttachmentRef } from '$lib/attachments';
-  import type { Agent, SlashCommand, SlashCommandCatalog, TerminalFrame } from '$lib/types';
+  import type { Agent, FrontendTargetRef, SlashCommand, SlashCommandCatalog, TerminalFrame } from '$lib/types';
 
   // blockExplained: the parent already shows why sending is blocked, so the composer does not repeat dispatchBlocked.
   let { agent, frame, readOnly = false, dispatchBlocked: restriction = '', blockExplained = false, attachmentsBlocked = false,
@@ -109,8 +110,9 @@
     : -1);
 
   const inputLocked = $derived(readOnly || promptBlocked || attachmentsBlocked || noEchoActive || deliveryBlocked);
-  const attachmentsLocked = $derived(inputLocked || piPromptTarget(agent) || sendingSecret || !targetRefForAgent(agent));
-  const slashMenuOpen = $derived(!inputLocked && slashQuery !== null && dismissedSlashQuery !== composer);
+  const attachmentsLocked = $derived(!attachmentsAvailable || inputLocked || piPromptTarget(agent) || sendingSecret || !targetRefForAgent(agent));
+  const pickerDisabled = $derived(attachmentsLocked || uploadingAttachment || sending);
+  const slashMenuOpen = $derived(slashCommandsAvailable && !inputLocked && slashQuery !== null && dismissedSlashQuery !== composer);
   const secretMode = $derived(!readOnly && noEchoActive && Boolean(connection?.capabilities.includes('secret_input')));
   const secretReady = $derived(!deliveryBlocked && secretMode && secretState.secretReady);
   $effect(() => {
@@ -390,16 +392,29 @@
     attachmentController = null;
   }
 
-  async function filesSelected(files: FileList | File[]) {
-    const selected = [...files];
-    if (attachmentsLocked || !selected.length || uploadingAttachment || sending) return;
+  function beginUpload(status: string) {
     attachmentGeneration += 1;
-    const target = { ...agent };
-    const identity = targetRefForAgent(target)!;
     uploadingAttachment = true;
-    uploadStatus = `Uploading ${selected.length} attachment${selected.length === 1 ? '' : 's'}…`;
+    uploadStatus = status;
     uploadError = false;
     attachmentCancelRequested = false;
+  }
+
+  function acceptUpload(identity: FrontendTargetRef, attachments: AttachmentRef[]) {
+    if (mounted && !readOnly && targetRefMatchesAgent(identity, agent)) appendUploadedAttachments(attachments);
+  }
+
+  function finishUpload(controller: AttachmentBatchController | null) {
+    uploadingAttachment = false;
+    if (controller) releaseAttachmentController(controller);
+  }
+
+  async function filesSelected(files: FileList | File[]) {
+    if (pickerDisabled || !files.length) return;
+    const selected = [...files];
+    const target = { ...agent };
+    const identity = targetRefForAgent(target)!;
+    beginUpload(`Uploading ${selected.length} attachment${selected.length === 1 ? '' : 's'}…`);
     let controller: AttachmentBatchController | null = null;
     try {
       const previous = attachmentController;
@@ -418,8 +433,7 @@
         attachmentSnapshot = snapshot;
       });
       controller.select(selected);
-      const attachments = await controller.upload();
-      if (mounted && targetRefMatchesAgent(identity, agent) && !readOnly) appendUploadedAttachments(attachments);
+      acceptUpload(identity, await controller.upload());
     } catch (error) {
       uploadStatus = attachmentCancelRequested
         ? 'Attachment upload canceled.'
@@ -428,30 +442,23 @@
           : 'Attachments could not be uploaded.';
       uploadError = !attachmentCancelRequested;
     } finally {
-      uploadingAttachment = false;
-      if (controller) releaseAttachmentController(controller);
+      finishUpload(controller);
     }
   }
   async function restartAttachmentUpload(): Promise<void> {
     const controller = attachmentController;
     const identity = attachmentTarget && targetRefForAgent(attachmentTarget);
-    if (attachmentsLocked || !controller || uploadingAttachment || sending || !identity || !targetRefMatchesAgent(identity, agent)) return;
-    attachmentGeneration += 1;
-    uploadingAttachment = true;
-    uploadStatus = 'Restarting interrupted files from the beginning…';
-    uploadError = false;
-    attachmentCancelRequested = false;
+    if (pickerDisabled || !controller || !identity || !targetRefMatchesAgent(identity, agent)) return;
+    beginUpload('Restarting interrupted files from the beginning…');
     try {
-      const attachments = await controller.restart();
-      if (mounted && targetRefMatchesAgent(identity, agent) && !readOnly) appendUploadedAttachments(attachments);
+      acceptUpload(identity, await controller.restart());
     } catch (error) {
       uploadStatus = error instanceof Error && error.message
         ? error.message
         : 'Attachments could not be restarted.';
       uploadError = true;
     } finally {
-      uploadingAttachment = false;
-      releaseAttachmentController(controller);
+      finishUpload(controller);
     }
   }
 
@@ -479,7 +486,17 @@
     void attachmentController?.cancel().catch(() => relayStore.showToast('The relay could not confirm attachment cancellation.', true));
   });
 
+  function selectFiles(event: Event & { currentTarget: HTMLInputElement }) {
+    const input = event.currentTarget;
+    void filesSelected(input.files || []);
+    input.value = '';
+  }
+
   function paste(event: ClipboardEvent) {
+    if (!attachmentsAvailable) {
+      if (event.clipboardData?.types.includes('Files')) event.preventDefault();
+      return;
+    }
     const files = [...(event.clipboardData?.items || [])]
       .filter((item) => item.kind === 'file')
       .map((item) => item.getAsFile())
@@ -588,20 +605,24 @@
       </section>
     {/if}
     <form class="term-input" aria-label="Send a prompt" aria-busy={sending || uploadingAttachment} onsubmit={(event) => { event.preventDefault(); void sendPrompt(); }}>
-      <div class="attach-stack">
-      <Button variant="ghost" size="icon" disabled={attachmentsLocked || uploadingAttachment || sending} aria-label="Attach photos" onclick={() => imageInput.click()}>
-        <svg class="button-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
-          <rect x="3" y="4" width="18" height="16" rx="2"></rect>
-          <circle cx="8.5" cy="9" r="1.5"></circle>
-          <path d="m4 17 4.5-4.5 3.5 3.5 2.5-2.5L20 19"></path>
-        </svg>
-      </Button>
-      <Button variant="ghost" size="icon" disabled={attachmentsLocked || uploadingAttachment || sending} aria-label="Attach files" onclick={() => fileInput.click()}>
-        <svg class="button-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
-          <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"></path>
-        </svg>
-      </Button>
-      </div>
+      {#if attachmentsAvailable}
+        <div class="attach-stack">
+          <Button variant="ghost" size="icon" disabled={pickerDisabled} aria-label="Attach photos" onclick={() => imageInput.click()}>
+            <svg class="button-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+              <rect x="3" y="4" width="18" height="16" rx="2"></rect>
+              <circle cx="8.5" cy="9" r="1.5"></circle>
+              <path d="m4 17 4.5-4.5 3.5 3.5 2.5-2.5L20 19"></path>
+            </svg>
+          </Button>
+          <Button variant="ghost" size="icon" disabled={pickerDisabled} aria-label="Attach files" onclick={() => fileInput.click()}>
+            <svg class="button-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+              <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"></path>
+            </svg>
+          </Button>
+          <input bind:this={imageInput} type="file" accept="image/*" multiple hidden onchange={selectFiles} />
+          <input bind:this={fileInput} type="file" accept="image/png,image/jpeg,image/gif,image/webp,text/plain,text/markdown,text/csv,application/json,application/pdf,.docx,.xlsx,.pptx,.odt,.ods,.odp" multiple hidden onchange={selectFiles} />
+        </div>
+      {/if}
       <div class="composer-field">
         <textarea
           bind:this={composerElement}
@@ -617,9 +638,9 @@
           aria-controls={slashMenuOpen ? 'slash-command-options' : undefined}
           aria-activedescendant={slashMenuOpen && effectiveSlashIndex >= 0 ? `slash-command-option-${effectiveSlashIndex}` : undefined}
           autocomplete="off"
-          autocorrect="on"
+          autocorrect={promptAutocorrect}
           autocapitalize="sentences"
-          spellcheck="true"
+          spellcheck={promptSpellcheck}
           enterkeyhint="enter"
           oninput={composerInput}
           onkeydown={keydown}
@@ -628,8 +649,6 @@
         {#if composer}<button type="button" class="input-clear" aria-label="Clear prompt text" onclick={clearComposer}>×</button>{/if}
       </div>
       <Button type="submit" size="icon" disabled={!composer.replace(/[\r\n]+$/g, '') || readOnly || promptBlocked || deliveryBlocked || noEchoActive || sending || uploadingAttachment || !targetRefForAgent(agent)} aria-label={sending ? 'Submitting input' : submitLabel} >{sending ? '…' : '➤'}</Button>
-      <input bind:this={imageInput} type="file" accept="image/*" multiple hidden onchange={(event) => { void filesSelected(event.currentTarget.files || []); event.currentTarget.value = ''; }} />
-      <input bind:this={fileInput} type="file" accept="image/png,image/jpeg,image/gif,image/webp,text/plain,text/markdown,text/csv,application/json,application/pdf,.docx,.xlsx,.pptx,.odt,.ods,.odp" multiple hidden onchange={(event) => { void filesSelected(event.currentTarget.files || []); event.currentTarget.value = ''; }} />
     </form>
     {#if !readOnly && attachmentSnapshot?.items.length}
       <AttachmentProgress snapshot={attachmentSnapshot} restartDisabled={attachmentsLocked || sending} oncancel={cancelAttachmentUpload} onrestart={restartAttachmentUpload} />

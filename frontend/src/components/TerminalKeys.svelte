@@ -14,6 +14,7 @@
   import Button from '$components/ui/Button.svelte';
   import { targetRefForAgent, targetRefMatchesAgent } from '$lib/resource-id';
   import { relayStore } from '$lib/store';
+  import { keyResultMessage } from '$lib/terminal-key-messages';
 
   let { agent, readOnly = false, blocked = false, sending = $bindable(false), extra, queue }:
     { agent: Agent; readOnly?: boolean; blocked?: boolean; sending?: boolean; extra?: Snippet; queue?: QueuedKeyCommand[] } = $props();
@@ -69,13 +70,13 @@
       }
       showKeyFeedback(`Sending ${command.label}…`);
       try {
-        await relayStore.sendToAgent(command.target, {
+        const result = await relayStore.sendToAgent(command.target, {
           type: 'send_keys',
           keys: command.keys,
           activity_label: command.label,
         });
         command.resolve(true);
-        showKeyFeedback(`${command.label} sent`);
+        showKeyFeedback(keyResultMessage?.(result) || `${command.label} sent`);
         if (keyReadTimer) clearTimeout(keyReadTimer);
         keyReadTimer = setTimeout(() => {
           if (componentMounted && targetRefMatchesAgent(identity, agent)) relayStore.readPane(command.target);

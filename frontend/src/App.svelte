@@ -18,21 +18,18 @@
   import { agentOpeningRoute } from '$lib/agent-navigation';
   import { hasConversationHistory } from '$lib/agent-view';
   import { activityForNotification } from '$lib/activity';
+  import { observeAgentAttention } from '$lib/attention.svelte';
   import {
     agentContextLabel,
-    agentNeedsInspection,
-    agentNeedsResponse,
     agentStatusGroup,
     agentStatusTone,
-    attentionKind,
-    approvalPromptPreview,
     displayName,
     hostLabel,
   } from '$lib/agents';
-  import { APP_ASSET_VERSION, APP_BUILD_ID, APP_VERSION } from '$lib/config';
+  import { APP_ASSET_VERSION, APP_BUILD_ID } from '$lib/config';
   import { initializePreferences } from '$lib/preferences';
   import { initializeSpeech, stopSpeech } from '$lib/speech';
-  import { initializePush, notificationsEnabled, pushOptedIn, showPageNotification } from '$lib/push';
+  import { initializePush } from '$lib/push';
   import { createPushOpenRouter } from '$lib/push-open';
   import { targetRefForAgent, targetRefMatchesAgent } from '$lib/resource-id';
   import {
@@ -43,7 +40,6 @@
     navigate,
     replaceView,
     routeNotificationUrl,
-    viewUrl,
   } from '$lib/router';
   import { initializeDeviceSecurity, securityState } from '$lib/security';
   import { relayStore } from '$lib/store';
@@ -53,7 +49,7 @@
     importOrReload,
     initializeAppUpdates,
   } from '$lib/updates';
-  import { createDeploymentReloader, reloadAfterRelayUpdate } from '$lib/update-reload';
+  import { createRelayUpdateObserver, settingsUpdateLabel } from '$lib/update-reload';
   import { createViewedPaneReporter } from '$lib/viewed-pane';
   import type { Agent, ConversationPage, NotificationTarget } from '$lib/types';
   import type { ViewState } from '$lib/router';
@@ -65,7 +61,6 @@
   const activities = relayStore.activities;
   const frames = relayStore.terminalFrames;
   const responding = relayStore.responding;
-  const appUpdates = appUpdateStatus;
 
   let manageOpen = $state(false);
   // Bound so the header's Find control can open the terminal's own find bar.
@@ -73,13 +68,11 @@
   let jumpOpen = $state(false);
   let workspaceOpen = $state(false);
   let workspaceDisclosure = $state<Record<string, boolean>>({});
-  let lastBlocked = new Set<string>();
   let previousView = '';
   let terminalUnavailable = $state(false);
   const pushOpenRouter = createPushOpenRouter();
   const reportViewedPane = createViewedPaneReporter();
-  const reloadAfterDeployment = createDeploymentReloader();
-  const automaticUpdateChecks = new Set<string>();
+  const observeRelayUpdates = createRelayUpdateObserver();
   let visibilityRevision = $state(0);
   let conversationHistoryComponent = $state<typeof import('$components/ConversationHistory.svelte')['default'] | null>(null);
   let conversationHistoryFailedRoute = $state.raw<ViewState | null>(null);
@@ -139,26 +132,7 @@
   const inventoryLoading = $derived([...$connections.values()].filter(
     (connection) => connection.status === 'connected' && connection.inventory.state === 'starting',
   ).length);
-  const appUpdateAvailable = $derived(['reload-ready', 'deployment-required'].includes($appUpdates.state));
-  const relayUpdateAvailable = $derived(
-    [...$connections.values()].some((connection) => connection.update.state === 'available'),
-  );
-  const relayUpdateNeedsAttention = $derived(
-    [...$connections.values()].some((connection) => connection.update.state === 'blocked'
-      || (connection.status === 'connected' && !connection.capabilities.includes('self_update'))),
-  );
-  const updateAvailable = $derived(appUpdateAvailable || relayUpdateAvailable || relayUpdateNeedsAttention);
-  const settingsLabel = $derived(appUpdateAvailable
-    ? relayUpdateAvailable
-      ? 'Settings, phone app and relay updates available'
-      : relayUpdateNeedsAttention
-        ? 'Settings, phone app update available and relay update needs attention'
-        : 'Settings, phone app update available'
-    : relayUpdateAvailable
-      ? 'Settings, relay update available'
-      : relayUpdateNeedsAttention
-        ? 'Settings, relay update needs attention'
-        : 'Settings');
+  const settingsLabel = $derived(settingsUpdateLabel($connections, $appUpdateStatus.state));
   const headerTitle = $derived.by(() => {
     if ($currentView.view === 'settings') return 'Settings';
     if ($currentView.view === 'push' || $currentView.view === 'push_unavailable') return 'Notification';
@@ -217,17 +191,7 @@
     return () => clearTimeout(timer);
   });
 
-  $effect(() => {
-    const blocked = $agents.filter((agent) => agentNeedsResponse(agent) || agentNeedsInspection(agent));
-    document.title = blocked.length ? `(${blocked.length}) 🐑 herdr` : '🐑 herdr';
-    if (blocked.length && navigator.setAppBadge) void navigator.setAppBadge(blocked.length).catch(() => {});
-    else if (navigator.clearAppBadge) void navigator.clearAppBadge().catch(() => {});
-    const attentionKey = (agent: Agent) => `${agent.pane_id}:${agent.event_id || ''}:${attentionKind(agent)}`;
-    const added = blocked.filter((agent) => !lastBlocked.has(attentionKey(agent)));
-    if (added.length && navigator.vibrate) navigator.vibrate([120, 80, 120]);
-    for (const agent of added) void notifyBlockedAgent(agent);
-    lastBlocked = new Set(blocked.map(attentionKey));
-  });
+  observeAgentAttention(() => $agents, () => $connections);
 
   let notificationFallback: ReturnType<typeof setTimeout> | null = null;
   let notificationFallbackKey = '';
@@ -284,25 +248,7 @@
       connections: $connections,
     });
   });
-  $effect(() => {
-    for (const [relayId, connection] of $connections) {
-      if (connection.status !== 'connected' || !connection.capabilities.includes('self_update')) continue;
-      const identity = `${relayId}:${connection.releaseVersion}:${connection.revision}:${APP_VERSION}`;
-      if (automaticUpdateChecks.has(identity)) continue;
-      automaticUpdateChecks.add(identity);
-      void relayStore.checkRelayUpdate(relayId).catch(() => {
-        automaticUpdateChecks.delete(identity);
-      });
-    }
-  });
-
-  $effect(() => {
-    reloadAfterRelayUpdate($connections);
-  });
-
-  $effect(() => {
-    reloadAfterDeployment($connections);
-  });
+  $effect(() => { observeRelayUpdates($connections); });
 
   onMount(() => {
     initializePreferences();
@@ -312,31 +258,23 @@
     const stopSecurity = initializeDeviceSecurity();
     const stopRouter = initializeRouter();
     const stopAgentRoute = followInitialAgentSession(agents);
-    const setupLinkNavigation = () => {
-      relayStore.importSetupLink(location, !$securityState.locked);
-    };
-    const serviceWorkerMessage = (event: MessageEvent) => {
-      if (event.data?.type === 'herdr_notification_click' && event.data.url) {
-        routeNotificationUrl(event.data.url);
-      }
-    };
     const visibilityChanged = () => { visibilityRevision += 1; };
-    document.addEventListener('visibilitychange', visibilityChanged);
-    window.addEventListener('focus', visibilityChanged);
-    window.addEventListener('blur', visibilityChanged);
-    window.addEventListener('hashchange', setupLinkNavigation);
-    navigator.serviceWorker?.addEventListener('message', serviceWorkerMessage);
+    const listeners = new AbortController();
+    const options = { signal: listeners.signal };
+    document.addEventListener('visibilitychange', visibilityChanged, options);
+    window.addEventListener('focus', visibilityChanged, options);
+    window.addEventListener('blur', visibilityChanged, options);
+    window.addEventListener('hashchange', () => { relayStore.importSetupLink(location, !$securityState.locked); }, options);
+    navigator.serviceWorker?.addEventListener('message', ({ data }) => {
+      if (data?.type === 'herdr_notification_click' && data.url) routeNotificationUrl(data.url);
+    }, options);
     return () => {
       stopAgentRoute();
       stopRouter();
       releaseSpeech();
       stopSecurity();
       stopUpdates();
-      window.removeEventListener('hashchange', setupLinkNavigation);
-      navigator.serviceWorker?.removeEventListener('message', serviceWorkerMessage);
-      document.removeEventListener('visibilitychange', visibilityChanged);
-      window.removeEventListener('focus', visibilityChanged);
-      window.removeEventListener('blur', visibilityChanged);
+      listeners.abort();
       pushOpenRouter.stop();
       relayStore.destroy();
     };
@@ -389,40 +327,6 @@
       if (exact) return exact;
     }
     return matches.length === 1 ? matches[0] : null;
-  }
-
-  async function notifyBlockedAgent(agent: Agent) {
-    if (!notificationsEnabled()) return;
-    if (document.visibilityState === 'visible' && document.hasFocus()) return;
-    const connection = $connections.get(agent.relay_id);
-    if (pushOptedIn() && connection && ['sent', 'subscribed'].includes(connection.pushStatus)) return;
-    const kind = attentionKind(agent);
-    const target = {
-      host: String(agent.host || hostLabel(agent)),
-      pane_id: agent.raw_pane_id,
-      notification_id: String(agent.event_id || `herdr-${hostLabel(agent)}-${agent.raw_pane_id}`),
-    };
-    const title = kind === 'approval'
-      ? `${displayName(agent)} blocked`
-      : kind === 'question'
-        ? `${displayName(agent)} needs answers`
-        : `${displayName(agent)} needs inspection`;
-    const fallback = kind === 'approval'
-      ? `${agent.agent || 'Agent'} needs approval`
-      : kind === 'question'
-        ? `${agent.agent || 'Agent'} needs an answer`
-        : `${agent.agent || 'Agent'} needs inspection`;
-    await showPageNotification(title, {
-      body: approvalPromptPreview(agent) || fallback,
-      tag: `herdr-${target.host}-${target.pane_id}`,
-      renotify: true,
-      icon: 'icons/icon-192.png',
-      badge: 'icons/notification-badge.png',
-      actions: [],
-      data: {
-        url: viewUrl({ view: 'notification', target }),
-      },
-    });
   }
 </script>
 
@@ -546,7 +450,7 @@
           aria-label={settingsLabel}
           onclick={() => toggle('settings')}
         >⚙</Button>
-        {#if updateAvailable}<span class="nav-update-badge" aria-hidden="true"></span>{/if}
+        {#if settingsLabel !== 'Settings'}<span class="nav-update-badge" aria-hidden="true"></span>{/if}
       </span>
     </nav>
   </header>

@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { copyText } from '$lib/clipboard';
   import { onMount, tick, untrack } from 'svelte';
   import PromptComposer from '$components/PromptComposer.svelte';
   import AgentInteraction from '$components/AgentInteraction.svelte';
@@ -8,9 +7,9 @@
   import { promptDispatchRestriction } from '$lib/terminal-input';
   import { targetRefForAgent } from '$lib/resource-id';
   import ConversationMessage from '$components/ConversationMessage.svelte';
+  import ConversationMessageActions from '$components/ConversationMessageActions.svelte';
   import OmoPlan from '$components/OmoPlan.svelte';
   import Button from '$components/ui/Button.svelte';
-  import CopyIcon from '$components/ui/CopyIcon.svelte';
   import KeyboardIcon from '$components/ui/KeyboardIcon.svelte';
   import { agentNeedsResponse, attentionKind, displayName, questionInteraction } from '$lib/agents';
   import { conversationEntries, pendingQuestionEntryId } from '$lib/conversation';
@@ -25,17 +24,8 @@
     getConversationPreview,
     putConversationPreview,
   } from '$lib/conversation-cache';
-  import {
-    toggleSpeech as toggleResponseSpeech,
-    speechEnabled,
-    speechLanguage,
-    speechLanguageLabel,
-    speechState,
-  } from '$lib/speech';
-  import { fencedCodeText } from '$lib/markdown';
   import { ConversationLiveReader, LIVE_MAX_BYTES, type LiveReaderState } from '$lib/conversation-live';
   import { ConversationMessageStateStore } from '$lib/conversation-message-state';
-  import { securityState } from '$lib/security';
   import { CommandError } from '$lib/command-error';
   import { relayStore } from '$lib/store';
   import { stripAnsi } from '$lib/terminal';
@@ -547,15 +537,6 @@
     historyController.demandOlder();
   }
 
-  function toggleSpeech(text: string): void {
-    void toggleResponseSpeech(
-      text,
-      $connections.get(agent.relay_id)?.speechLanguages ?? [],
-      (chunk, language) => relayStore.speakToAgent(agent, chunk, language),
-      (message) => relayStore.showToast(message, true),
-    );
-  }
-
 
   type ScrollAnchor = readonly [string, HTMLElement, number, HTMLElement[]];
 
@@ -618,28 +599,6 @@
     return timestamp.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
   }
 
-  async function copyMarkdown(entry: ConversationEntry) {
-    if (!entry.text || !navigator.clipboard?.writeText) {
-      relayStore.showToast('Clipboard access is unavailable. Select the text manually.', true);
-      return;
-    }
-    if (await copyText(entry.text)) {
-      relayStore.showToast('Markdown copied.');
-    } else {
-      relayStore.showToast('Could not copy. Select it manually.', true);
-    }
-  }
-  async function copyCode(code: string) {
-    if ($securityState.locked || !navigator.clipboard?.writeText) {
-      relayStore.showToast('Clipboard access is unavailable while the app is locked.', true);
-      return;
-    }
-    if (await copyText(code)) {
-      relayStore.showToast('Code copied.');
-    } else {
-      relayStore.showToast('Could not copy. Select it manually.', true);
-    }
-  }
 </script>
 
 <main class="conversation-page" aria-labelledby="conversation-title">
@@ -746,7 +705,6 @@
       {/if}
       <div class="conversation-stream" bind:this={streamElement}>
         {#each visibleEntries as entry (entry.id)}
-          {@const code = fencedCodeText(entry.text)}
           {@const timestamp = formatTimestamp(entry.timestamp)}
           <article
             class:conversation-user={entry.role === 'user'}
@@ -758,41 +716,10 @@
               <strong>{entry.kind === 'notice' ? 'Extension notice' : entry.role === 'user' ? 'You' : agentName}</strong>
               <span class="conversation-entry-actions">
                 {#if timestamp}<time datetime={entry.timestamp}>{timestamp}</time>{/if}
-                {#if entry.role === 'assistant' && entry.text && $speechEnabled}
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    aria-label={$speechState === 'speaking' ? 'Stop reading response' : 'Read response aloud'}
-                    title={$speechState === 'speaking' ? 'Stop reading' : `Read aloud in ${speechLanguageLabel($speechLanguage)}`}
-                    onclick={() => toggleSpeech(entry.text)}
-                  >{$speechState === 'speaking' ? 'Stop' : 'Speak'}</Button>
-                {/if}
-                {#if entry.text}
-                  <Button
-                    class="copy-conversation-markdown"
-                    variant="ghost"
-                    size="icon"
-                    aria-label={`Copy ${entry.role === 'user' ? 'your' : agentName} message as Markdown`}
-                    title="Copy Markdown"
-                    onclick={() => copyMarkdown(entry)}
-                  >
-                    <CopyIcon />
-                  </Button>
-                {/if}
-                {#if code}
-                  <Button
-                    class="copy-conversation-code"
-                    variant="ghost"
-                    size="icon"
-                    disabled={$securityState.locked}
-                    aria-label={`Copy code from ${entry.role === 'user' ? 'your' : agentName} message`}
-                    title="Copy code"
-                    onclick={() => copyCode(code)}
-                  >&lt;/&gt;</Button>
-                {/if}
+                <ConversationMessageActions {entry} {agent} {agentName} />
               </span>
             </header>
-            <ConversationMessage viewState={messageStates.get(entry.id)} text={entry.text} tools={entry.tools} highlight={query.trim()} awaiting={entry.id === waitingQuestionEntryId ? (questionFormShown ? 'below' : 'elsewhere') : null} />
+            <ConversationMessage role={entry.role} viewState={messageStates.get(entry.id)} text={entry.text} tools={entry.tools} highlight={query.trim()} awaiting={entry.id === waitingQuestionEntryId ? (questionFormShown ? 'below' : 'elsewhere') : null} />
             {#if entry.id.startsWith('live:')}<small>Live · not saved yet</small>{/if}
             {#if entry.truncated}<small>Long turn truncated by the relay.</small>{/if}
           </article>

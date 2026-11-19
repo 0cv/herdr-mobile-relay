@@ -3,6 +3,7 @@ import { shouldDeferPairingConnection, shouldRetainSetupFragment } from './confi
 import { agentKind, clientPaneId } from './agents';
 import { parseNotificationTarget } from './protocol';
 import { decodeTargetRoute, encodeTargetRoute, targetRefForAgent, targetRefMatchesAgent } from './resource-id';
+import { listenViewHistory, stampView } from './route-history';
 import type { Agent, FrontendTargetRef, NotificationTarget } from './types';
 
 export type ViewState =
@@ -22,12 +23,6 @@ export type ViewState =
   | { view: 'notification'; target: NotificationTarget }
   | { view: 'push'; eventRef: string; deviceId: string }
   | { view: 'push_unavailable' };
-
-type HistoryViewState = ViewState & {
-  herdrView?: boolean;
-  index?: number;
-  bootstrapPairingFlow?: string;
-};
 
 export const currentView = writable<ViewState>({ view: 'agents' });
 let viewIndex = 0;
@@ -133,25 +128,18 @@ export function viewUrl(state: ViewState): string {
   return location.pathname + location.search;
 }
 
-function navigationUrl(state: ViewState): string {
-  if (shouldDeferPairingConnection(location, navigator.standalone, navigator.userAgent, navigator.maxTouchPoints)) {
-    return location.pathname + location.search + location.hash;
-  }
+function navigationUrl(state: ViewState): string | undefined {
+  if (shouldDeferPairingConnection(location, navigator.standalone, navigator.userAgent, navigator.maxTouchPoints)) return;
   return viewUrl(state);
 }
 
-function historyViewState(state: ViewState): HistoryViewState {
-  return { herdrView: true, index: viewIndex, bootstrapPairingFlow: history.state?.bootstrapPairingFlow, ...state };
-}
-
 export function navigate(state: ViewState): void {
-  viewIndex += 1;
-  history.pushState(historyViewState(state), '', navigationUrl(state));
+  history.pushState(stampView(state, ++viewIndex), '', navigationUrl(state));
   showView(state);
 }
 
 export function replaceView(state: ViewState): void {
-  history.replaceState(historyViewState(state), '', navigationUrl(state));
+  history.replaceState(stampView(state, viewIndex), '', navigationUrl(state));
   showView(state);
 }
 
@@ -185,36 +173,21 @@ export function followInitialAgentSession(agents: Readable<Agent[]>): () => void
 
 export function closeCurrentView(): void {
   if (get(currentView).view === 'agents') return;
-  const state = history.state as HistoryViewState | null;
-  if (viewIndex > 0 && state?.herdrView) history.back();
+  if (viewIndex > 0 && history.state?.herdrView) history.back();
   else replaceView({ view: 'agents' });
 }
 
 export function initializeRouter(): () => void {
   const setupUrl = shouldRetainSetupFragment(location, navigator.standalone)
-    ? location.pathname + location.search + location.hash
-    : '';
+    ? location.href : '';
   const initial = stateFromLocation();
   replaceView({ view: 'agents' });
   if (setupUrl) history.replaceState(history.state, '', setupUrl);
   if (initial.view !== 'agents') navigate(initial);
-  const onPopState = (event: PopStateEvent) => {
-    const state = event.state as HistoryViewState | null;
-    viewIndex = Number.isInteger(state?.index) ? Number(state?.index) : 0;
-    showView(state?.herdrView ? state : { view: 'agents' });
-  };
-  const onHashChange = () => {
-    const state = history.state as HistoryViewState | null;
-    showView(shouldRetainSetupFragment(location, navigator.standalone) && state?.herdrView
-      ? state
-      : stateFromLocation());
-  };
-  window.addEventListener('popstate', onPopState);
-  window.addEventListener('hashchange', onHashChange);
-  return () => {
-    window.removeEventListener('popstate', onPopState);
-    window.removeEventListener('hashchange', onHashChange);
-  };
+  return listenViewHistory((state, index = viewIndex) => {
+    viewIndex = index;
+    showView(state);
+  });
 }
 
 export function routeNotificationUrl(url: string): void {
