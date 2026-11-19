@@ -17,7 +17,7 @@ select_instance() {
 
     if [ "$backend" = hc ]; then
         unset HERDR_RELAY_ENV HERDR_PLUGIN_CONFIG_DIR HERDR_RELAY_PORT HERDR_RELAY_PLUGIN_PORT \
-            HERDR_TAILSCALE_PORT HERDR_GATEWAY_URL HERDR_GATEWAY_SELECTION CLOUDFLARED_CONFIG \
+            HERDR_TAILSCALE_PORT HERDR_REVERSE_PROXY_HOST HERDR_GATEWAY_URL HERDR_GATEWAY_SELECTION CLOUDFLARED_CONFIG \
             HERDR_BIN HERDR_BIN_PATH HERDR_SOCKET_PATH
     fi
     export HERDR_RELAY_BACKEND="$backend"
@@ -122,6 +122,7 @@ service_state() {
 active_path() {
     case "$(relay_transport "$ENV_FILE")" in
         tailscale) printf 'tailscale\n' ;;
+        proxy) printf 'proxy\n' ;;
         gateway) printf 'webrtc\n' ;;
         cloudflare) [ ! -f "${CLOUDFLARED_CONFIG:-}" ] || printf 'cloudflare\n' ;;
     esac
@@ -139,6 +140,10 @@ transport_summary() {
     transport="$(relay_transport "$ENV_FILE")"
     if [ "$transport" = tailscale ]; then
         printf 'Tailscale Serve (HTTPS port %s)\n' "$RELAY_TAILSCALE_PORT"
+        return 0
+    fi
+    if [ "$transport" = proxy ]; then
+        printf 'your reverse proxy https://%s\n' "$HERDR_REVERSE_PROXY_HOST"
         return 0
     fi
     if [ "$transport" = gateway ]; then
@@ -276,8 +281,8 @@ target_name() {
 
 target_paths() {
     case "$1" in
-        tui) echo "cloudflare webrtc tailscale" ;;
-        core) echo "cloudflare tailscale" ;;
+        tui) echo "cloudflare webrtc tailscale proxy" ;;
+        core) echo "cloudflare tailscale proxy" ;;
         both) echo "stable on qr status" ;;
     esac
 }
@@ -287,6 +292,7 @@ path_title() {
         cloudflare) echo "Cloudflare" ;;
         webrtc) echo "WebRTC" ;;
         tailscale) echo "Tailscale" ;;
+        proxy) echo "Reverse Proxy" ;;
     esac
 }
 
@@ -301,6 +307,7 @@ path_items() {
             ;;
         webrtc) echo "community own qr status" ;;
         tailscale) echo "on off qr status" ;;
+        proxy) echo "proxy-on proxy-off qr status" ;;
     esac
 }
 
@@ -380,6 +387,15 @@ render_item() {
             menu_item "$number" "Turn Always on Tailscale Off"
             echo "     Remove only this relay's port $(tailscale_ports) and stop its service."
             ;;
+        proxy-on)
+            menu_item "$number" "Use Your Own Reverse Proxy"
+            echo "     Run a background relay with no tunnel behind the HTTPS proxy you already run,"
+            echo "     then print its QR. Run it again to change the hostname."
+            ;;
+        proxy-off)
+            menu_item "$number" "Stop Using Your Own Reverse Proxy"
+            echo "     Forget the proxy hostname and return the service to its tunnel, or stop it."
+            ;;
         qr)
             menu_item "$number" "Choose Phone App and Show QR"
             echo "     Keep or change the shared app origin, then reprint the private setup QR."
@@ -403,6 +419,8 @@ item_command() {
         own) echo "plugin-choose-transport.sh own" ;;
         on) echo "tailscale-setup.sh" ;;
         off) echo "tailscale-off.sh" ;;
+        proxy-on) echo "reverse-proxy-setup.sh" ;;
+        proxy-off) echo "reverse-proxy-off.sh" ;;
         qr) echo "plugin-setup-link.sh" ;;
         status) echo "plugin-status.sh" ;;
     esac

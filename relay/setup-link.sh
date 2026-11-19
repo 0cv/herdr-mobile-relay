@@ -29,6 +29,12 @@ if [ "$TRANSPORT" = tailscale ]; then
     exit 0
 fi
 
+if [ "$TRANSPORT" = proxy ]; then
+    print_pairing "$ENV_FILE" "wss://$HERDR_REVERSE_PROXY_HOST" "https://$HERDR_REVERSE_PROXY_HOST" stable "🐑 Herdr Mobile Relay phone setup"
+    echo "  Reverse proxy: https://$HERDR_REVERSE_PROXY_HOST"
+    exit 0
+fi
+
 if [ "$TRANSPORT" = gateway ]; then
     GATEWAY_URL="$(gateway_url "$ENV_FILE")"
     print_pairing "$ENV_FILE" "" "" gateway "🐑 Herdr Mobile Relay phone setup"

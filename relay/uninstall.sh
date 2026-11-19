@@ -212,7 +212,7 @@ if [ -n "$TAILSCALE_PORT" ]; then
         echo "✗ Tailscale Serve may remain. Run: tailscale serve --https=$TAILSCALE_PORT off" >&2
     fi
 fi
-export HERDR_TAILSCALE_FULL_UNINSTALL=1
+export HERDR_FULL_UNINSTALL=1
 
 # Stop and remove the service — must succeed before deleting files.
 service_stopped=false

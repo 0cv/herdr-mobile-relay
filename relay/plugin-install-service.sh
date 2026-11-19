@@ -16,7 +16,7 @@ adopt_installed_service_env announce
 # wrapper—not only the chooser—must remove a previously selected gateway before
 # stable-setup and setup-link decide which transport to configure and encode.
 ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
-refuse_if_tailscale_selected "$ENV_FILE" || exit 1
+refuse_if_always_on_selected "$ENV_FILE" || exit 1
 if [ -n "$(gateway_urls "$ENV_FILE")" ]; then
     set_gateway_url "$ENV_FILE" ""
     unset HERDR_GATEWAY_URL HERDR_GATEWAY_SELECTION

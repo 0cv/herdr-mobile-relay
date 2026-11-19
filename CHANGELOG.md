@@ -5,6 +5,15 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **Reverse Proxy → Use Your Own Reverse Proxy** in the setup menu runs the
+  background relay behind an HTTPS proxy you already run, with no Cloudflare
+  tunnel and no `cloudflared` install. It asks for the hostname your phone opens,
+  prints the QR, and can be turned off from the same menu. Unattended setups set
+  `HERDR_REVERSE_PROXY_HOST` in `relay.env`; the service no longer exits when
+  `cloudflared` is missing in that case.
+
 ## [0.26.0] - 2026-11-18
 
 ### Changed
