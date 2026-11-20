@@ -38,7 +38,7 @@ type hybridEnv struct {
 	relayHTTP   string
 }
 
-func setupHybridEnv(t *testing.T) *hybridEnv {
+func setupHybridEnv(t *testing.T, options ...relayOptions) *hybridEnv {
 	t.Helper()
 
 	gatewayPort := freePort(t)
@@ -65,15 +65,14 @@ func setupHybridEnv(t *testing.T) *hybridEnv {
 	t.Cleanup(func() { stopProcess(gateway) })
 	waitForStatus(t, env.gatewayHTTP, "/healthz", http.StatusOK)
 
-	relay := startRelay(t, relayOptions{
-		instanceID: "hybrid-blackbox",
-		token:      relayKey,
-		env: []string{
-			"HERDR_GATEWAY_URL=" + env.gatewayWS,
-			// Port mapping would reach for the LAN router from a test run.
-			"HERDR_REACHABILITY_PORT_MAPPING=false",
-		},
-	})
+	opts := relayOptions{}
+	if len(options) > 0 {
+		opts = options[0]
+	}
+	opts.instanceID = "hybrid-blackbox"
+	opts.token = relayKey
+	opts.env = append(opts.env, "HERDR_GATEWAY_URL="+env.gatewayWS, "HERDR_REACHABILITY_PORT_MAPPING=false")
+	relay := startRelay(t, opts)
 	env.relayHTTP = relay.httpBase
 	return env
 }
@@ -137,7 +136,18 @@ type phone struct {
 	chunks   [][]byte
 }
 
+type phoneAuth struct {
+	kind, id string
+	version  uint64
+	secret   []byte
+}
+
 func dialPhone(t *testing.T, env *hybridEnv) *phone {
+	t.Helper()
+	return dialPhoneAs(t, env, phoneAuth{"invitation", "bootstrap", 1, []byte(relayKey)})
+}
+
+func dialPhoneAs(t *testing.T, env *hybridEnv, auth phoneAuth) *phone {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -192,7 +202,7 @@ func dialPhone(t *testing.T, env *hybridEnv) *phone {
 	}
 
 	p := &phone{t: t, conn: conn, assembly: framing.NewReassembler(framing.GatewayChunkSize)}
-	p.handshake(ctx)
+	p.handshake(ctx, auth)
 	return p
 }
 
@@ -227,7 +237,7 @@ func (p *phone) readLogical(ctx context.Context) []byte {
 	}
 }
 
-func (p *phone) handshake(ctx context.Context) {
+func (p *phone) handshake(ctx context.Context, auth phoneAuth) {
 	p.t.Helper()
 	private, err := ecdh.P256().GenerateKey(rand.Reader)
 	if err != nil {
@@ -239,17 +249,17 @@ func (p *phone) handshake(ctx context.Context) {
 	}
 	clientPublic := private.PublicKey().Bytes()
 
-	binding := []byte("herdr-e2ee-v2 auth\x00invitation\x00bootstrap\x001\x00")
+	binding := fmt.Appendf(nil, "herdr-e2ee-v2 auth\x00%s\x00%s\x00%d\x00", auth.kind, auth.id, auth.version)
 	hello, err := json.Marshal(map[string]any{
 		"type":         "e2ee_client_hello",
 		"version":      2,
-		"auth_kind":    "invitation",
-		"auth_id":      "bootstrap",
-		"auth_version": 1,
+		"auth_kind":    auth.kind,
+		"auth_id":      auth.id,
+		"auth_version": auth.version,
 		"nonce":        base64.RawURLEncoding.EncodeToString(clientNonce),
 		"public_key":   base64.RawURLEncoding.EncodeToString(clientPublic),
 		"proof": base64.RawURLEncoding.EncodeToString(
-			authTag([]byte("herdr-e2ee-v2 client\x00"), binding, clientNonce, clientPublic)),
+			authTag(auth.secret, []byte("herdr-e2ee-v2 client\x00"), binding, clientNonce, clientPublic)),
 	})
 	if err != nil {
 		p.t.Fatal(err)
@@ -282,7 +292,7 @@ func (p *phone) handshake(ctx context.Context) {
 	}
 
 	transcript := append(append(append(append(append([]byte{}, binding...), clientNonce...), clientPublic...), serverNonce...), serverPublicBytes...)
-	if !hmac.Equal(serverProof, authTag([]byte("herdr-e2ee-v2 server\x00"), transcript)) {
+	if !hmac.Equal(serverProof, authTag(auth.secret, []byte("herdr-e2ee-v2 server\x00"), transcript)) {
 		p.t.Fatal("relay key verification failed over the gateway path")
 	}
 	serverPublic, err := ecdh.P256().NewPublicKey(serverPublicBytes)
@@ -293,7 +303,7 @@ func (p *phone) handshake(ctx context.Context) {
 	if err != nil {
 		p.t.Fatal(err)
 	}
-	keySalt := authTag([]byte("herdr-e2ee-v2 key\x00"), transcript)
+	keySalt := authTag(auth.secret, []byte("herdr-e2ee-v2 key\x00"), transcript)
 	clientKey, err := hkdf.Key(sha256.New, shared, keySalt, "herdr-e2ee-v2 c2s", 32)
 	if err != nil {
 		p.t.Fatal(err)
@@ -373,8 +383,8 @@ func (p *phone) open(frame []byte) []byte {
 	return plaintext
 }
 
-func authTag(parts ...[]byte) []byte {
-	mac := hmac.New(sha256.New, []byte(relayKey))
+func authTag(secret []byte, parts ...[]byte) []byte {
+	mac := hmac.New(sha256.New, secret)
 	for _, part := range parts {
 		_, _ = mac.Write(part)
 	}

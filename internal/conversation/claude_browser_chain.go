@@ -127,7 +127,7 @@ func (b *Browser) readClaudeChainPage(ctx context.Context, request BrowseRequest
 			return b.claudeChainLatestValidationFailure(ctx, err), nil
 		}
 	}
-	page := b.claudeChainLatestPage(ctx, request.Scope, request.Limit, chainContext, requestBudget)
+	page := b.claudeChainLatestPage(ctx, request, chainContext, requestBudget)
 	for _, segment := range chain.Segments {
 		if err := b.revalidateClaudeChainCandidate(ctx, segment); err != nil {
 			return b.claudeChainLatestValidationFailure(ctx, err), nil
@@ -214,7 +214,7 @@ func (b *Browser) readClaudeChainCursorPage(ctx context.Context, request BrowseR
 		// the tail a second time and jumping over its prefix.
 		byteBoundary := claudeChainRecentBoundary(recent.Entries, boundary, segment.CapturedEnd,
 			recentTailExhausted, segment.RecentStart)
-		return b.claudeChainPreparedPageAt(ctx, request.Scope, request.Limit, chainContext, segmentIndex, byteBoundary, request.Retry, requestBudget), nil
+		return b.claudeChainPreparedPageAt(ctx, request, chainContext, segmentIndex, byteBoundary, requestBudget), nil
 	}
 	if !b.claudeChainSegmentPrepared(chainContext, segmentIndex) && cursor.ChainOffset {
 		b.mu.Lock()
@@ -257,7 +257,7 @@ func (b *Browser) readClaudeChainCursorPage(ctx context.Context, request BrowseR
 	}
 	if cursor.ChainOffset {
 		if b.claudeChainSegmentPrepared(chainContext, segmentIndex) {
-			return b.claudeChainPreparedPageAt(ctx, request.Scope, request.Limit, chainContext, segmentIndex, boundary, request.Retry, requestBudget), nil
+			return b.claudeChainPreparedPageAt(ctx, request, chainContext, segmentIndex, boundary, requestBudget), nil
 		}
 		recent, recentErr := b.loadClaudeChainRecentWithBudget(ctx, request.Scope, chainContext, segmentIndex, requestBudget)
 		if errors.Is(recentErr, errClaudeChainRecentBudget) {
@@ -272,9 +272,9 @@ func (b *Browser) readClaudeChainCursorPage(ctx context.Context, request BrowseR
 				byteBoundary++
 			}
 		}
-		return b.claudeChainPageAt(ctx, request.Scope, request.Limit, chainContext, false, segmentIndex, claudeChainRecentTail{entries: recent.Entries, boundary: byteBoundary, exhausted: recentTailExhausted}, requestBudget), nil
+		return b.claudeChainPageAt(ctx, request, chainContext, false, segmentIndex, claudeChainRecentTail{entries: recent.Entries, boundary: byteBoundary, exhausted: recentTailExhausted}, requestBudget), nil
 	}
-	return b.claudeChainPageAt(ctx, request.Scope, request.Limit, chainContext, false, segmentIndex, claudeChainRecentTail{entries: recent.Entries, boundary: int(boundary), exhausted: recentTailExhausted}, requestBudget), nil
+	return b.claudeChainPageAt(ctx, request, chainContext, false, segmentIndex, claudeChainRecentTail{entries: recent.Entries, boundary: int(boundary), exhausted: recentTailExhausted}, requestBudget), nil
 }
 
 var (
@@ -1858,10 +1858,11 @@ func (b *Browser) continueClaudeChainJob(ctx context.Context, request BrowseRequ
 	b.mu.Lock()
 	b.updateClaudeChainLineageEvidenceLocked(chain)
 	b.mu.Unlock()
-	return b.claudeChainPreparedPageAt(ctx, request.Scope, request.Limit, chain, segmentIndex, boundary, request.Retry, budget)
+	return b.claudeChainPreparedPageAt(ctx, request, chain, segmentIndex, boundary, budget)
 }
 
-func (b *Browser) claudeChainPreparedPageAt(ctx context.Context, scope BrowseScope, limit int, chain *claudeChainContext, segmentIndex int, boundary int64, retry bool, budget *claudeChainRequestBudget) BrowsePage {
+func (b *Browser) claudeChainPreparedPageAt(ctx context.Context, request BrowseRequest, chain *claudeChainContext, segmentIndex int, boundary int64, budget *claudeChainRequestBudget) BrowsePage {
+	scope := request.Scope
 	b.mu.Lock()
 	if segmentIndex < 0 || segmentIndex >= len(chain.jobs) {
 		b.mu.Unlock()
@@ -1877,7 +1878,7 @@ func (b *Browser) claudeChainPreparedPageAt(ctx context.Context, scope BrowseSco
 		if err != nil {
 			return b.claudeChainSourceFailure(ctx, err)
 		}
-		return b.claudeChainPageAt(ctx, scope, limit, chain, false, segmentIndex, claudeChainRecentTail{entries: recent.Entries, boundary: len(recent.Entries)}, budget)
+		return b.claudeChainPageAt(ctx, request, chain, request.Cursor == "", segmentIndex, claudeChainRecentTail{entries: recent.Entries, boundary: len(recent.Entries)}, budget)
 	}
 	if !b.retainJob(job) {
 		return failPage("cursor_expired", "This history cursor has expired. Start browsing again from the latest messages.", true)
@@ -1891,7 +1892,7 @@ func (b *Browser) claudeChainPreparedPageAt(ctx context.Context, scope BrowseSco
 	job.mu.RUnlock()
 	if state != BrowseReady || index == nil {
 		if state == BrowseFailed {
-			return b.continueClaudeChainJob(ctx, BrowseRequest{Scope: scope, Limit: limit, Retry: retry}, chain, segmentIndex, boundary, true, job, budget)
+			return b.continueClaudeChainJob(ctx, request, chain, segmentIndex, boundary, true, job, budget)
 		}
 		return b.claudeChainPreparingPageForJob(scope, chain, segmentIndex, boundary, true, job)
 	}
@@ -1904,7 +1905,7 @@ func (b *Browser) claudeChainPreparedPageAt(ctx context.Context, scope BrowseSco
 		}
 		return browseSourceChanged()
 	}
-	entries, hasMore, err := index.entriesBefore(boundary, limit)
+	entries, hasMore, err := index.entriesBefore(boundary, request.Limit)
 	if err != nil {
 		return failPage("index_failed", "The prepared conversation history could not be read.", true)
 	}
@@ -1913,23 +1914,13 @@ func (b *Browser) claudeChainPreparedPageAt(ctx context.Context, scope BrowseSco
 		return browseInvalidSnapshotCursor()
 	}
 	entries = namespaceClaudeProjectedEntries(entries, view.chain.Segments[segmentIndex], segmentIndex == 0)
-	base := BrowsePage{Available: true, State: BrowseReady, Mode: BrowseSnapshot,
+	base := request.withObservation(BrowsePage{Available: true, State: BrowseReady, Mode: BrowseSnapshot,
 		SourceRevision: view.publicRevision, SnapshotID: view.snapshotID, Entries: []Entry{}, Total: nil,
-		Diagnostics: mergeBrowseDiagnostics(view.diagnostics, diagnostics)}
-	selected, omitted := b.fitProjected(entries, cursorCandidatePage(base, func(nextBoundary int64) (string, error) {
-		return b.claudeChainCursor(scope, chain, segmentIndex, nextBoundary, true)
-	}))
-	if omitted > 0 || hasMore {
-		base.HasMore = true
-		if len(selected) > 0 {
-			base.NextCursor, err = b.claudeChainCursor(scope, chain, segmentIndex, selected[0].Offset, true)
-		} else {
-			base.NextCursor, err = b.claudeChainCursor(scope, chain, segmentIndex, boundary, true)
-		}
-		if err != nil {
-			return browseContinuationFailed()
-		}
-	} else {
+		Diagnostics: mergeBrowseDiagnostics(view.diagnostics, diagnostics)})
+	if request.Cursor == "" {
+		base.Mode, base.SnapshotID = BrowseRecent, ""
+	}
+	if !hasMore {
 		older, nextErr := b.claudeChainOlderPosition(ctx, scope, chain, segmentIndex, 0, budget, false)
 		if nextErr != nil && !errors.Is(nextErr, errClaudeChainRecentBudget) {
 			return b.claudeChainSourceFailure(ctx, nextErr)
@@ -1941,6 +1932,27 @@ func (b *Browser) claudeChainPreparedPageAt(ctx context.Context, scope BrowseSco
 			}
 			base.HasMore = true
 		}
+	}
+	nextInSegment := func(nextBoundary int64) (string, error) {
+		return b.claudeChainCursor(scope, chain, segmentIndex, nextBoundary, true)
+	}
+	fullPage := cursorCandidatePage(base, nil)
+	sameSegmentPage := cursorCandidatePage(base, nextInSegment)
+	selected, omitted := b.fitProjected(entries, func(candidate []projectedEntry, omitted int) (BrowsePage, error) {
+		if hasMore || omitted > 0 {
+			return sameSegmentPage(candidate, omitted)
+		}
+		return fullPage(candidate, omitted)
+	})
+	if hasMore || omitted > 0 {
+		if len(selected) > 0 {
+			boundary = selected[0].Offset
+		}
+		base.NextCursor, err = nextInSegment(boundary)
+		if err != nil {
+			return browseContinuationFailed()
+		}
+		base.HasMore = true
 	}
 	return b.finishFittedPage(base, entries, selected)
 }
@@ -1959,7 +1971,8 @@ func mergeBrowseDiagnostics(left, right BrowseDiagnostics) BrowseDiagnostics {
 	return left
 }
 
-func (b *Browser) claudeChainLatestPage(ctx context.Context, scope BrowseScope, limit int, chain *claudeChainContext, budget *claudeChainRequestBudget) BrowsePage {
+func (b *Browser) claudeChainLatestPage(ctx context.Context, request BrowseRequest, chain *claudeChainContext, budget *claudeChainRequestBudget) BrowsePage {
+	scope := request.Scope
 	if chain == nil {
 		return failPage("cursor_expired", "This history cursor has expired. Start browsing again from the latest messages.", true)
 	}
@@ -1973,12 +1986,10 @@ func (b *Browser) claudeChainLatestPage(ctx context.Context, scope BrowseScope, 
 			// Once a clipped segment has been prepared, latest must use the
 			// byte-indexed snapshot. Returning to the tail projection here would
 			// create an entry-count cursor that jumps over the prepared prefix.
-			page := b.claudeChainPreparedPageAt(ctx, scope, limit, chain, index, view.chain.Segments[index].CapturedEnd, false, budget)
-			// The index is an internal implementation detail for this cursorless
-			// request. Latest always remains recent-mode on the wire; snapshot
-			// mode is reserved for frozen older browsing.
-			page.Mode = BrowseRecent
-			page.SnapshotID = ""
+			page := b.claudeChainPreparedPageAt(ctx, request, chain, index, view.chain.Segments[index].CapturedEnd, budget)
+			if page.State != BrowseReady {
+				page.Mode, page.SnapshotID = BrowseRecent, ""
+			}
 			return page
 		}
 		recentTailExhausted := index < len(view.recentComplete) && !view.recentComplete[index]
@@ -1990,7 +2001,7 @@ func (b *Browser) claudeChainLatestPage(ctx context.Context, scope BrowseScope, 
 			return b.claudeChainSourceFailure(ctx, err)
 		}
 		if len(recent.Entries) > 0 {
-			return b.claudeChainPageAt(ctx, scope, limit, chain, true, index, claudeChainRecentTail{entries: recent.Entries, boundary: len(recent.Entries), exhausted: recentTailExhausted}, budget)
+			return b.claudeChainPageAt(ctx, request, chain, true, index, claudeChainRecentTail{entries: recent.Entries, boundary: len(recent.Entries), exhausted: recentTailExhausted}, budget)
 		}
 		view = b.claudeChainView(chain)
 		if index < len(view.recentComplete) && !view.recentComplete[index] && !view.prepared[index] {
@@ -2036,7 +2047,8 @@ type claudeChainRecentTail struct {
 	exhausted bool
 }
 
-func (b *Browser) claudeChainPageAt(ctx context.Context, scope BrowseScope, limit int, chain *claudeChainContext, latest bool, segmentIndex int, tail claudeChainRecentTail, budget *claudeChainRequestBudget) BrowsePage {
+func (b *Browser) claudeChainPageAt(ctx context.Context, request BrowseRequest, chain *claudeChainContext, latest bool, segmentIndex int, tail claudeChainRecentTail, budget *claudeChainRequestBudget) BrowsePage {
+	scope := request.Scope
 	entries, boundary := tail.entries, tail.boundary
 	view := b.claudeChainView(chain)
 	if chain == nil || segmentIndex < 0 || segmentIndex >= len(view.chain.Segments) {
@@ -2048,13 +2060,13 @@ func (b *Browser) claudeChainPageAt(ctx context.Context, scope BrowseScope, limi
 	if boundary > len(entries) {
 		boundary = len(entries)
 	}
-	start := boundary - limit
+	start := boundary - request.Limit
 	if start < 0 {
 		start = 0
 	}
-	base := BrowsePage{Available: true, State: BrowseReady, Mode: BrowseSnapshot, Entries: []Entry{},
+	base := request.withObservation(BrowsePage{Available: true, State: BrowseReady, Mode: BrowseSnapshot, Entries: []Entry{},
 		SourceRevision: view.publicRevision, SnapshotID: view.snapshotID,
-		Diagnostics: mergeBrowseDiagnostics(view.diagnostics, BrowseDiagnostics{}), Total: nil}
+		Diagnostics: mergeBrowseDiagnostics(view.diagnostics, BrowseDiagnostics{}), Total: nil})
 	if latest {
 		base.Mode = BrowseRecent
 		base.SnapshotID = ""
@@ -2088,9 +2100,9 @@ func (b *Browser) claudeChainPageAt(ctx context.Context, scope BrowseScope, limi
 			page.HasMore = false
 			page.NextCursor = ""
 		}
-		if b.pageSize(page) <= browseResponseBytes || start >= boundary-1 {
-			if b.pageSize(page) > browseResponseBytes && len(page.Entries) == 1 {
-				page.Entries[0] = boundBrowseEntry(page.Entries[0], browseResponseBytes)
+		if fits := page.FitsReply(); fits || start >= boundary-1 {
+			if !fits && len(page.Entries) == 1 {
+				page.Entries[0] = boundBrowseEntry(page.Entries[0], pageEntryBudget(page))
 			}
 			return b.enforcePageBudget(page)
 		}

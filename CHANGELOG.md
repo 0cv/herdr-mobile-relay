@@ -12,6 +12,8 @@ project follows [Semantic Versioning](https://semver.org/).
 - Pin supported live questions and approvals even when Herdr reports the agent
   as idle, so the phone can show the choices instead of announcing a completion
   while the agent still needs an answer.
+- Review recorded file edits on your phone in Full history. Supported tool cards
+  show the requested additions and removals alongside the tool's result.
 
 ### Changed
 

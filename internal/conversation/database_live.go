@@ -60,7 +60,7 @@ func (b *Browser) NewDatabaseWatch(scope BrowseScope) *DatabaseWatch {
 }
 
 func databaseEntryHash(entry Entry) [32]byte {
-	raw, _ := json.Marshal(entry)
+	raw, _ := json.Marshal(storeProjection(entry))
 	return sha256.Sum256(raw)
 }
 

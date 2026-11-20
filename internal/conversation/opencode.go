@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/agentkind"
 	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
 	"github.com/0cv/herdr-mobile-relay/internal/sqliteexec"
 )
@@ -485,7 +486,8 @@ func parseOpenCodeRows(rows []openCodeRow) ([]Entry, bool) {
 				Metadata json.RawMessage `json:"metadata"`
 			} `json:"state"`
 		}
-		if json.Unmarshal([]byte(row.PartData), &part) != nil {
+		raw := []byte(row.PartData)
+		if json.Unmarshal(raw, &part) != nil {
 			corrupt = true
 			continue
 		}
@@ -501,13 +503,11 @@ func parseOpenCodeRows(rows []openCodeRow) ([]Entry, bool) {
 			}
 			entry.Text += text
 		case "tool":
-			input := ""
-			if len(part.State.Input) > 0 && string(part.State.Input) != "null" {
-				input = string(part.State.Input)
-			}
-			activity := newToolActivity(part.CallID, part.Tool, input)
+			activity := newOpenCodeToolActivity(part.CallID, part.Tool, part.State.Input, raw)
 			activity.State = openCodeToolState(part.State.Status)
-			activity.Output, activity.Truncated = clampText(sanitizeText(part.State.Output), maxEntryBytes)
+			var outputTruncated bool
+			activity.Output, outputTruncated = clampText(sanitizeText(part.State.Output), maxEntryBytes)
+			activity.Truncated = activity.Truncated || outputTruncated
 			activity.Error = part.State.Status == "error" || strings.TrimSpace(part.State.Error) != "" ||
 				openCodeExitFailed(part.State.Metadata)
 			if activity.Error {
@@ -600,13 +600,11 @@ func parseOpenCodeV2Content(entry *Entry, items []json.RawMessage) bool {
 			}
 			entry.Text += text
 		case "tool":
-			input := ""
-			if len(item.State.Input) > 0 && string(item.State.Input) != "null" {
-				input = string(item.State.Input)
-			}
-			activity := newToolActivity(item.ID, item.Name, input)
+			activity := newOpenCodeToolActivity(item.ID, item.Name, item.State.Input, raw)
 			activity.State = openCodeToolState(item.State.Status)
-			activity.Output, activity.Truncated = clampText(sanitizeText(openCodeV2ToolOutput(item.State.Content, item.State.Output)), maxEntryBytes)
+			var outputTruncated bool
+			activity.Output, outputTruncated = clampText(sanitizeText(openCodeV2ToolOutput(item.State.Content, item.State.Output)), maxEntryBytes)
+			activity.Truncated = activity.Truncated || outputTruncated
 			activity.Error = item.State.Status == "error" || openCodeV2ErrorSet(item.State.Error) ||
 				openCodeExitFailed(item.State.Metadata)
 			if activity.Error {
@@ -616,6 +614,18 @@ func parseOpenCodeV2Content(entry *Entry, items []json.RawMessage) bool {
 		}
 	}
 	return corrupt
+}
+
+func newOpenCodeToolActivity(id, name string, input, raw []byte) ToolActivity {
+	inputText := string(input)
+	if inputText == "null" {
+		inputText = ""
+	}
+	tool := newToolActivity(id, name, inputText)
+	if !tool.Truncated && editInputFor(agentkind.OpenCode, tool.Name) != (editInput{}) {
+		tool.ambiguousEditInput = !validEditToolJSON(raw)
+	}
+	return tool
 }
 
 // openCodeExitFailed reports whether a tool's state.metadata records a

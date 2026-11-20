@@ -348,7 +348,7 @@ func (b *Browser) continueJob(ctx context.Context, request BrowseRequest, job *b
 			ReasonCode: err.Code, Reason: err.Message, NextCursor: nextCursor, Error: err,
 		}, nil
 	}
-	return b.readSnapshotPage(ctx, request.Scope, request.Limit, job)
+	return b.readSnapshotPage(ctx, request, job)
 }
 
 func (b *Browser) retryFailedJob(ctx context.Context, job *browseJob, failure *BrowseError, autoRetried, explicitRetry bool, foregroundBudget *claudeChainForegroundBudget) bool {

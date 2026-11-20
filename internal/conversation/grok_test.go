@@ -514,6 +514,7 @@ func TestGrokParallelToolResultsOutOfOrderAndFailure(t *testing.T) {
 	if tools[2].Output != "Applied edit to /work/a.go" || tools[2].Error {
 		t.Fatalf("tool c = %#v, want rawOutput when no text block exists", tools[2])
 	}
+	expectPreview(t, "grok", tools[2], nil)
 }
 
 func TestGrokUserQueryMarkup(t *testing.T) {

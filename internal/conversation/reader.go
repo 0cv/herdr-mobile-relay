@@ -45,15 +45,17 @@ var (
 )
 
 type ToolActivity struct {
-	ID            string `json:"id,omitempty"`
-	Name          string `json:"name"`
-	State         string `json:"state,omitempty"`
-	ParentID      string `json:"parent_id,omitempty"`
-	associationID string
-	Input         string `json:"input,omitempty"`
-	Output        string `json:"output,omitempty"`
-	Error         bool   `json:"error,omitempty"`
-	Truncated     bool   `json:"truncated,omitempty"`
+	ID                 string `json:"id,omitempty"`
+	Name               string `json:"name"`
+	State              string `json:"state,omitempty"`
+	ParentID           string `json:"parent_id,omitempty"`
+	associationID      string
+	ambiguousEditInput bool
+	Input              string    `json:"input,omitempty"`
+	Output             string    `json:"output,omitempty"`
+	Error              bool      `json:"error,omitempty"`
+	Truncated          bool      `json:"truncated,omitempty"`
+	Diff               *EditDiff `json:"diff,omitempty"`
 }
 
 type Entry struct {
@@ -575,7 +577,7 @@ type toolLocation struct {
 	tool  int
 }
 
-func parseToolActivity(agent string, record map[string]any) ([]ToolActivity, []toolResult) {
+func parseToolActivity(agent string, record map[string]any, rawRecord []byte) ([]ToolActivity, []toolResult) {
 	switch agent {
 	case agentkind.Claude, agentkind.Qoder:
 		if record["isSidechain"] == true {
@@ -583,7 +585,7 @@ func parseToolActivity(agent string, record map[string]any) ([]ToolActivity, []t
 		}
 		message, _ := record["message"].(map[string]any)
 		blocks, _ := message["content"].([]any)
-		return toolsFromBlocks(blocks)
+		return toolsFromBlocks(agent, blocks, rawRecord)
 	case agentkind.Codex:
 		if stringValue(record["type"]) != "response_item" {
 			return nil, nil
@@ -596,6 +598,9 @@ func parseToolActivity(agent string, record map[string]any) ([]ToolActivity, []t
 				firstString(payload, "name", "tool_name"),
 				firstValue(payload, "arguments", "input"),
 			)
+			if !call.Truncated && call.Name == "apply_patch" {
+				call.ambiguousEditInput = !validEditToolJSON(decodeRawJSONFields(rawRecord)["payload"])
+			}
 			return []ToolActivity{call}, nil
 		case "functioncalloutput", "customtoolcalloutput", "localshellcalloutput":
 			return nil, []toolResult{{
@@ -617,30 +622,36 @@ func parseToolActivity(agent string, record map[string]any) ([]ToolActivity, []t
 			}}
 		}
 		blocks, _ := message["content"].([]any)
-		return toolsFromBlocks(blocks)
+		return toolsFromBlocks(agent, blocks, rawRecord)
 	case agentkind.Cursor:
 		message, _ := record["message"].(map[string]any)
 		blocks, _ := message["content"].([]any)
-		return toolsFromBlocks(blocks)
+		return toolsFromBlocks(agent, blocks, rawRecord)
 	}
 	return nil, nil
 }
 
-func toolsFromBlocks(blocks []any) ([]ToolActivity, []toolResult) {
+func toolsFromBlocks(agent string, blocks []any, rawRecord []byte) ([]ToolActivity, []toolResult) {
 	calls := make([]ToolActivity, 0)
 	results := make([]toolResult, 0)
-	for _, raw := range blocks {
+	var rawBlocks []json.RawMessage
+	for i, raw := range blocks {
 		block, ok := raw.(map[string]any)
 		if !ok {
 			continue
 		}
 		switch normalizedBlockType(block["type"]) {
 		case "tooluse", "toolcall":
-			calls = append(calls, newToolActivity(
-				firstString(block, "id", "toolCallId", "tool_call_id"),
-				firstString(block, "name", "toolName", "tool_name"),
-				firstValue(block, "input", "arguments"),
-			))
+			input := firstValue(block, "input", "arguments")
+			call := newToolActivity(firstString(block, "id", "toolCallId", "tool_call_id"), firstString(block, "name", "toolName", "tool_name"), input)
+			if !call.Truncated && editInputFor(agent, call.Name) != (editInput{}) {
+				if rawBlocks == nil {
+					message := decodeRawJSONFields(decodeRawJSONFields(rawRecord)["message"])
+					_ = json.Unmarshal(message["content"], &rawBlocks)
+				}
+				call.ambiguousEditInput = i >= len(rawBlocks) || !validEditToolJSON(rawBlocks[i])
+			}
+			calls = append(calls, call)
 		case "toolresult":
 			results = append(results, toolResult{
 				id:     strings.TrimSpace(firstString(block, "tool_use_id", "toolCallId", "tool_call_id", "id")),

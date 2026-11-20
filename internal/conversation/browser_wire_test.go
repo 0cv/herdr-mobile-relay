@@ -7,6 +7,42 @@ import (
 	"testing"
 )
 
+func TestEditDiffWireFixture(t *testing.T) {
+	data, err := os.ReadFile("../../contracts/fixtures/conversation_edit_diff.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool := ToolActivity{ID: "call-edit", Name: "apply_patch", Input: multiHunkEditPatch}
+	tool.Diff = previewForTool("codex", tool)
+	serialized, err := json.Marshal(tool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var want, got any
+	if err := json.Unmarshal(data, &want); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(serialized, &got); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Go wire differs from shared fixture\ngot: %s\nwant: %s", serialized, data)
+	}
+	tool.Name = "exec_command"
+	tool.Diff = previewForTool("codex", tool)
+	serialized, err = json.Marshal(tool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var absent map[string]any
+	if err := json.Unmarshal(serialized, &absent); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := absent["diff"]; ok {
+		t.Fatal("unsupported tool must omit diff")
+	}
+}
+
 func TestUnavailablePageWireFixture(t *testing.T) {
 	data, err := os.ReadFile("../../contracts/fixtures/conversation_unavailable.json")
 	if err != nil {

@@ -48,7 +48,7 @@ type indexedEntry struct {
 	Offset int64  `json:"offset"`
 	End    int64  `json:"end"`
 	Digest string `json:"digest"`
-	Entry  Entry  `json:"entry"`
+	storedProjection
 }
 
 type pendingIndexedTool struct {
@@ -279,7 +279,8 @@ func (s *snapshotIndex) applyRecords(agent, revision string, records []JSONLReco
 				continue
 			}
 			stored := indexedEntry{
-				Offset: item.entry.Offset, End: item.record.End, Digest: recordDigest(item.record.Raw), Entry: item.entry.Entry,
+				Offset: item.entry.Offset, End: item.record.End, Digest: recordDigest(item.record.Raw),
+				storedProjection: storeProjection(item.entry.Entry),
 			}
 			encoded, err := json.Marshal(stored)
 			if err != nil {
@@ -343,6 +344,12 @@ func (s *snapshotIndex) entriesBefore(boundary int64, limit int) ([]projectedEnt
 			var stored indexedEntry
 			if offset >= boundary || json.Unmarshal(value, &stored) != nil || stored.Offset != offset {
 				return errSnapshotCorrupt
+			}
+			for _, index := range stored.AmbiguousEditInputs {
+				if index < 0 || index >= len(stored.Entry.Tools) {
+					return errSnapshotCorrupt
+				}
+				stored.Entry.Tools[index].ambiguousEditInput = true
 			}
 			result = append(result, projectedEntry{Offset: stored.Offset, Entry: stored.Entry})
 			key, value = cursor.Prev()

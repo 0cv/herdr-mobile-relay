@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/0cv/herdr-mobile-relay/internal/agentkind"
 )
 
 const (
@@ -265,9 +267,9 @@ func (p *grokProjector) apply(line []byte, offset int64) {
 	case "agent_message_chunk":
 		p.applyAgent(update, offset, timestamp)
 	case "tool_call":
-		p.applyToolCall(update, offset, timestamp)
+		p.applyToolCall(update, line, offset, timestamp)
 	case "tool_call_update":
-		p.applyToolUpdate(update)
+		p.applyToolUpdate(update, line)
 	case "rewind_marker":
 		p.applyRewind(update, offset)
 	default:
@@ -376,7 +378,7 @@ func (p *grokProjector) applyAgent(update grokUpdate, offset int64, timestamp st
 	appendGrokText(p.assistant, block.Text)
 }
 
-func (p *grokProjector) applyToolCall(update grokUpdate, offset int64, timestamp string) {
+func (p *grokProjector) applyToolCall(update grokUpdate, line []byte, offset int64, timestamp string) {
 	p.user = nil
 	p.turns.close()
 	id := strings.TrimSpace(update.ToolCallID)
@@ -390,6 +392,7 @@ func (p *grokProjector) applyToolCall(update grokUpdate, offset int64, timestamp
 	// Text after a tool call belongs to a later message.
 	p.assistant.acceptsText = false
 	tool := newToolActivity(id, update.Title, grokRawJSON(update.RawInput))
+	tool.ambiguousEditInput = grokAmbiguousEditInput(tool, line)
 	p.assistant.entry.Tools = append(p.assistant.entry.Tools, tool)
 	p.tools[id] = toolLocation{entry: p.assistant.index, tool: len(p.assistant.entry.Tools) - 1}
 }
@@ -397,7 +400,7 @@ func (p *grokProjector) applyToolCall(update grokUpdate, offset int64, timestamp
 // applyToolUpdate associates results by toolCallId, so parallel results that
 // arrive out of order still reach their own call. The last status and the
 // last non-empty output win.
-func (p *grokProjector) applyToolUpdate(update grokUpdate) {
+func (p *grokProjector) applyToolUpdate(update grokUpdate, line []byte) {
 	location, ok := p.tools[strings.TrimSpace(update.ToolCallID)]
 	if !ok {
 		return
@@ -408,6 +411,7 @@ func (p *grokProjector) applyToolUpdate(update grokUpdate) {
 			var truncated bool
 			tool.Input, truncated = clampText(sanitizeText(input), maxEntryBytes/2)
 			tool.Truncated = tool.Truncated || truncated
+			tool.ambiguousEditInput = grokAmbiguousEditInput(*tool, line)
 		}
 	}
 	if update.Status != "" {
@@ -423,6 +427,14 @@ func (p *grokProjector) applyToolUpdate(update grokUpdate) {
 	var truncated bool
 	tool.Output, truncated = clampText(output, maxEntryBytes)
 	tool.Truncated = tool.Truncated || truncated
+}
+
+func grokAmbiguousEditInput(tool ToolActivity, line []byte) bool {
+	if tool.Input == "" || tool.Truncated || editInputFor(agentkind.Grok, tool.Name) == (editInput{}) {
+		return false
+	}
+	params := decodeRawJSONFields(line)["params"]
+	return !validEditToolJSON(decodeRawJSONFields(params)["update"])
 }
 
 // grokToolOutput prefers the text blocks Grok renders; when there are none
