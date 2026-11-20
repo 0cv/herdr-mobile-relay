@@ -361,11 +361,12 @@ test('keeps wide controller panes aligned and horizontally scrollable', async ({
 test('wraps wide terminal output for a paired reader credential', async ({ page }) => {
   // A reader never leases, even opted in on a relay that supports it.
   await page.addInitScript(() => localStorage.setItem('herdr_terminal_resize_session', 'true'));
-  await connectFedora(page, { capabilities: ['attention_classification', 'pane_size_opt_in'] });
+  const capabilities = ['attention_classification', 'pane_size_opt_in', 'paging_keys'];
+  await connectFedora(page, { capabilities });
   await saveDeviceCredential(page, { id: 'credential-reader', deviceId: 'device-reader', secret: 'R'.repeat(43), role: 'reader' });
   // Push a fresh connection snapshot so App's derived reader-role state observes
   // the persisted credential before the agent view is rendered.
-  await handshake(page, 0, { capabilities: ['attention_classification', 'pane_size_opt_in'] });
+  await handshake(page, 0, { capabilities });
   await server(page, 0, {
     type: 'agents',
     agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Reader pane', agent: 'claude' }],
@@ -380,6 +381,7 @@ test('wraps wide terminal output for a paired reader credential', async ({ page 
   const readOnlyFeedback = reader.getByRole('status').filter({ hasText: 'Reader access is read only' });
   await expect(readOnlyFeedback).toContainText('Reader access is read only');
   await expect(readOnlyFeedback).toBeVisible();
+  await expect(reader.getByRole('button', { name: 'Arrow keys' })).toBeDisabled();
   await expect(page.getByRole('combobox', { name: 'Prompt' })).toBeDisabled();
   const terminal = page.getByRole('log');
   const geometry = await terminal.evaluate((element) => {
@@ -399,20 +401,6 @@ test('wraps wide terminal output for a paired reader credential', async ({ page 
   expect((await commands(page)).filter((command) => command.type === 'lease_pane_size')).toHaveLength(0);
   await expect(page.getByRole('switch', { name: 'Resize Session', exact: true }))
     .toHaveAccessibleDescription(/controller terminals keep the desktop width and scroll horizontally; read-only reader panes wrap to the phone width\./);
-});
-
-test('disables the arrow menu for readers on a relay with paging keys', async ({ page }) => {
-  const capabilities = ['paging_keys'];
-  await connectFedora(page, { capabilities });
-  await saveDeviceCredential(page, { id: 'credential-reader', deviceId: 'device-reader', secret: 'R'.repeat(43), role: 'reader' });
-  await handshake(page, 0, { capabilities });
-  await server(page, 0, {
-    type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Reader paging', agent: 'claude' }],
-  });
-  await page.getByRole('button', { name: 'Open Reader paging on Fedora' }).click();
-
-  await expect(page.getByRole('button', { name: 'Arrow keys' })).toBeDisabled();
 });
 
 test('does not repopulate prompts after an unsafe dispatch failure', async ({ page }) => {
@@ -572,52 +560,45 @@ test('fits and sends paging keys in the arrow menu at 320px', async ({ page }) =
   await page.setViewportSize({ width: 320, height: 740 });
   await openAgent(page, { pane_id: 'w1:p1', status: 'idle', project: 'Paging', agent: 'claude' }, { capabilities: [] });
   const arrows = page.getByRole('button', { name: 'Arrow keys' });
-  await arrows.click();
-  const arrowsOnly = page.getByRole('group', { name: 'Arrow keys', exact: true });
-  await expect(arrowsOnly.getByRole('button')).toHaveCount(4);
-  const before = (await arrowsOnly.boundingBox())!;
-
-  await handshake(page, 0, { capabilities: ['paging_keys'] });
-  const menu = page.getByRole('group', { name: 'Arrow and paging keys' });
-  await expect(menu.getByRole('button')).toHaveCount(8);
+  const menu = page.getByRole('group', { name: 'Navigation keys' });
   const row = page.locator('.term-keys');
-  const geometry = await row.evaluate((element) => {
-    const rowRect = element.getBoundingClientRect();
-    const buttons = [...element.querySelectorAll('.button')].map((button) => button.getBoundingClientRect());
-    return {
-      count: buttons.length,
-      onOneLine: buttons.every((rect) => rect.top === buttons[0].top),
-      insideRow: buttons.every((rect) => (
-        rect.left >= rowRect.left && rect.right <= rowRect.right && rect.top >= rowRect.top && rect.bottom <= rowRect.bottom
-      )),
-      fitsViewport: document.documentElement.scrollWidth <= innerWidth,
-    };
-  });
-  expect(geometry).toEqual({ count: 8, onOneLine: true, insideRow: true, fitsViewport: true });
-  const after = (await menu.boundingBox())!;
-  expect(after.width).toBe(before.width);
-  expect(after.height).toBe(before.height);
-  expect(after.x).toBeGreaterThanOrEqual(0);
-  expect(after.y).toBeGreaterThanOrEqual(0);
-  expect(after.x + after.width).toBeLessThanOrEqual(320);
-  expect(after.y + after.height).toBeLessThanOrEqual(740);
+  const controls = () => row.getByRole('button').evaluateAll((buttons) =>
+    buttons.map((button) => button.getAttribute('aria-label') ?? button.textContent?.trim()));
+  await expect(arrows).toBeVisible();
+  const controlsBefore = await controls();
 
+  await arrows.click();
+  await expect(menu).toBeVisible();
+  const before = (await menu.boundingBox())!;
+  await handshake(page, 0, { capabilities: ['paging_keys'] });
   for (const name of ['Home', 'Page up', 'End', 'Page down']) {
     const button = menu.getByRole('button', { name, exact: true });
+    await expect(button).toBeVisible();
     expect(await button.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
   }
-  const sentKeys = async () => (await commands(page))
-    .filter((command) => command.type === 'send_keys').map((command) => command.keys);
-  await menu.getByRole('button', { name: 'Page down', exact: true }).click();
-  await expect.poll(sentKeys).toEqual([['PageDown']]);
-  await expect(menu).toBeVisible();
+  const after = (await menu.boundingBox())!;
+  expect({ width: after.width, height: after.height }).toEqual({ width: before.width, height: before.height });
+  await expect(menu).toBeInViewport({ ratio: 1 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+
+  await arrows.click();
+  await expect(menu).toBeHidden();
+  expect(await controls()).toEqual(controlsBefore);
+  expect(await row.evaluate((element) => {
+    const rowRect = element.getBoundingClientRect();
+    const buttons = [...element.querySelectorAll('button')].map((button) => button.getBoundingClientRect());
+    return buttons.every((rect) => rect.top === buttons[0].top &&
+      rect.left >= rowRect.left && rect.right <= rowRect.right && rect.top >= rowRect.top && rect.bottom <= rowRect.bottom);
+  })).toBe(true);
 
   const ctrl = page.getByRole('button', { name: 'Ctrl', exact: true });
   await ctrl.click();
   await arrows.click();
   await menu.getByRole('button', { name: 'End', exact: true }).click();
-  await expect.poll(sentKeys).toEqual([['PageDown'], ['ctrl+end']]);
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'send_keys').map((command) => command.keys)).toEqual([['ctrl+end']]);
   await expect(ctrl).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByRole('textbox', { name: 'Modifier shortcut character' })).toBeFocused();
 });
 
 test('refreshes agents on return home and preserves shared terminal behavior', async ({ page }) => {

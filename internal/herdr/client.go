@@ -709,9 +709,12 @@ func (c *Client) SendKeys(ctx context.Context, paneID string, keys []string) err
 }
 
 func pagingKeySequence(key string) string {
-	parts := strings.Split(strings.ToLower(key), "+")
+	base, modifiers, ok := parseTerminalChord(key)
+	if !ok {
+		return ""
+	}
 	var parameter, final string
-	switch parts[len(parts)-1] {
+	switch base {
 	case "pageup":
 		parameter, final = "5", "~"
 	case "pagedown":
@@ -724,24 +727,6 @@ func pagingKeySequence(key string) string {
 		return ""
 	}
 
-	var modifiers int
-	for _, part := range parts[:len(parts)-1] {
-		var bit int
-		switch part {
-		case "shift":
-			bit = 1
-		case "alt":
-			bit = 2
-		case "ctrl":
-			bit = 4
-		default:
-			return ""
-		}
-		if modifiers&bit != 0 {
-			return ""
-		}
-		modifiers |= bit
-	}
 	if modifiers != 0 {
 		parameter = cmp.Or(parameter, "1") + ";" + strconv.Itoa(1+modifiers)
 	}

@@ -5,6 +5,7 @@ import TerminalKeys from '$components/TerminalKeys.svelte';
 import TerminalView from '$components/TerminalView.svelte';
 import { relayStore } from '$lib/store';
 import type { Agent, CommandResult } from '$lib/types';
+import { deferred } from '../support/relay';
 
 const agent: Agent = {
   relay_id: 'fedora', relay_label: 'Fedora', raw_pane_id: 'w1:p1', pane_id: 'fedora::w1:p1',
@@ -31,7 +32,7 @@ describe('TerminalKeys', () => {
     render(TerminalKeys, { agent });
 
     await userEvent.click(screen.getByRole('button', { name: 'Arrow keys' }));
-    const menu = within(screen.getByRole('group', { name: 'Arrow keys' }));
+    const menu = within(screen.getByRole('group', { name: 'Navigation keys' }));
     expect(menu.getAllByRole('button')).toHaveLength(4);
     for (const name of ['Up', 'Left', 'Right', 'Down']) {
       expect(menu.getByRole('button', { name })).toBeVisible();
@@ -56,33 +57,24 @@ describe('TerminalKeys', () => {
 
     expect(send).toHaveBeenCalledExactlyOnceWith(agent, { type: 'send_keys', keys: [key], activity_label: label });
     expect(screen.getByRole('status')).toHaveTextContent(`${label} sent`);
-    expect(screen.getByRole('group', { name: 'Arrow and paging keys' })).toBeVisible();
+    expect(screen.getByRole('group', { name: 'Navigation keys' })).toBeVisible();
     for (const modifier of modifiers) {
       expect(screen.getByRole('button', { name: modifier })).toHaveAttribute('aria-pressed', 'true');
     }
   });
 
-  it('disables Arrow keys for readers even when paging keys are available', () => {
-    setPagingCapability();
-    render(TerminalKeys, { agent, readOnly: true });
-
-    expect(screen.getByRole('button', { name: 'Arrow keys' })).toBeDisabled();
-  });
-
   it('reports a rejected paging key and drops the next queued key', async () => {
     setPagingCapability();
     const user = userEvent.setup();
-    let rejectSend!: (error: Error) => void;
-    const send = vi.spyOn(relayStore, 'sendToAgent').mockImplementation(() => (
-      new Promise((_, reject) => { rejectSend = reject; })
-    ));
+    const pending = deferred<CommandResult>();
+    const send = vi.spyOn(relayStore, 'sendToAgent').mockReturnValue(pending.promise);
     const toast = vi.spyOn(relayStore, 'showToast').mockImplementation(() => undefined);
     render(TerminalKeys, { agent });
 
     await user.click(screen.getByRole('button', { name: 'Arrow keys' }));
     await user.click(screen.getByRole('button', { name: 'Page down' }));
     await user.click(screen.getByRole('button', { name: 'Page up' }));
-    rejectSend(new Error('Relay refused the key'));
+    pending.reject(new Error('Relay refused the key'));
 
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Key send failed'));
     expect(toast).toHaveBeenCalledWith('Relay refused the key', true);

@@ -34,10 +34,37 @@ var semanticBaseKeys = map[string]string{
 	"right":     "Right",
 }
 
-var supportedInputModifiers = map[string]string{
-	"ctrl":  "ctrl",
-	"alt":   "alt",
-	"shift": "shift",
+const (
+	shiftModifier = 1 << iota
+	altModifier
+	ctrlModifier
+)
+
+func parseTerminalChord(key string) (string, int, bool) {
+	parts := strings.Split(strings.ToLower(key), "+")
+	base := parts[len(parts)-1]
+	if base == "" {
+		return "", 0, false
+	}
+	var modifiers int
+	for _, part := range parts[:len(parts)-1] {
+		var bit int
+		switch part {
+		case "shift":
+			bit = shiftModifier
+		case "alt":
+			bit = altModifier
+		case "ctrl":
+			bit = ctrlModifier
+		default:
+			return "", 0, false
+		}
+		if modifiers&bit != 0 {
+			return "", 0, false
+		}
+		modifiers |= bit
+	}
+	return base, modifiers, true
 }
 
 func ValidatePaneInput(input PaneInput) (PaneInput, error) {
@@ -63,24 +90,12 @@ func normalizePaneInput(input PaneInput) (PaneInput, error) {
 }
 
 func normalizeSemanticInputKey(value string) (string, error) {
-	if value == "" || strings.TrimSpace(value) != value {
-		return "", ErrUnsupportedInputKey
-	}
-	parts := strings.Split(value, "+")
-	if len(parts) == 0 || len(parts) > 4 {
-		return "", ErrUnsupportedInputKey
-	}
-	modifiers := make(map[string]bool, len(parts)-1)
-	for _, part := range parts[:len(parts)-1] {
-		modifier, ok := supportedInputModifiers[strings.ToLower(part)]
-		if !ok || modifiers[modifier] {
-			return "", ErrUnsupportedInputKey
-		}
-		modifiers[modifier] = true
-	}
-	base, ok := semanticBaseKeys[strings.ToLower(parts[len(parts)-1])]
+	lower, modifiers, ok := parseTerminalChord(value)
 	if !ok {
-		lower := strings.ToLower(parts[len(parts)-1])
+		return "", ErrUnsupportedInputKey
+	}
+	base, ok := semanticBaseKeys[lower]
+	if !ok {
 		if len(lower) < 2 || lower[0] != 'f' {
 			return "", ErrUnsupportedInputKey
 		}
@@ -90,14 +105,17 @@ func normalizeSemanticInputKey(value string) (string, error) {
 		}
 		base = fmt.Sprintf("F%d", number)
 	}
-	ordered := make([]string, 0, len(modifiers)+1)
-	for _, modifier := range []string{"ctrl", "alt", "shift"} {
-		if modifiers[modifier] {
-			ordered = append(ordered, modifier)
-		}
+	var prefix string
+	if modifiers&ctrlModifier != 0 {
+		prefix += "ctrl+"
 	}
-	ordered = append(ordered, base)
-	return strings.Join(ordered, "+"), nil
+	if modifiers&altModifier != 0 {
+		prefix += "alt+"
+	}
+	if modifiers&shiftModifier != 0 {
+		prefix += "shift+"
+	}
+	return prefix + base, nil
 }
 
 // SendInput dispatches exactly one official pane.send_input request. It does
