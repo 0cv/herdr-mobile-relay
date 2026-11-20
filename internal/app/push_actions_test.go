@@ -10,6 +10,7 @@ import (
 
 	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 	"github.com/0cv/herdr-mobile-relay/internal/push"
+	"github.com/0cv/herdr-mobile-relay/internal/question"
 	"github.com/0cv/herdr-mobile-relay/internal/transport"
 	"github.com/coder/websocket"
 )
@@ -66,7 +67,7 @@ func publishAttention(t *testing.T, s *Server, deviceID, eventID string, target 
 		Key: push.PushEventKey{
 			DeviceID: deviceID, ServerSessionID: target.ServerSessionID, PaneID: target.PaneID,
 			TerminalID: target.TerminalID, AgentSessionID: target.AgentSessionID, Generation: target.Generation,
-			EventID: eventID, Category: push.CategoryAttention,
+			EventID: eventID, Category: push.CategoryAttention, InteractionRevision: s.state.AttentionRevision(target.PaneID),
 		},
 		Preview: push.PreviewHidden, CreatedAt: now, ExpiresAt: now.Add(time.Minute),
 	})
@@ -243,37 +244,88 @@ func TestPushOpenRef(t *testing.T) {
 	subscribeDevice(t, s.pushM, "device-1", "https://fcm.googleapis.com/fcm/send/one")
 	subscribeDevice(t, s.pushM, "device-2", "https://fcm.googleapis.com/fcm/send/two")
 	target := currentPaneTarget(t, s)
-	publishAttention(t, s, "device-1", "event-1", target)
-	publishAttention(t, s, "device-2", "event-2", target)
+	if !s.state.CommitEvent(target.PaneID, "blocked", time.Now().UnixMilli()) {
+		t.Fatal("could not block pane")
+	}
+	agent, _ := s.state.Agent(target.PaneID)
+	eventID := agent.BlockedEventID
+	classify := func(command string) {
+		t.Helper()
+		if _, _, ok := s.state.CommitAttentionClassification(target.PaneID, eventID, target.Generation,
+			s.state.ContentRevision(target.PaneID), question.Classification{
+				Kind: question.AttentionApproval, Command: command, ApprovalIdentity: command,
+			}); !ok {
+			t.Fatal("could not classify blocked pane")
+		}
+	}
 	open := func(ref string) map[string]any {
 		t.Helper()
 		s.handlePushOpenRef(client, protocol.Inbound{RequestID: "req-1", EventRef: ref}, "push_open_ref", pushIdentity)
 		return readFrame(t, conn)
 	}
-	const refused = "Notification target is no longer available"
+	refuse := func(ref string) {
+		t.Helper()
+		requireFailedResult(t, open(ref), "push_open_ref", "Notification target is no longer available")
+	}
 
-	t.Run("a reference for the caller's current pane opens", func(t *testing.T) {
-		response := open(queuedEventRef(t, dir, "device-1", "event-1"))
-		requireCompleted(t, response, "push_open_ref")
-		data := commandData(t, response)
-		target, _ := data["target"].(map[string]any)
-		if data["event_id"] != "event-1" || data["category"] != "attention" || target["pane_id"] != "pane-1" {
-			t.Fatalf("data = %#v", data)
+	classify("first approval")
+	publishAttention(t, s, "device-1", eventID, target)
+	publishAttention(t, s, "device-2", eventID, target)
+	old := queuedEventRef(t, dir, "device-1", eventID)
+	response := open(old)
+	requireCompleted(t, response, "push_open_ref")
+	data := commandData(t, response)
+	opened, _ := data["target"].(map[string]any)
+	if len(data) != 3 || data["event_id"] != eventID || data["category"] != "attention" || opened["pane_id"] != target.PaneID {
+		t.Fatalf("data = %#v", data)
+	}
+	refuse(queuedEventRef(t, dir, "device-2", eventID))
+	refuse("not-a-reference")
+
+	firstAgent, _ := s.state.Agent(target.PaneID)
+	firstRevision := s.state.AttentionRevision(target.PaneID)
+	staleRequest := agentPushRequest(firstAgent, eventID, firstRevision, push.CategoryAttention, push.PreviewHidden)
+
+	classify("different approval")
+	oldClaims, err := s.pushM.VerifyEventReference(old, time.Now())
+	if err != nil || oldClaims.Key.Target() != target || oldClaims.Key.EventID != eventID {
+		t.Fatalf("old key should still be active for the same target and event: %#v, %v", oldClaims, err)
+	}
+	refuse(old)
+	secondAgent, _ := s.state.Agent(target.PaneID)
+	s.applyWaitingPush(t.Context(), agentPushRequest(secondAgent, eventID, s.state.AttentionRevision(target.PaneID), push.CategoryAttention, push.PreviewHidden))
+	s.applyWaitingPush(t.Context(), staleRequest)
+	s.transitionWorking(t.Context(), target.PaneID, "claude", "", firstAgent.StateRevision, 0)
+	payloads := queuedPushPayloads(t, dir)
+	if len(payloads) != 2 {
+		t.Fatalf("stale callbacks changed the replacement queue: %#v", payloads)
+	}
+	var replacement string
+	for _, payload := range payloads {
+		if payload.Key.InteractionRevision == firstRevision {
+			t.Fatalf("stale callback requeued the old key: %#v", payload)
 		}
-	})
+		if payload.Key.DeviceID == "device-1" && payload.Key.InteractionRevision == s.state.AttentionRevision(target.PaneID) {
+			replacement = payload.EventRef
+		}
+	}
+	requireCompleted(t, open(replacement), "push_open_ref")
+	refuse(old)
 
-	t.Run("a reference for another device is refused", func(t *testing.T) {
-		requireFailedResult(t, open(queuedEventRef(t, dir, "device-2", "event-2")), "push_open_ref", refused)
-	})
+	if !s.state.CommitEvent(target.PaneID, "working", time.Now().UnixMilli()) {
+		t.Fatal("could not answer approval")
+	}
+	refuse(replacement)
 
-	t.Run("a reference that cannot be verified is refused", func(t *testing.T) {
-		requireFailedResult(t, open("not-a-reference"), "push_open_ref", refused)
-	})
-
-	t.Run("a reference for a replaced pane is refused", func(t *testing.T) {
-		s.state.BumpGeneration("pane-1")
-		requireFailedResult(t, open(queuedEventRef(t, dir, "device-1", "event-1")), "push_open_ref", refused)
-	})
+	if !s.state.CommitEvent(target.PaneID, "blocked", time.Now().UnixMilli()) {
+		t.Fatal("could not block pane again")
+	}
+	agent, _ = s.state.Agent(target.PaneID)
+	publishAttention(t, s, "device-1", agent.BlockedEventID, target)
+	replaced := queuedEventRef(t, dir, "device-1", agent.BlockedEventID)
+	requireCompleted(t, open(replaced), "push_open_ref")
+	s.state.BumpGeneration(target.PaneID)
+	refuse(replaced)
 }
 
 func TestPushTestDevice(t *testing.T) {

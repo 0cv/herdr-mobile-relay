@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 	"github.com/0cv/herdr-mobile-relay/internal/question"
 )
 
@@ -64,6 +65,7 @@ type AgentState struct {
 
 type paneRecord struct {
 	agent            *AgentState
+	workingRevision  int64
 	revision         int64
 	contentRev       int64
 	attentionRev     int64
@@ -304,6 +306,10 @@ func (s *State) BumpGeneration(paneID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.generation[paneID]++
+	rec := s.panes[paneID]
+	if rec != nil {
+		rec.workingRevision = 0
+	}
 }
 
 func (s *State) TransitionCurrent(paneID, status string, revision int64) bool {
@@ -311,6 +317,13 @@ func (s *State) TransitionCurrent(paneID, status string, revision int64) bool {
 	defer s.mu.RUnlock()
 	rec := s.panes[paneID]
 	return rec != nil && rec.agent.Status == status && rec.revision == revision
+}
+
+func (s *State) WorkingTransitionCurrent(paneID string, revision int64) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rec := s.panes[paneID]
+	return rec != nil && rec.agent.Status == "working" && revision != 0 && rec.workingRevision == revision
 }
 
 func (s *State) BlockedTransitionCurrent(paneID, eventID string, generation int64) bool {
@@ -338,6 +351,36 @@ func (s *State) AttentionTransitionCurrent(
 		s.generation[paneID] == generation &&
 		string(rec.agent.AttentionKind) == attentionKind &&
 		rec.attentionRev == attentionRevision
+}
+
+func TargetMatchesAgent(target protocol.TargetRef, agent *AgentState, generation int64) bool {
+	return target.ServerSessionID == protocol.PrimaryServerSessionID &&
+		target.PaneID == agent.PaneID &&
+		target.TerminalID != "" && target.TerminalID == agent.TerminalID &&
+		target.Generation == generation &&
+		target.AgentSessionID == agent.SessionID
+}
+
+func (s *State) WaitingRequestCurrent(target protocol.TargetRef, eventID string, revision int64, isQuestion bool) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rec := s.panes[target.PaneID]
+	return rec != nil &&
+		TargetMatchesAgent(target, rec.agent, s.generation[target.PaneID]) &&
+		rec.agent.Status == "blocked" &&
+		rec.agent.BlockedEventID == eventID &&
+		rec.attentionRev == revision &&
+		rec.agent.AttentionKind != question.AttentionChat &&
+		(rec.agent.AttentionKind == question.AttentionQuestion) == isQuestion
+}
+
+func (s *State) CompletionRevision(paneID string) int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if rec := s.panes[paneID]; rec != nil {
+		return rec.completion.completionRev
+	}
+	return 0
 }
 
 func (s *State) CompletionCurrent(paneID string, revision int64) bool {
@@ -494,8 +537,10 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 				}
 			}
 			s.generation[incoming.PaneID]++
+			rec.workingRevision = 0
 		}
 		if replaced {
+			rec.workingRevision = 0
 			rec.sessionDiscovery = nil
 			topologyChanged = true
 			s.generation[incoming.PaneID]++
@@ -782,10 +827,13 @@ func copyBlockedDetails(destination, source *AgentState) {
 }
 
 func (s *State) fireTransition(paneID, status string) {
+	rec := s.panes[paneID]
+	if status == "working" {
+		rec.workingRevision = rec.revision
+	}
 	if s.onTransition == nil {
 		return
 	}
-	rec := s.panes[paneID]
 	s.onTransition(paneID, rec.agent.Agent, rec.agent.Project, status, rec.revision)
 }
 
@@ -867,7 +915,7 @@ func (s *State) CommitAttentionClassification(
 	generation int64,
 	contentRevision int64,
 	classification question.Classification,
-) (*AgentState, bool) {
+) (*AgentState, int64, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rec := s.panes[paneID]
@@ -875,7 +923,7 @@ func (s *State) CommitAttentionClassification(
 		rec.agent.BlockedEventID != eventID ||
 		s.generation[paneID] != generation ||
 		rec.contentRev != contentRevision {
-		return nil, false
+		return nil, 0, false
 	}
 	agent := rec.agent
 	if classification.Kind == "" {
@@ -892,7 +940,8 @@ func (s *State) CommitAttentionClassification(
 	}
 	copy := *agent
 	copy.StateRevision = rec.revision
-	return &copy, true
+	copy.Generation = generation
+	return &copy, rec.attentionRev, true
 }
 
 func applyAttentionClassification(

@@ -26,6 +26,10 @@ const (
 	CategoryTest      Category = "test"
 )
 
+func (c Category) Waiting() bool {
+	return c == CategoryAttention || c == CategoryQuestion
+}
+
 type PreviewMode string
 
 const (

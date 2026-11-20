@@ -190,6 +190,8 @@ func (m *Manager) UnsubscribeDevice(deviceID string, endpoints []string, clientI
 			remove[endpoint] = true
 		}
 	}
+	m.queue.process.Lock()
+	defer m.queue.process.Unlock()
 	m.mu.Lock()
 	filtered := make([]Subscription, 0, len(m.subscriptions))
 	removed := make([]Subscription, 0)
@@ -221,6 +223,8 @@ func (m *Manager) RemoveDevice(deviceID string) error {
 	if strings.TrimSpace(deviceID) == "" {
 		return errors.New("push device is required")
 	}
+	m.queue.process.Lock()
+	defer m.queue.process.Unlock()
 	m.mu.Lock()
 	filtered := make([]Subscription, 0, len(m.subscriptions))
 	for _, subscription := range m.subscriptions {
@@ -236,11 +240,6 @@ func (m *Manager) RemoveDevice(deviceID string) error {
 	for key := range m.active {
 		if key.DeviceID == deviceID {
 			delete(m.active, key)
-		}
-	}
-	for key := range m.retracting {
-		if key.DeviceID == deviceID {
-			delete(m.retracting, key)
 		}
 	}
 	m.mu.Unlock()

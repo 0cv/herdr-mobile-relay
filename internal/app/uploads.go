@@ -13,7 +13,7 @@ import (
 
 func (s *Server) validateUploadTarget(target protocol.TargetRef) error {
 	agent, exists := s.state.Agent(target.PaneID)
-	if !exists || !targetMatchesAgent(target, agent) {
+	if !exists || !coordinator.TargetMatchesAgent(target, agent, agent.Generation) {
 		return &upload.Error{Code: "upload_scope_mismatch"}
 	}
 	return nil
