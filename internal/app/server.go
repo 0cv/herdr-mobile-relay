@@ -440,24 +440,7 @@ func (s *Server) Run(ctx context.Context) error {
 		s.udp = udpListener
 		s.udp.SetOnDirty(func() { s.poller.Wake() })
 		s.udp.SetOnChange(func(agent *coordinator.AgentState) {
-			s.commitAgent(agent, map[string]any{
-				"type":          "agent_update",
-				"pane_id":       agent.PaneID,
-				"raw_pane_id":   agent.RawPaneID,
-				"status":        agent.Status,
-				"agent":         agent.Agent,
-				"tab_id":        agent.TabID,
-				"tab_label":     agent.TabLabel,
-				"tab_number":    agent.TabNumber,
-				"workspace_id":  agent.WorkspaceID,
-				"cwd":           agent.Cwd,
-				"project":       agent.Project,
-				"host":          agent.Host,
-				"session":       agent.Session,
-				"session_name":  agent.SessionName,
-				"updated_at":    agent.UpdatedAt,
-				"pane_revision": agent.StateRevision,
-			})
+			s.commitAgent(agent, "agent_update")
 			if probe != nil {
 				probe.offer(agent.PaneID)
 			}

@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/coordinator"
-	"github.com/0cv/herdr-mobile-relay/internal/question"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 )
 
 const probeReadsPerCycle = 4
@@ -15,7 +15,7 @@ const probeReadsPerCycle = 4
 type idleProbeWorker struct {
 	server  *Server
 	mu      sync.Mutex
-	queue   []coordinator.ProbeTarget
+	queue   []protocol.TargetRef
 	served  map[string]bool
 	credits int
 	wake    chan struct{}
@@ -62,16 +62,16 @@ func (w *idleProbeWorker) refresh() {
 }
 
 func (w *idleProbeWorker) refreshLocked() {
-	var eligible []coordinator.ProbeTarget
-	current := make(map[coordinator.ProbeTarget]bool)
+	var eligible []protocol.TargetRef
+	current := make(map[protocol.TargetRef]bool)
 	for _, a := range w.server.state.Snapshot() {
 		if w.eligible(a) {
-			target := a.ProbeTarget()
+			target := a.TargetRef()
 			current[target] = true
 			eligible = append(eligible, target)
 		}
 	}
-	w.queue = slices.DeleteFunc(w.queue, func(target coordinator.ProbeTarget) bool {
+	w.queue = slices.DeleteFunc(w.queue, func(target protocol.TargetRef) bool {
 		return !current[target]
 	})
 	for _, target := range w.queue {
@@ -89,24 +89,24 @@ func (w *idleProbeWorker) offer(paneID string) {
 	defer w.mu.Unlock()
 	agent, ok := w.server.state.Agent(paneID)
 	eligible := ok && w.eligible(agent)
-	w.queue = slices.DeleteFunc(w.queue, func(target coordinator.ProbeTarget) bool {
-		return target.PaneID == paneID && (!eligible || target != agent.ProbeTarget())
+	w.queue = slices.DeleteFunc(w.queue, func(target protocol.TargetRef) bool {
+		return target.PaneID == paneID && (!eligible || target != agent.TargetRef())
 	})
-	if eligible && !slices.Contains(w.queue, agent.ProbeTarget()) {
-		w.queue = append(w.queue, agent.ProbeTarget())
+	if eligible && !slices.Contains(w.queue, agent.TargetRef()) {
+		w.queue = append(w.queue, agent.TargetRef())
 	}
 	w.signal()
 }
 
-func (w *idleProbeWorker) leased(target coordinator.ProbeTarget) bool {
+func (w *idleProbeWorker) leased(target protocol.TargetRef) bool {
 	return w.server.paneSizeM != nil && w.server.paneSizeM.Leased(target.PaneID, target.TerminalID)
 }
 
 func (w *idleProbeWorker) eligible(agent *coordinator.AgentState) bool {
-	return agent.ProbeGoverned() && (agent.ProbePending || agent.ScreenAttention == coordinator.ScreenWaiting || w.leased(agent.ProbeTarget()))
+	return agent.ProbeGoverned() && (agent.ProbePending || agent.ScreenAttention == coordinator.ScreenWaiting || w.leased(agent.TargetRef()))
 }
 
-func (w *idleProbeWorker) next() (coordinator.ProbeTarget, coordinator.ProbeToken, string, bool) {
+func (w *idleProbeWorker) next() (protocol.TargetRef, coordinator.ProbeToken, string, bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	for i := 0; w.credits > 0 && i < len(w.queue); {
@@ -115,13 +115,8 @@ func (w *idleProbeWorker) next() (coordinator.ProbeTarget, coordinator.ProbeToke
 			i++
 			continue
 		}
-		agent, exists := w.server.state.Agent(target.PaneID)
 		w.queue = slices.Delete(w.queue, i, i+1)
-		if !exists || agent.ProbeTarget() != target || !agent.ProbeGoverned() {
-			continue
-		}
-		leased := !agent.ProbePending && agent.ScreenAttention != coordinator.ScreenWaiting && w.leased(target)
-		token, kind, ok := w.server.state.ProbeToken(target, leased)
+		token, kind, ok := w.server.state.ProbeToken(target, w.leased(target))
 		if !ok {
 			continue
 		}
@@ -130,7 +125,7 @@ func (w *idleProbeWorker) next() (coordinator.ProbeTarget, coordinator.ProbeToke
 		w.queue = append(w.queue, target)
 		return target, token, kind, true
 	}
-	return coordinator.ProbeTarget{}, coordinator.ProbeToken{}, "", false
+	return protocol.TargetRef{}, coordinator.ProbeToken{}, "", false
 }
 
 func (w *idleProbeWorker) run(ctx context.Context) {
@@ -150,26 +145,13 @@ func (w *idleProbeWorker) readNext(ctx context.Context) bool {
 	if !ok || ctx.Err() != nil {
 		return false
 	}
-	readCtx, cancel := context.WithTimeout(ctx, coordinator.ProbeTimeout)
-	read, err := w.server.herdrC.ReadPaneVisible(readCtx, target.PaneID, question.VisibleRows, "ansi")
-	cancel()
+	classification, err := coordinator.ReadLiveAttention(ctx, w.server.herdrC, target.PaneID, agent)
 	if ctx.Err() != nil {
 		return false
 	}
-	var classification question.Classification
-	var reliable bool
-	if err == nil {
-		classification, reliable = question.ClassifyLive(string(read.Content), agent)
-	}
-	if current, exists := w.server.state.Agent(target.PaneID); exists && current.ProbeTarget() == target && current.ProbeGoverned() {
-		leased := !current.ProbePending && current.ScreenAttention != coordinator.ScreenWaiting && w.leased(target)
-		if w.server.state.CommitProbe(token, classification, reliable, leased, w.now()) {
-			if updated, exists := w.server.state.Agent(target.PaneID); exists && updated.ProbeTarget() == target && updated.ScreenAttention != current.ScreenAttention {
-				w.server.logger.Info("idle question probe changed attention", "pane_id", target.PaneID, "screen_attention", updated.ScreenAttention, "status", updated.Status)
-			}
-			if err := w.server.publishCurrentInventory(ctx); err != nil {
-				w.server.logger.Warn("probe inventory publication failed", "error", err)
-			}
+	if w.server.state.CommitProbe(token, classification, err == nil, w.leased(target), w.now()) {
+		if err := w.server.publishCurrentInventory(ctx); err != nil {
+			w.server.logger.Warn("probe inventory publication failed", "error", err)
 		}
 	}
 	return true

@@ -38,7 +38,7 @@ func TestIdleProbePublishedControlsAndClear(t *testing.T) {
 			commit := func(classification question.Classification) bool {
 				t.Helper()
 				a, _ := s.state.Agent("pane-1")
-				token, _, ok := s.state.ProbeToken(a.ProbeTarget(), false)
+				token, _, ok := s.state.ProbeToken(a.TargetRef(), false)
 				if !ok {
 					t.Fatal("missing token")
 				}
@@ -61,7 +61,7 @@ func TestIdleProbePublishedControlsAndClear(t *testing.T) {
 			for _, report := range []string{"idle", "done", "idle"} {
 				s.state.CommitEvent("pane-1", report, 2)
 				a, _ = s.state.Agent("pane-1")
-				s.commitAgent(a, map[string]any{"type": "agent_update", "pane_id": a.PaneID, "status": a.Status, "pane_revision": a.StateRevision})
+				s.commitAgent(a, "agent_update")
 				updated := readFrame(t, e.conn)
 				if updated["screen_attention"] != coordinator.ScreenWaiting || updated["event_id"] != a.BlockedEventID || updated["status"] != "blocked" || updated["attention_kind"] != string(kind) ||
 					kind == question.AttentionQuestion && updated["interaction"] == nil || kind == question.AttentionApproval && updated["options"] == nil {
@@ -113,7 +113,7 @@ func TestProbeGovernedPaneFramesRequireMatchingCommittedControls(t *testing.T) {
 			s.state.CommitInventory([]*coordinator.AgentState{agent}, 0)
 			if status == "waiting" {
 				a, _ := s.state.Agent(agent.PaneID)
-				token, _, _ := s.state.ProbeToken(a.ProbeTarget(), true)
+				token, _, _ := s.state.ProbeToken(a.TargetRef(), true)
 				live, _ := question.ClassifyLive(frame, a.Agent)
 				if !s.state.CommitProbe(token, live, true, true, time.Now()) {
 					t.Fatal("not promoted")

@@ -1,6 +1,7 @@
 import type { Agent, AttentionKind, QuestionInteraction } from './types';
 import { stripAnsi } from './terminal';
 import { pathBase } from './paths';
+import { agentTargetsDiffer } from './resource-id';
 
 export type AgentKind = 'agy' | 'claude' | 'codex' | 'cursor' | 'grok' | 'hermes' | 'kimi' | 'omo' | 'omp' | 'opencode' | 'pi' | 'qoder';
 
@@ -265,14 +266,6 @@ function retainBlockedDetails(previous: Agent, next: Agent): Agent {
   };
 }
 
-export function agentTargetReplaced(previous: Agent | undefined, next: Agent): boolean {
-  if (!previous) return false;
-  return Boolean(next.terminal_id && previous.terminal_id && next.terminal_id !== previous.terminal_id
-    || next.server_session_id && previous.server_session_id && next.server_session_id !== previous.server_session_id
-    || next.generation !== undefined && previous.generation !== undefined
-      && (next.generation !== previous.generation || (next.agent_session_id || '') !== (previous.agent_session_id || '')));
-}
-
 export function stabilizeBlockedSnapshot(
   previous: Agent | undefined,
   next: Agent,
@@ -281,7 +274,7 @@ export function stabilizeBlockedSnapshot(
 ): Agent {
   const paneId = next.pane_id;
   if (!paneId) return next;
-  if (next.screen_attention === 'cleared' || agentTargetReplaced(previous, next)) {
+  if (next.screen_attention === 'cleared' || agentTargetsDiffer(previous, next)) {
     misses.delete(paneId);
     return next;
   }
@@ -318,7 +311,7 @@ export function mergeAgentDetails(previous: Agent | undefined, next: Agent): Age
   if (next.screen_attention === 'cleared') {
     next = { ...next, event_id: undefined, prompt: undefined, command: undefined };
   }
-  if (!previous || agentTargetReplaced(previous, next)) return next;
+  if (!previous || agentTargetsDiffer(previous, next)) return next;
   const blocked = rawBlocked(next);
   const hasAttentionKind = Object.prototype.hasOwnProperty.call(next, 'attention_kind');
   const hasInteraction = Object.prototype.hasOwnProperty.call(next, 'interaction');

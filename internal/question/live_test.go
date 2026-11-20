@@ -1,11 +1,10 @@
 package question
 
 import (
-	"os"
-	"path/filepath"
 	"reflect"
-	"strings"
 	"testing"
+
+	"github.com/0cv/herdr-mobile-relay/internal/question/testfixture"
 )
 
 func TestClassifyLive(t *testing.T) {
@@ -65,25 +64,23 @@ func TestClassifyLiveBoundedApprovals(t *testing.T) {
 
 func TestClassifyLiveRejectsSupersededControls(t *testing.T) {
 	ask := attentionFixture(t, "omp-ask-status-below.ansi")
-	fixture := func(name string) string {
-		data, err := os.ReadFile(filepath.Join("testdata", "live", name))
-		if err != nil {
-			t.Fatal(err)
-		}
-		return string(data)
-	}
+	approval := attentionFixture(t, "omp-tool-approval.ansi")
 	for _, tc := range []struct{ name, agent, text string }{
-		{"stale ask", "omp", fixture("omp-ask-stale-before-status.ansi")},
-		{"stale approval", "omp", fixture("omp-tool-approval-stale-before-status.ansi")},
+		{"stale ask", "omp", testfixture.StaleOMP(t, ask)},
+		{"stale approval", "omp", testfixture.StaleOMP(t, approval)},
 		{"trailing output after status", "omp", ask + "\nRecent output"},
 		{"clipped ask", "omp", attentionFixture(t, "omp-partial-ask.ansi")},
 		{"idle composer", "omp", ask + "\n╭──────╮\n│      │\n╰──────╯"},
-		{"borrowed footer", "omp", replaceLiveRow(ask, "⏎ select · n note · ↑/↓ move · ⎋ cancel · Alt+H hide", "│ up/down navigate  enter select  esc cancel │")},
+		{"borrowed footer", "omp", testfixture.ReplaceRow(t, ask, "⏎ select · n note · ↑/↓ move · ⎋ cancel · Alt+H hide", "│ up/down navigate  enter select  esc cancel │")},
 		{"displayed menu", "claude", "Choose a color\n❯ 1. Blue\n  2. Green\n" + claudeQuestionHints[0]},
 		{"historical approval", "claude", attentionFixture(t, "claude-single-approval.ansi") + "\n❯ "},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			for _, agent := range []string{tc.agent, "pi"} {
+			agents := []string{tc.agent}
+			if tc.agent == "omp" {
+				agents = append(agents, "pi")
+			}
+			for _, agent := range agents {
 				if got, ok := ClassifyLive(tc.text, agent); !ok || got.Kind != "" {
 					t.Fatalf("%s: %+v (reliable=%t)", agent, got, ok)
 				}
@@ -102,30 +99,36 @@ func TestClassifyLiveClaudeWrappedHint(t *testing.T) {
 		t.Run(tc.fixture, func(t *testing.T) {
 			wide := attentionFixture(t, tc.fixture)
 			want, _ := ClassifyLive(wide, "claude")
-			narrow := replaceLiveRow(wide, tc.hint, tc.wrapped)
-			if narrow == wide {
-				t.Fatal("hint not split")
+			narrow := testfixture.ReplaceRow(t, wide, tc.hint, tc.wrapped)
+			got, ok := ClassifyLive(narrow, "claude")
+			if !ok || got.Kind == "" || got.Kind != want.Kind {
+				t.Fatalf("got %+v, want %s", got, want.Kind)
 			}
-			if got, ok := ClassifyLive(narrow, "claude"); !ok || got.Kind == "" || !reflect.DeepEqual(got, want) {
-				t.Fatalf("got %+v, want %+v", got, want)
-			}
-			for _, output := range []string{"Done", "All done", "All done now"} {
-				stale := replaceLiveRow(wide, tc.hint, tc.hint+"\n"+output)
-				if got, ok := ClassifyLive(stale, "claude"); !ok || got.Kind != "" {
-					t.Fatalf("accepted newer %q after complete hint: %+v", output, got)
+			if got.Kind == AttentionQuestion {
+				if got.Interaction.ID != want.Interaction.ID || got.Interaction.Focus != want.Interaction.Focus ||
+					!reflect.DeepEqual(got.Interaction.Options, want.Interaction.Options) {
+					t.Fatalf("got %+v, want %+v", got.Interaction, want.Interaction)
 				}
+			} else if ApprovalFingerprint(got) != ApprovalFingerprint(want) ||
+				got.ApprovalFocus != want.ApprovalFocus || !reflect.DeepEqual(got.Options, want.Options) {
+				t.Fatalf("got %+v, want approval options %v at %d", got, want.Options, want.ApprovalFocus)
 			}
 		})
 	}
 }
 
-func replaceLiveRow(frame, row, replacement string) string {
-	lines := strings.Split(frame, "\n")
-	for i, line := range lines {
-		if cleanLine(line) == row {
-			lines[i] = replacement
-			break
+func TestClassifyLiveRejectsTextAfterCompleteApprovalFooter(t *testing.T) {
+	frame := attentionFixture(t, "claude-single-approval.ansi")
+	for _, output := range []string{"Done", "All done", "All done now"} {
+		stale := testfixture.ReplaceRow(t, frame, claudeApprovalHint, claudeApprovalHint+"\n"+output)
+		if got, ok := ClassifyLive(stale, "claude"); !ok || got.Kind != "" {
+			t.Fatalf("accepted newer %q after complete hint: %+v", output, got)
 		}
 	}
-	return strings.Join(lines, "\n")
+	frame = attentionFixture(t, "claude-named-session-task-panel.ansi")
+	hint := claudeQuestionHints[0]
+	stale := testfixture.ReplaceRow(t, frame, hint, hint+"\nDone")
+	if got, ok := ClassifyLive(stale, "claude"); !ok || got.Kind != "" {
+		t.Fatalf("accepted text between the question and task panel: %+v", got)
+	}
 }

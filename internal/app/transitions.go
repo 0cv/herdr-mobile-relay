@@ -450,35 +450,11 @@ func (s *Server) broadcastBlockedAttention(agent *coordinator.AgentState) {
 	if agent == nil || s.transitionBroadcast == nil {
 		return
 	}
-	message := map[string]any{
-		"type":              "blocked",
-		"pane_id":           agent.PaneID,
-		"raw_pane_id":       agent.RawPaneID,
-		"terminal_id":       agent.TerminalID,
-		"tab_id":            agent.TabID,
-		"tab_label":         agent.TabLabel,
-		"tab_number":        agent.TabNumber,
-		"workspace_id":      agent.WorkspaceID,
-		"agent":             agent.Agent,
-		"name":              agent.Name,
-		"status":            "blocked",
-		"cwd":               agent.Cwd,
-		"project":           agent.Project,
-		"host":              agent.Host,
-		"session":           agent.Session,
-		"session_name":      agent.SessionName,
-		"server_session_id": protocol.PrimaryServerSessionID,
-		"generation":        agent.Generation,
-		"agent_session_id":  agent.SessionID,
-		"updated_at":        agent.UpdatedAt,
-		"pane_revision":     agent.StateRevision,
-	}
-	setAgentAttentionFields(message, agent)
 	if s.transitionBroadcast == s.hub {
-		s.commitAgent(agent, message)
+		s.commitAgent(agent, "blocked")
 		return
 	}
-	s.transitionBroadcast.Broadcast(message)
+	s.transitionBroadcast.Broadcast(agentUpdateMessage(agent, "blocked"))
 }
 
 func (s *Server) handleChatCompletion(

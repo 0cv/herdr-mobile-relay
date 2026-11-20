@@ -26,7 +26,7 @@ func probeState(t *testing.T, initial *AgentState) (*State, *[]string) {
 func captureProbe(t *testing.T, s *State, leased bool) ProbeToken {
 	t.Helper()
 	a, _ := s.Agent("pane")
-	token, _, ok := s.ProbeToken(a.ProbeTarget(), leased)
+	token, _, ok := s.ProbeToken(a.TargetRef(), leased)
 	if !ok {
 		t.Fatalf("no probe for %+v", a)
 	}
@@ -73,7 +73,7 @@ func TestProbePendingStops(t *testing.T) {
 			if got.ProbePending != tc.pending || got.RawStatus != tc.raw || got.Status != want || tc.initial == "blocked" && got.InteractionID != "native" {
 				t.Fatalf("unexpected state %+v", got)
 			}
-			_, _, eligible := s.ProbeToken(got.ProbeTarget(), false)
+			_, _, eligible := s.ProbeToken(got.TargetRef(), false)
 			if eligible != tc.pending {
 				t.Fatalf("eligible=%t", eligible)
 			}
@@ -130,6 +130,7 @@ func TestProbeReplacementDiscardsOldIdentity(t *testing.T) {
 				s.CommitEvent("pane", "idle", 1)
 				s.CommitProbe(captureProbe(t, s, false), questionHit("A"), true, false, now)
 				s.CommitProbe(captureProbe(t, s, false), question.Classification{}, true, false, now)
+				before, _ := s.Agent("pane")
 				inFlight := captureProbe(t, s, false)
 				commit := func(list []*AgentState) {
 					if topology {
@@ -156,10 +157,10 @@ func TestProbeReplacementDiscardsOldIdentity(t *testing.T) {
 					t.Fatal("obsolete read applied")
 				}
 				got, _ := s.Agent("pane")
-				if got.Generation == inFlight.target.Generation || got.RawStatus != "idle" || got.Status != "idle" || got.ProbePending || got.BlockedEventID != "" || got.ScreenAttention != "" || got.Interaction != nil {
+				if got.Generation == before.Generation || got.RawStatus != "idle" || got.Status != "idle" || got.ProbePending || got.BlockedEventID != "" || got.ScreenAttention != "" || got.Interaction != nil {
 					t.Fatalf("inherited dialog: %+v", got)
 				}
-				if _, _, ok := s.ProbeToken(got.ProbeTarget(), false); ok || !reflect.DeepEqual(*transitions, []string{"working", "blocked"}) {
+				if _, _, ok := s.ProbeToken(got.TargetRef(), false); ok || !reflect.DeepEqual(*transitions, []string{"working", "blocked"}) {
 					t.Fatal("replacement triggered work", *transitions)
 				}
 			})
@@ -241,6 +242,62 @@ func TestProbeHandoffAndDialogIdentity(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestProbeRejectsResultFromEarlierStop(t *testing.T) {
+	s, _ := probeState(t, probeAgent("working"))
+	s.CommitEvent("pane", "idle", 1)
+	old := captureProbe(t, s, false)
+	s.CommitEvent("pane", "working", 2)
+	s.CommitEvent("pane", "idle", 3)
+	if s.CommitProbe(old, questionHit("earlier"), true, false, time.Now()) {
+		t.Fatal("earlier result resolved the new stop")
+	}
+	if a, _ := s.Agent("pane"); !a.ProbePending || a.Interaction != nil {
+		t.Fatalf("new stop was not held: %+v", a)
+	}
+	if !s.CommitProbe(captureProbe(t, s, false), questionHit("current"), true, false, time.Now()) {
+		t.Fatal("current stop could not promote")
+	}
+}
+
+func TestProbeRejectsResultAfterContentChange(t *testing.T) {
+	a := probeAgent("idle")
+	s, _ := probeState(t, a)
+	old := captureProbe(t, s, true)
+	a.PaneRevision++
+	s.CommitInventory([]*AgentState{a}, s.RevisionCounter())
+	if s.CommitProbe(old, questionHit("old contents"), true, true, time.Now()) {
+		t.Fatal("stale screen contents promoted the pane")
+	}
+	if !s.CommitProbe(captureProbe(t, s, true), questionHit("new contents"), true, true, time.Now()) {
+		t.Fatal("current screen contents could not promote")
+	}
+}
+
+func TestProbeRejectsResultsAcrossPromotionAndNativeHandback(t *testing.T) {
+	s, _ := probeState(t, probeAgent("idle"))
+	old := captureProbe(t, s, true)
+	now := time.Now()
+	if !s.CommitProbe(captureProbe(t, s, true), questionHit("current"), true, true, now) {
+		t.Fatal("leased pane could not promote")
+	}
+	if s.CommitProbe(old, questionHit("earlier"), true, true, now) {
+		t.Fatal("pre-promotion result replaced the live dialog")
+	}
+
+	pending := captureProbe(t, s, true)
+	revision := s.ContentRevision("pane")
+	before, _ := s.Agent("pane")
+	s.CommitEvent("pane", "blocked", 1)
+	after, _ := s.Agent("pane")
+	if after.BlockedEventID != before.BlockedEventID || after.InteractionID != before.InteractionID ||
+		after.ScreenAttention != "" || s.ContentRevision("pane") == revision {
+		t.Fatalf("same-dialog handback did not invalidate screen evidence: %+v", after)
+	}
+	if s.CommitProbe(pending, questionHit("earlier"), true, true, now) {
+		t.Fatal("promoted read overwrote the native handback")
 	}
 }
 

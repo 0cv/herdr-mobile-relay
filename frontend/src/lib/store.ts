@@ -49,7 +49,6 @@ import {
 } from './device-auth';
 import {
   agentStatusGroup,
-  agentTargetReplaced,
   approvalOptions,
   clientPaneId,
   mergeAgentDetails,
@@ -82,6 +81,7 @@ import {
 } from './protocol';
 import {
   agentTargetPayload,
+  agentTargetsDiffer,
   targetRefForAgent,
   targetRefMatchesAgent,
 } from './resource-id';
@@ -1405,7 +1405,7 @@ class RelayStore {
     let changed = false;
     for (const paneId of this.respondingValue) {
       const current = blocked.get(paneId);
-      if (!current || agentTargetReplaced(byPane.get(paneId), current)) {
+      if (!current || agentTargetsDiffer(byPane.get(paneId), current)) {
         const timer = this.respondingTimers.get(paneId);
         if (timer) clearTimeout(timer);
         this.respondingTimers.delete(paneId);
@@ -2298,7 +2298,7 @@ class RelayStore {
 
   applyQuestionInteraction(agent: Agent, interaction: QuestionInteraction | null): void {
     const current = this.agentsValue.find((item) => item.pane_id === agent.pane_id);
-    if (!current || agentTargetReplaced(agent, current)) return;
+    if (!current || agentTargetsDiffer(agent, current)) return;
     this.clearResponding(agent.pane_id);
     if (this.connectionsValue.get(agent.relay_id)?.capabilities.includes('idle_question_probe')
       && (!rawBlocked(current) || current.screen_attention === 'waiting')) return;

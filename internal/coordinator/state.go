@@ -71,7 +71,6 @@ type AgentState struct {
 
 type paneRecord struct {
 	agent            *AgentState
-	rawStatus        string
 	rawRevision      int64
 	probe            idleProbeState
 	blockedRevision  int64
@@ -329,9 +328,8 @@ func (s *State) BumpGeneration(paneID string) {
 		rec.attentionRev++
 		rec.probe = idleProbeState{}
 		rec.completion = completionState{}
-		rec.agent.Status = rec.rawStatus
+		rec.agent.Status = rec.agent.RawStatus
 		rec.agent.ScreenAttention = ""
-		rec.agent.ProbePending = false
 		clearBlockedDetails(rec.agent)
 		delete(s.customAnswers, paneID)
 	}
@@ -341,7 +339,7 @@ func (s *State) BlockedTransitionAgent(paneID string, revision int64) (*AgentSta
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	rec := s.panes[paneID]
-	if rec == nil || rec.blockedRevision != revision || rec.agent.Status != "blocked" || rec.agent.ProbePending || rec.agent.BlockedEventID == "" {
+	if rec == nil || rec.blockedRevision != revision || rec.agent.Status != "blocked" || rec.probe.stop != 0 || rec.agent.BlockedEventID == "" {
 		return nil, 0, 0, false
 	}
 	return s.cloneAgentLocked(rec), rec.contentRev, rec.attentionRev, true
@@ -393,10 +391,7 @@ func (s *State) WaitingRequestCurrent(target protocol.TargetRef, eventID string,
 	defer s.mu.RUnlock()
 	rec := s.panes[target.PaneID]
 	return rec != nil &&
-		target.ServerSessionID == protocol.PrimaryServerSessionID &&
-		target.TerminalID != "" && target.TerminalID == rec.agent.TerminalID &&
-		target.AgentSessionID == rec.agent.SessionID &&
-		target.Generation == s.generation[target.PaneID] &&
+		target.TerminalID != "" && target == s.targetRefLocked(rec) &&
 		rec.agent.Status == "blocked" &&
 		rec.agent.BlockedEventID == eventID &&
 		rec.attentionRev == revision &&
@@ -579,9 +574,9 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64, topol
 			rec = &paneRecord{}
 			s.panes[incoming.PaneID] = rec
 		}
-		preserveRaw := exists && (topologyOnly || rec.rawRevision > baseRev && cp.Status != rec.rawStatus)
+		preserveRaw := exists && (topologyOnly || rec.rawRevision > baseRev && cp.Status != existing.RawStatus)
 		if preserveRaw {
-			cp.Status = rec.rawStatus
+			cp.Status = existing.RawStatus
 			copyBlockedDetails(&cp, existing)
 		} else {
 			rec.rawRevision = s.revCounter
@@ -625,7 +620,7 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64, topol
 
 		if !exists || existing.Status != cp.Status || existing.Name != cp.Name || existing.Cwd != cp.Cwd ||
 			existing.Agent != cp.Agent || existing.ActivitySeq != cp.ActivitySeq ||
-			(cp.ProbeEnabled && existing.PaneRevision != cp.PaneRevision) || attentionChanged {
+			(cp.ProbeEnabled && (existing.PaneRevision != cp.PaneRevision || existing.ScreenAttention != cp.ScreenAttention)) || attentionChanged {
 			rec.contentRev++
 		}
 		if attentionChanged {
@@ -767,7 +762,7 @@ func (s *State) CommitEventForSession(
 		clearBlockedDetails(a)
 	}
 	s.applyBlockedCycleLocked(a, before)
-	if prev != a.Status || !blockedDetailsEqual(before, a) {
+	if prev != a.Status || before.ScreenAttention != a.ScreenAttention || !blockedDetailsEqual(before, a) {
 		rec.contentRev++
 	}
 	if !blockedDetailsEqual(before, a) {
@@ -944,7 +939,7 @@ func (s *State) CommitAttentionClassification(
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rec := s.panes[paneID]
-	if rec == nil || rec.agent.Status != "blocked" || rec.agent.ProbePending || rec.agent.StrictAttention ||
+	if rec == nil || rec.agent.Status != "blocked" || rec.probe.stop != 0 || rec.agent.StrictAttention ||
 		rec.agent.BlockedEventID != eventID ||
 		s.generation[paneID] != generation ||
 		rec.contentRev != contentRevision {
@@ -1187,10 +1182,24 @@ func (s *State) Agent(paneID string) (*AgentState, bool) {
 	return s.cloneAgentLocked(rec), true
 }
 
+func (a *AgentState) TargetRef() protocol.TargetRef {
+	return protocol.TargetRef{
+		ServerSessionID: protocol.PrimaryServerSessionID, PaneID: a.PaneID, TerminalID: a.TerminalID,
+		Generation: a.Generation, AgentSessionID: a.SessionID,
+	}
+}
+
+func (s *State) targetRefLocked(rec *paneRecord) protocol.TargetRef {
+	target := rec.agent.TargetRef()
+	target.Generation = s.generation[target.PaneID]
+	return target
+}
+
 func (s *State) cloneAgentLocked(rec *paneRecord) *AgentState {
 	copy := rec.agent.Clone()
 	copy.StateRevision = rec.revision
 	copy.Generation = s.generation[copy.PaneID]
+	copy.ProbePending = rec.probe.stop != 0
 	return copy
 }
 

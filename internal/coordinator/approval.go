@@ -62,15 +62,10 @@ func (d *Dispatcher) handleApproval(ctx context.Context, req commandRequest) *Co
 	ledgerKey := approvalLedgerKey(req.paneID, payload.EventID)
 	payloadHash := hashPayload(payload)
 	agent, ok := d.state.Agent(req.paneID)
-	if ok && agent.Status == "blocked" &&
-		(agent.BlockedEventID == "" || agent.BlockedEventID != payload.EventID) {
-		return d.fail(req.requestID, "approval", req.paneID, "This approval request is no longer current")
-	}
-	if ok && agent.Status == "blocked" &&
-		(agent.AttentionKind != question.AttentionApproval ||
-			len(agent.Options) != payload.Total ||
-			agent.ApprovalFingerprint != payload.Fingerprint ||
-			agent.Options[payload.Index] != payload.Choice) {
+	if ok && agent.Status == "blocked" && !approvalCurrent(agent, payload) {
+		if agent.ProbePending || agent.BlockedEventID != payload.EventID {
+			return d.fail(req.requestID, "approval", req.paneID, "This approval request is no longer current")
+		}
 		return d.fail(req.requestID, "approval", req.paneID, "Approval choices are no longer available")
 	}
 	if !ok || agent.Status != "blocked" {
@@ -110,7 +105,6 @@ func (d *Dispatcher) handleApproval(ctx context.Context, req commandRequest) *Co
 		}
 		if classification.Kind != question.AttentionApproval ||
 			len(classification.Options) != payload.Total ||
-			payload.Index >= len(classification.Options) ||
 			classification.Options[payload.Index] != payload.Choice ||
 			question.ApprovalFingerprint(classification) != fingerprint {
 			return EffectResult{Result: d.fail(req.requestID, "approval", req.paneID, "Approval choices are no longer available")}
@@ -154,23 +148,9 @@ func approvalCurrent(agent *AgentState, payload approvalPayload) bool {
 		agent.ApprovalFingerprint == payload.Fingerprint && agent.Options[payload.Index] == payload.Choice
 }
 
-func (d *Dispatcher) readLive(ctx context.Context, agent *AgentState) (question.Classification, error) {
-	readCtx, cancel := context.WithTimeout(ctx, ProbeTimeout)
-	defer cancel()
-	read, err := d.herdr.ReadPaneVisible(readCtx, agent.PaneID, question.VisibleRows, "ansi")
-	if err != nil {
-		return question.Classification{}, err
-	}
-	classification, reliable := question.ClassifyLive(string(read.Content), agent.Agent)
-	if !reliable {
-		return question.Classification{}, errors.New("The visible screen could not be verified")
-	}
-	return classification, nil
-}
-
 func (d *Dispatcher) readApproval(ctx context.Context, agent *AgentState) (question.Classification, error) {
 	if agent.StrictAttention {
-		return d.readLive(ctx, agent)
+		return ReadLiveAttention(ctx, d.herdr, agent.PaneID, agent.Agent)
 	}
 	read, err := d.herdr.ReadPane(ctx, agent.PaneID, 80, "ansi")
 	if err != nil {
@@ -333,8 +313,9 @@ func (d *Dispatcher) submitQuestion(ctx context.Context, req commandRequest, pay
 		return d.fail(req.requestID, action, req.paneID, "A different response was already submitted")
 	}
 
+	probeEnabled := d.state.idleProbeEnabledForQuestions()
 	agent, ok := d.state.Agent(req.paneID)
-	if !ok || !questionCurrent(agent, payload.InteractionID) {
+	if !ok || !questionCurrent(agent, payload.InteractionID, probeEnabled) {
 		switch {
 		case replayErr == nil && replay != nil:
 			replay.RequestID = req.requestID
@@ -354,11 +335,11 @@ func (d *Dispatcher) submitQuestion(ctx context.Context, req commandRequest, pay
 		PayloadHash: payloadHash,
 	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
 		current, ok := d.state.Agent(req.paneID)
-		if !ok || !questionCurrent(current, payload.InteractionID) ||
-			(agent != nil && strictQuestion(agent) && (!strictQuestion(current) || agent.BlockedEventID != current.BlockedEventID)) {
+		if !ok || !questionCurrent(current, payload.InteractionID, probeEnabled) ||
+			(agent != nil && agent.StrictAttention && (!current.StrictAttention || agent.BlockedEventID != current.BlockedEventID)) {
 			return EffectResult{Result: d.fail(req.requestID, action, req.paneID, "The question changed before the answer was applied")}
 		}
-		interaction, err := d.readQuestion(effectCtx, current, strictQuestion(current))
+		interaction, err := d.readQuestion(effectCtx, current, current.StrictAttention)
 		if err != nil {
 			return EffectResult{Result: d.failErr(req.requestID, action, req.paneID, err)}
 		}
@@ -372,9 +353,9 @@ func (d *Dispatcher) submitQuestion(ctx context.Context, req commandRequest, pay
 			return EffectResult{Result: stale}
 		}
 		after, ok := d.state.Agent(req.paneID)
-		if !ok || after.Generation != current.Generation || !questionCurrent(after, payload.InteractionID) ||
-			(strictQuestion(current) || strictQuestion(after)) &&
-				(strictQuestion(after) != strictQuestion(current) || after.BlockedEventID != current.BlockedEventID) {
+		if !ok || after.Generation != current.Generation || !questionCurrent(after, payload.InteractionID, probeEnabled) ||
+			(current.StrictAttention || after.StrictAttention) &&
+				(after.StrictAttention != current.StrictAttention || after.BlockedEventID != current.BlockedEventID) {
 			return EffectResult{Result: d.fail(req.requestID, action, req.paneID, "The question changed before the answer was applied")}
 		}
 		if payload.OtherSelected {
@@ -406,7 +387,7 @@ func (d *Dispatcher) submitQuestion(ctx context.Context, req commandRequest, pay
 				req.requestID,
 				action,
 				req.paneID,
-				interactionSnapshot(payload.InteractionID, submittedInteraction),
+				submittedInteraction,
 				payload.Navigation,
 				submittedAgent,
 			)
@@ -415,12 +396,8 @@ func (d *Dispatcher) submitQuestion(ctx context.Context, req commandRequest, pay
 	return result
 }
 
-func strictQuestion(agent *AgentState) bool {
-	return agent.StrictAttention || agent.ProbeEnabled && doneStatuses[agent.RawStatus]
-}
-
-func questionCurrent(agent *AgentState, interactionID string) bool {
-	if agent.ProbePending || agent.ScreenAttention == ScreenCleared || (agent.Status != "blocked" && agent.Status != "done") {
+func questionCurrent(agent *AgentState, interactionID string, probeEnabled bool) bool {
+	if agent.ProbePending || agent.Status != "blocked" && (probeEnabled || agent.Status != "done") {
 		return false
 	}
 	return !agent.StrictAttention || agent.Status == "blocked" && agent.AttentionKind == question.AttentionQuestion && agent.InteractionID == interactionID
@@ -428,7 +405,7 @@ func questionCurrent(agent *AgentState, interactionID string) bool {
 
 func (d *Dispatcher) readQuestion(ctx context.Context, agent *AgentState, strict bool) (*question.Interaction, error) {
 	if strict {
-		classification, err := d.readLive(ctx, agent)
+		classification, err := ReadLiveAttention(ctx, d.herdr, agent.PaneID, agent.Agent)
 		return classification.Interaction, err
 	}
 	read, err := d.herdr.ReadPane(ctx, agent.PaneID, 80, "ansi")
@@ -581,7 +558,7 @@ func (d *Dispatcher) watchQuestion(
 	submitted *AgentState,
 ) {
 	generation := submitted.Generation
-	strict := strictQuestion(submitted)
+	strict := submitted.StrictAttention
 	ctx, cancel := context.WithTimeout(parent, approvalPollTimeout)
 	defer cancel()
 	ticker := time.NewTicker(approvalPollInterval)
@@ -614,7 +591,7 @@ func (d *Dispatcher) watchQuestion(
 			if agent.ProbePending {
 				continue
 			}
-			strictRead := strict || strictQuestion(agent)
+			strictRead := strict || agent.StrictAttention
 			current, err := d.readQuestion(ctx, agent, strictRead)
 			if err != nil {
 				continue
@@ -623,7 +600,7 @@ func (d *Dispatcher) watchQuestion(
 			if !ok || after.Generation != generation {
 				return
 			}
-			if (strictRead || strictQuestion(after)) && (!strictRead || after.ProbePending || after.Status != agent.Status ||
+			if (strictRead || after.StrictAttention) && (!strictRead || after.ProbePending || after.Status != agent.Status ||
 				after.ScreenAttention == ScreenCleared || after.BlockedEventID != agent.BlockedEventID ||
 				after.InteractionID != agent.InteractionID && (current == nil || after.InteractionID != current.ID)) {
 				continue
@@ -650,14 +627,6 @@ func (d *Dispatcher) watchQuestion(
 			}
 		}
 	}
-}
-
-func interactionSnapshot(interactionID string, stateInteraction *question.Interaction) *question.Interaction {
-	if stateInteraction != nil && stateInteraction.ID == interactionID {
-		copy := *stateInteraction
-		return &copy
-	}
-	return &question.Interaction{ID: interactionID}
 }
 
 func (d *Dispatcher) finishQuestionWatch(

@@ -45,10 +45,10 @@ func (s *Server) scheduleHistoryCapture(ctx context.Context, paneID string) {
 	if s.historyTasks == nil || !historyCaptureEligible(agent) {
 		return
 	}
-	target := agent.ProbeTarget()
+	target := agent.TargetRef()
 	currentTargetEligible := func() bool {
 		current, _ := s.state.Agent(paneID)
-		return historyCaptureEligible(current) && current.ProbeTarget() == target
+		return historyCaptureEligible(current) && current.TargetRef() == target
 	}
 	s.historyCaptureMu.Lock()
 	if s.historyInflight[paneID] || time.Since(s.historyLast[paneID]) < history.CaptureInterval {
@@ -221,7 +221,7 @@ func (s *Server) captureFinishedPane(ctx context.Context, paneID, agent, cwd, se
 	completionContent := raw
 	if isClaudeLike(agent) && !historyDialog(raw, agent, s.cfg.IdleQuestionProbe) {
 		after, _ := s.state.Agent(paneID)
-		if before == nil && after == nil || before != nil && after != nil && before.ProbeTarget() == after.ProbeTarget() &&
+		if before == nil && after == nil || before != nil && after != nil && before.TargetRef() == after.TargetRef() &&
 			!after.ProbePending && after.ScreenAttention != coordinator.ScreenWaiting {
 			completionContent = s.historyM.Merge(paneID, raw)
 		}

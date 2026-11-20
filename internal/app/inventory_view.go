@@ -10,7 +10,6 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 	"github.com/0cv/herdr-mobile-relay/internal/push"
-	"github.com/0cv/herdr-mobile-relay/internal/question"
 )
 
 func (s *Server) reconcileRecoveredPush(ctx context.Context) {
@@ -226,7 +225,7 @@ func (s *Server) committedInventorySnapshot() committedInventory {
 	return result
 }
 
-func (s *Server) commitAgent(agent *coordinator.AgentState, message map[string]any) {
+func (s *Server) commitAgent(agent *coordinator.AgentState, messageType string) {
 	paneID := agent.PaneID
 	if paneID == "" {
 		s.recordSafeError("agent update broadcast was malformed", nil)
@@ -234,35 +233,31 @@ func (s *Server) commitAgent(agent *coordinator.AgentState, message map[string]a
 	}
 	err := s.hub.BroadcastBatchPrepared(func() ([]any, func(), error) {
 		current, exists := s.state.Agent(paneID)
-		if !exists || current.ProbeTarget() != agent.ProbeTarget() || current.StateRevision > agent.StateRevision {
+		if !exists || current.TargetRef() != agent.TargetRef() || current.StateRevision > agent.StateRevision {
 			return nil, nil, nil
 		}
 		s.stateViewMu.RLock()
 		agents := cloneAgents(s.agentView)
 		s.stateViewMu.RUnlock()
+		committed := agent.Clone()
+		committed.AgentSessionID = agent.SessionID
+		s.projectAgentResource(committed)
 		found := false
-		for _, view := range agents {
+		for index, view := range agents {
 			if view.PaneID != paneID {
 				continue
 			}
 			if view.StateRevision > agent.StateRevision {
 				return nil, nil, nil
 			}
-			applyCommittedAgent(view, agent)
+			agents[index] = committed
 			found = true
 			break
 		}
 		if !found {
-			applyCommittedAgent(current, agent)
-			agents = append(agents, current)
+			agents = append(agents, committed)
 		}
-
-		message["server_session_id"] = protocol.PrimaryServerSessionID
-		message["generation"] = agent.Generation
-		message["terminal_id"] = agent.TerminalID
-		message["agent_session_id"] = agent.SessionID
-		setAgentAttentionFields(message, agent)
-		return []any{message}, func() {
+		return []any{agentUpdateMessage(agent, messageType)}, func() {
 			s.stateViewMu.Lock()
 			s.agentView = agents
 			s.stateViewMu.Unlock()
@@ -273,23 +268,45 @@ func (s *Server) commitAgent(agent *coordinator.AgentState, message map[string]a
 	}
 }
 
-func setAgentAttentionFields(message map[string]any, agent *coordinator.AgentState) {
-	message["event_id"] = agent.BlockedEventID
-	message["attention_kind"] = agent.AttentionKind
-	message["prompt"] = agent.Prompt
-	message["command"] = agent.Command
-	message["options"] = agent.Options
-	message["approval_fingerprint"] = agent.ApprovalFingerprint
-	message["interaction"] = agent.Interaction
-	message["interaction_id"] = agent.InteractionID
+func agentUpdateMessage(agent *coordinator.AgentState, messageType string) map[string]any {
+	target := agent.TargetRef()
+	message := map[string]any{
+		"type": messageType, "pane_id": target.PaneID, "raw_pane_id": agent.RawPaneID,
+		"server_session_id": target.ServerSessionID, "terminal_id": target.TerminalID,
+		"generation": target.Generation, "agent_session_id": target.AgentSessionID,
+		"status": agent.Status, "pane_revision": agent.StateRevision,
+		"event_id": agent.BlockedEventID, "attention_kind": agent.AttentionKind,
+		"prompt": agent.Prompt, "command": agent.Command, "options": agent.Options,
+		"approval_fingerprint": agent.ApprovalFingerprint, "interaction": agent.Interaction, "interaction_id": agent.InteractionID,
+	}
 	if agent.ScreenAttention != "" {
 		message["screen_attention"] = agent.ScreenAttention
 	}
+	if messageType == "acknowledge_pane" {
+		message["type"] = "agent_update"
+		message["raw_pane_id"] = target.PaneID
+		return message
+	}
+	message["agent"] = agent.Agent
+	message["tab_id"] = agent.TabID
+	message["tab_label"] = agent.TabLabel
+	message["tab_number"] = agent.TabNumber
+	message["workspace_id"] = agent.WorkspaceID
+	message["cwd"] = agent.Cwd
+	message["project"] = agent.Project
+	message["host"] = agent.Host
+	message["session"] = agent.Session
+	message["session_name"] = agent.SessionName
+	message["updated_at"] = agent.UpdatedAt
+	if messageType == "blocked" {
+		message["name"] = agent.Name
+	}
+	return message
 }
 
 func (s *Server) broadcastCommitted(message any) {
 	if update, ok := message.(coordinator.AgentUpdate); ok {
-		s.commitAgent(update.Agent, update.Message)
+		s.commitAgent(update.Agent, "acknowledge_pane")
 		return
 	}
 	envelope, ok := message.(map[string]any)
@@ -371,55 +388,4 @@ func cloneStringMap(values map[string]any) map[string]any {
 		result[key] = value
 	}
 	return result
-}
-
-func applyCommittedAgent(view, committed *coordinator.AgentState) {
-	view.RawPaneID = committed.RawPaneID
-	view.Status = committed.Status
-	view.ScreenAttention = committed.ScreenAttention
-	view.RawStatus = committed.RawStatus
-	view.ProbeEnabled = committed.ProbeEnabled
-	view.ProbePending = committed.ProbePending
-	view.StrictAttention = committed.StrictAttention
-	view.LiveIdentity = committed.LiveIdentity
-	view.Generation = committed.Generation
-	view.TerminalID = committed.TerminalID
-	view.SessionID = committed.SessionID
-	view.AgentSessionID = committed.SessionID
-	view.Agent = committed.Agent
-	view.TabID = committed.TabID
-	view.TabLabel = committed.TabLabel
-	view.TabNumber = committed.TabNumber
-	view.WorkspaceID = committed.WorkspaceID
-	view.Cwd = committed.Cwd
-	view.Project = committed.Project
-	view.Host = committed.Host
-	view.Session = committed.Session
-	view.SessionName = committed.SessionName
-	view.UpdatedAt = committed.UpdatedAt
-	view.BlockedEventID = committed.BlockedEventID
-	view.AttentionKind = committed.AttentionKind
-	view.Prompt = committed.Prompt
-	view.Command = committed.Command
-	view.Options = append([]string(nil), committed.Options...)
-	view.ApprovalFingerprint = committed.ApprovalFingerprint
-	view.Interaction = committed.Clone().Interaction
-	view.InteractionID = committed.InteractionID
-	view.StateRevision = committed.StateRevision
-	if view.Status != "blocked" {
-		view.AttentionKind = ""
-		view.Prompt = ""
-		view.Command = ""
-		view.Options = nil
-		view.ApprovalFingerprint = ""
-		view.Interaction = nil
-		return
-	}
-	if view.AttentionKind != question.AttentionApproval {
-		view.Options = nil
-		view.ApprovalFingerprint = ""
-	}
-	if view.AttentionKind != question.AttentionQuestion {
-		view.Interaction = nil
-	}
 }

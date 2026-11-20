@@ -1,44 +1,45 @@
 package coordinator
 
 import (
+	"context"
+	"errors"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/backend"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 	"github.com/0cv/herdr-mobile-relay/internal/question"
 )
 
 const (
 	ScreenWaiting = "waiting"
 	ScreenCleared = "cleared"
-	ProbeTimeout  = 3 * time.Second
 )
 
 type idleProbeState struct {
 	stop      int64
-	serial    uint64
 	firstMiss time.Time
 }
 
-type ProbeTarget struct {
-	PaneID     string
-	Generation int64
-	TerminalID string
-	SessionID  string
-}
-
-func (a *AgentState) ProbeTarget() ProbeTarget {
-	return ProbeTarget{a.PaneID, a.Generation, a.TerminalID, a.SessionID}
+func ReadLiveAttention(ctx context.Context, client backend.Backend, paneID, agent string) (question.Classification, error) {
+	readCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	read, err := client.ReadPaneVisible(readCtx, paneID, question.VisibleRows, "ansi")
+	if err != nil {
+		return question.Classification{}, err
+	}
+	classification, reliable := question.ClassifyLive(string(read.Content), agent)
+	if !reliable {
+		return question.Classification{}, errors.New("The visible screen could not be verified")
+	}
+	return classification, nil
 }
 
 func idleStatus(status string) bool {
 	return status == "idle" || doneStatuses[status]
 }
 
-func (a *AgentState) IdleProbeCandidate() bool {
-	return idleStatus(a.RawStatus) && question.Supports(a.Agent)
-}
-
 func (a *AgentState) ProbeGoverned() bool {
-	return a.ProbeEnabled && a.IdleProbeCandidate()
+	return a.ProbeEnabled && idleStatus(a.RawStatus)
 }
 
 func LiveIdentity(c question.Classification) string {
@@ -54,23 +55,28 @@ func (s *State) EnableIdleQuestionProbe() {
 	s.idleProbeEnabled = true
 }
 
+func (s *State) idleProbeEnabledForQuestions() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.idleProbeEnabled
+}
+
 func (s *State) applyRawStatusLocked(rec *paneRecord, next, previous *AgentState, nativeSample bool) {
-	raw, oldRaw := next.Status, rec.rawStatus
-	rec.rawStatus = raw
+	raw := next.Status
 	next.RawStatus = raw
 	next.ProbeEnabled = s.idleProbeEnabled && question.Supports(next.Agent)
 	if !next.ProbeEnabled || previous == nil {
+		rec.probe = idleProbeState{}
 		return
 	}
 	next.ScreenAttention = previous.ScreenAttention
 	if idleStatus(raw) {
-		if rec.probe.stop == 0 && previous.ScreenAttention != ScreenWaiting && attentionStatuses[oldRaw] {
+		if rec.probe.stop == 0 && previous.ScreenAttention != ScreenWaiting && attentionStatuses[previous.RawStatus] {
 			rec.probe.stop = s.revCounter
 		}
 		if rec.probe.stop != 0 || previous.ScreenAttention == ScreenWaiting {
 			next.Status = previous.Status
 			copyBlockedDetails(next, previous)
-			next.ProbePending = rec.probe.stop != 0
 			return
 		}
 	}
@@ -89,40 +95,34 @@ func (s *State) applyRawStatusLocked(rec *paneRecord, next, previous *AgentState
 	} else if previous.StrictAttention || rec.probe.stop != 0 && previous.Status == "blocked" {
 		next.ScreenAttention = ScreenCleared
 	}
-	next.ProbePending = false
-	if rec.probe.stop != 0 || previous.ScreenAttention == ScreenWaiting {
-		rec.probe.serial++
-	}
 	rec.probe.stop = 0
 	rec.probe.firstMiss = time.Time{}
 }
 
 type ProbeToken struct {
-	target  ProbeTarget
+	target  protocol.TargetRef
 	stop    int64
-	serial  uint64
 	content int64
 	event   string
 }
 
-func (s *State) ProbeToken(target ProbeTarget, leased bool) (ProbeToken, string, bool) {
+func (s *State) ProbeToken(target protocol.TargetRef, leased bool) (ProbeToken, string, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	rec := s.probePaneLocked(target)
 	if rec == nil || !rec.agent.ProbeGoverned() || !probeEligible(rec, leased) {
 		return ProbeToken{}, "", false
 	}
-	return ProbeToken{target, rec.probe.stop, rec.probe.serial, rec.contentRev, rec.agent.BlockedEventID}, rec.agent.Agent, true
+	return ProbeToken{target, rec.probe.stop, rec.contentRev, rec.agent.BlockedEventID}, rec.agent.Agent, true
 }
 
 func probeEligible(rec *paneRecord, leased bool) bool {
 	return rec.probe.stop != 0 || rec.agent.ScreenAttention == ScreenWaiting || leased
 }
 
-func (s *State) probePaneLocked(target ProbeTarget) *paneRecord {
+func (s *State) probePaneLocked(target protocol.TargetRef) *paneRecord {
 	rec := s.panes[target.PaneID]
-	if rec == nil || s.generation[target.PaneID] != target.Generation ||
-		rec.agent.TerminalID != target.TerminalID || rec.agent.SessionID != target.SessionID {
+	if rec == nil || s.targetRefLocked(rec) != target {
 		return nil
 	}
 	return rec
@@ -130,13 +130,20 @@ func (s *State) probePaneLocked(target ProbeTarget) *paneRecord {
 
 func (s *State) CommitProbe(token ProbeToken, classification question.Classification, reliable, leased bool, now time.Time) bool {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	rec := s.probePaneLocked(token.target)
 	if rec == nil || !rec.agent.ProbeGoverned() {
+		s.mu.Unlock()
 		return false
 	}
-	current := token.stop == rec.probe.stop && token.serial == rec.probe.serial &&
-		token.content == rec.contentRev && token.event == rec.agent.BlockedEventID && probeEligible(rec, leased)
+	previous := rec.agent.ScreenAttention
+	defer func() {
+		marker, status := rec.agent.ScreenAttention, rec.agent.Status
+		s.mu.Unlock()
+		if marker != previous && s.logger != nil {
+			s.logger.Info("idle question probe changed attention", "pane_id", token.target.PaneID, "screen_attention", marker, "status", status)
+		}
+	}()
+	current := token.stop == rec.probe.stop && token.content == rec.contentRev && token.event == rec.agent.BlockedEventID && probeEligible(rec, leased)
 	identity := LiveIdentity(classification)
 	if current && reliable && identity != "" {
 		return s.promoteProbeLocked(rec, classification, identity, now)
@@ -148,7 +155,6 @@ func (s *State) CommitProbe(token ProbeToken, classification question.Classifica
 	if !current || !reliable || rec.agent.ScreenAttention != ScreenWaiting {
 		return false
 	}
-	rec.probe.serial++
 	if rec.probe.firstMiss.IsZero() {
 		rec.probe.firstMiss = now
 	} else if now.Sub(rec.probe.firstMiss) >= 2*time.Second {
@@ -163,7 +169,6 @@ func (s *State) promoteProbeLocked(rec *paneRecord, classification question.Clas
 	next := *prev
 	next.Status = "blocked"
 	next.ScreenAttention = ScreenWaiting
-	next.ProbePending = false
 	next.LiveIdentity = identity
 	next.StrictAttention = true
 	previousIdentity := prev.LiveIdentity
@@ -179,7 +184,6 @@ func (s *State) promoteProbeLocked(rec *paneRecord, classification question.Clas
 		classification.ApprovalIdentity = prev.ApprovalFingerprint
 	}
 	changed := applyAttentionClassification(&next, classification)
-	rec.probe.serial++
 	rec.probe.stop = 0
 	rec.probe.firstMiss = time.Time{}
 	if !changed && !newEvent && prev.ScreenAttention == ScreenWaiting {
@@ -194,12 +198,10 @@ func (s *State) endProbeLocked(rec *paneRecord, now time.Time) {
 	if next.Status == "blocked" {
 		next.ScreenAttention = ScreenCleared
 	}
-	next.Status = rec.rawStatus
-	next.ProbePending = false
+	next.Status = next.RawStatus
 	clearBlockedDetails(&next)
 	rec.probe.stop = 0
 	rec.probe.firstMiss = time.Time{}
-	rec.probe.serial++
 	s.commitProbeStateLocked(rec, &next, false, now)
 }
 
@@ -220,15 +222,12 @@ func (s *State) commitProbeStateLocked(rec *paneRecord, next *AgentState, newEve
 	}
 }
 
-func (s *State) ResolvePendingProbes(now time.Time) bool {
+func (s *State) ResolvePendingProbes(now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	changed := false
 	for _, rec := range s.panes {
 		if rec.probe.stop != 0 {
 			s.endProbeLocked(rec, now)
-			changed = true
 		}
 	}
-	return changed
 }

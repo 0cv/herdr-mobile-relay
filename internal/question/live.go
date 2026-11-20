@@ -22,9 +22,6 @@ var claudeQuestionHints = []string{
 var (
 	pureRule            = regexp.MustCompile(`^[─━═]{3,}$`)
 	claudeTab           = regexp.MustCompile(`^(?:←\s+)?[☐☒☑]\s+\S.*$`)
-	claudeTaskCount     = regexp.MustCompile(`^\d+ tasks? \(\d+ done, (?:\d+ in progress, )?\d+ open\)$`)
-	claudeTaskItem      = regexp.MustCompile(`^[◻◼✔] \S.*$`)
-	claudeTaskSummary   = regexp.MustCompile(`^… \+\d+ (?:in progress|pending|completed)(?:, \d+ (?:pending|completed))*$`)
 	ompAskTitle         = regexp.MustCompile(`^╭─+ Ask ─+╮$`)
 	ompToolTitle        = regexp.MustCompile(`^╭─+ Allow tool: [\w.-]+ ─+╮$`)
 	ompClose            = regexp.MustCompile(`^╰─+╯$`)
@@ -43,7 +40,6 @@ var (
 	liveBoxTop          = regexp.MustCompile(`^╭─+╮$`)
 	liveApprovalRule    = regexp.MustCompile(`^[─╌]{3,}$`)
 	agyLiveQuota        = regexp.MustCompile(`^Context \[[░▒▓█]+\] [\d.]+[kM]/[\d.]+[kM] \(\d+%\) │ 5h \[[░▒▓█]+\] \d+% \(\w+\) │ Weekly \[[░▒▓█]+\] \d+% \(\w+\)$`)
-	agyLiveFocus        = regexp.MustCompile(`^>\s+\d+\.`)
 )
 
 // ClassifyLive requires a complete control on the visible screen. The bool
@@ -127,33 +123,16 @@ func claudeLiveEnd(lines []string) int {
 }
 
 func knownFooter(lines []string, hints []string) (int, string) {
-	start, hint := -1, ""
 	for n := 1; n <= 3 && n <= len(lines); n++ {
 		i := len(lines) - n
-		if lines[i] == "" || n > 1 && pureRule.MatchString(lines[i]) {
+		if lines[i] == "" {
 			break
 		}
-		pieces := lines[i:]
-		candidate := strings.Join(pieces, " ")
-		for _, full := range hints {
-			if candidate != full {
-				continue
-			}
-			for j := 1; j < n; j++ {
-				prefix := strings.Join(pieces[:j], " ")
-				for _, complete := range hints {
-					if prefix == complete {
-						return -1, ""
-					}
-				}
-			}
-			if start >= 0 {
-				return -1, ""
-			}
-			start, hint = i, full
+		if candidate := strings.Join(lines[i:], " "); slices.Contains(hints, candidate) {
+			return i, candidate
 		}
 	}
-	return start, hint
+	return -1, ""
 }
 
 func liveClaude(p *pane, agent string) Classification {
@@ -369,13 +348,7 @@ func liveAgy(p *pane, agent string) Classification {
 		return Classification{}
 	}
 	controlEnd := beforeBlanks(rows, end-3)
-	menuRows := slices.Clone(rows[:controlEnd])
-	for i, row := range menuRows {
-		if agyLiveFocus.MatchString(row) {
-			menuRows[i] = "❯" + row[1:]
-		}
-	}
-	menu := latestApprovalMenu(menuRows)
+	menu := latestApprovalMenu(strings.Split(normalizeAgyMenuFocus(strings.Join(rows[:controlEnd], "\n")), "\n"))
 	if len(menu) < 2 || menu[len(menu)-1].line != controlEnd-1 || menu[0].line < 3 || rows[menu[0].line-1] != "Run this command?" {
 		return Classification{}
 	}

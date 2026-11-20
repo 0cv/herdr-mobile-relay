@@ -103,9 +103,5 @@ func validateExactPaneTarget(state *coordinator.State, inbound protocol.Inbound,
 }
 
 func targetMatchesAgent(target protocol.TargetRef, agent *coordinator.AgentState) bool {
-	return target.ServerSessionID == protocol.PrimaryServerSessionID &&
-		target.PaneID == agent.PaneID &&
-		target.TerminalID != "" && target.TerminalID == agent.TerminalID &&
-		target.Generation == agent.Generation &&
-		target.AgentSessionID == agent.SessionID
+	return target.TerminalID != "" && target == agent.TargetRef()
 }

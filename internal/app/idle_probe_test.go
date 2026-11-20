@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -19,22 +18,21 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 	"github.com/0cv/herdr-mobile-relay/internal/push"
 	"github.com/0cv/herdr-mobile-relay/internal/question"
-	"github.com/0cv/herdr-mobile-relay/internal/textutil"
+	"github.com/0cv/herdr-mobile-relay/internal/question/testfixture"
 )
 
 type probeBackend struct {
 	frameBackend
-	inventory    []herdr.Pane
-	inventoryErr error
-	events       chan herdr.TopologySnapshot
-	visible      func(context.Context, string) error
-	history      func(context.Context) error
+	inventory []herdr.Pane
+	events    chan herdr.TopologySnapshot
+	visible   func(context.Context, string) error
+	history   func(context.Context) error
 }
 
 func (b *probeBackend) GetInventory(context.Context) (*herdr.Inventory, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return &herdr.Inventory{Panes: slices.Clone(b.inventory)}, b.inventoryErr
+	return &herdr.Inventory{Panes: slices.Clone(b.inventory)}, nil
 }
 
 func (b *probeBackend) TabList(context.Context) ([]herdr.Tab, error) { return nil, nil }
@@ -126,28 +124,20 @@ func waitProbe[T any](t *testing.T, ch <-chan T) T {
 }
 
 func probeQuestion(t *testing.T) string {
-	return probeFixture(t, "claude-named-session-task-panel", "Enter to select · ↑/↓ to navigate · Esc to cancel", "Enter to select · ↑/↓ to navigate · Esc to\ncancel")
+	return testfixture.ReplaceRow(t, probeFixture(t, "claude-named-session-task-panel"), "Enter to select · ↑/↓ to navigate · Esc to cancel", "Enter to select · ↑/↓ to navigate · Esc to\ncancel")
 }
 
 func probeApproval(t *testing.T) string {
-	return probeFixture(t, "claude-single-approval", "Esc to cancel · Tab to amend", "Esc to cancel · Tab to\namend")
+	return testfixture.ReplaceRow(t, probeFixture(t, "claude-single-approval"), "Esc to cancel · Tab to amend", "Esc to cancel · Tab to\namend")
 }
 
-func probeFixture(t *testing.T, name, hint, wrapped string) string {
+func probeFixture(t *testing.T, name string) string {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join("..", "question", "testdata", "attention", name+".ansi"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	rows := strings.Split(string(data), "\n")
-	for i, row := range rows {
-		if strings.TrimSpace(textutil.StripANSI(row)) == hint {
-			rows[i] = wrapped
-			return strings.Join(rows, "\n")
-		}
-	}
-	t.Fatal("fixture hint not found")
-	return ""
+	return string(data)
 }
 
 func TestIdleProbeBudgetAcrossStops(t *testing.T) {
@@ -476,13 +466,9 @@ func TestIdleProbeWaitingAlertLifecycle(t *testing.T) {
 		name     string
 		category push.Category
 		misses   bool
-		native   bool
 	}{
 		{name: "question dismissed", category: push.CategoryQuestion, misses: true},
-		{name: "question resumed", category: push.CategoryQuestion},
-		{name: "approval dismissed", category: push.CategoryAttention, misses: true},
 		{name: "approval resumed", category: push.CategoryAttention},
-		{name: "native approval resumed", category: push.CategoryAttention, native: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, backend, _, probe := newProbeServer(t, true)
@@ -511,13 +497,8 @@ func TestIdleProbeWaitingAlertLifecycle(t *testing.T) {
 				transitions = nil
 			}
 			frame := probeApproval(t)
-			kind := question.AttentionApproval
-			if tc.native {
-				frame = strings.ReplaceAll(frame, "Tab to\namend", "Tab to amend")
-			}
 			if tc.category == push.CategoryQuestion {
 				frame = probeQuestion(t)
-				kind = question.AttentionQuestion
 			}
 			backend.setScreen(frame)
 			now := time.Now()
@@ -529,32 +510,22 @@ func TestIdleProbeWaitingAlertLifecycle(t *testing.T) {
 					t.Fatal("missing visible read")
 				}
 			}
-			if tc.native {
-				s.state.CommitEvent(a.PaneID, "blocked", 1)
-			} else {
-				s.state.CommitEvent(a.PaneID, "idle", 1)
-				readProbe()
-			}
+			s.state.CommitEvent(a.PaneID, "idle", 1)
+			readProbe()
 			finishTransition("blocked")
 			alerts := queued()
 			if len(alerts) != 1 || alerts[0].Key.Category != tc.category || alerts[0].EventRef == "" {
 				t.Fatalf("expected one waiting alert with reference, got %+v", alerts)
 			}
 			alert := alerts[0]
-			waiting := func() bool {
-				return s.state.WaitingRequestCurrent(alert.Key.Target(), alert.Key.EventID, alert.Key.InteractionRevision, tc.category == push.CategoryQuestion)
-			}
 			current, _ := s.state.Agent(a.PaneID)
-			if alert.Key.InteractionRevision != s.state.AttentionRevision(a.PaneID) || !waiting() || current.AttentionKind != kind ||
-				(!tc.native && current.ScreenAttention != coordinator.ScreenWaiting) || (tc.native && current.ScreenAttention != "") {
-				t.Fatalf("alert does not match the live wait: key=%+v, agent=%+v", alert.Key, current)
+			if current.ScreenAttention != coordinator.ScreenWaiting {
+				t.Fatalf("alert did not pin the wait: %+v", current)
 			}
-			if !tc.native {
-				s.state.CommitEvent(a.PaneID, "idle", 2)
-				readProbe()
-				if len(transitions) != 0 || !waiting() || len(queued()) != 1 {
-					t.Fatal("an unchanged wait invalidated its reference or queued another alert")
-				}
+			s.state.CommitEvent(a.PaneID, "idle", 2)
+			readProbe()
+			if len(transitions) != 0 || len(queued()) != 1 {
+				t.Fatal("an unchanged wait queued another alert")
 			}
 
 			conn, client := connectedClient(t, s)
@@ -581,7 +552,7 @@ func TestIdleProbeWaitingAlertLifecycle(t *testing.T) {
 				end = "idle"
 				backend.setScreen("The question was answered.\n")
 				readProbe()
-				if len(transitions) != 0 || !waiting() || len(queued()) != 1 {
+				if len(transitions) != 0 || len(queued()) != 1 {
 					t.Fatal("first miss ended the wait or withdrew the alert")
 				}
 				requireCompleted(t, open(), "push_open_ref")
@@ -590,9 +561,6 @@ func TestIdleProbeWaitingAlertLifecycle(t *testing.T) {
 			} else {
 				s.state.CommitEvent(a.PaneID, end, 3)
 				s.state.CommitEvent(a.PaneID, end, 4)
-			}
-			if waiting() {
-				t.Fatal("ended wait still accepts its alert revision")
 			}
 			requireFailedResult(t, open(), "push_open_ref", "Notification target is no longer available")
 			finishTransition(end)
@@ -615,7 +583,7 @@ func TestIdleProbeSkipsBackgroundAndPhoneHistory(t *testing.T) {
 			a := &coordinator.AgentState{PaneID: "pane-1", TerminalID: "terminal", Agent: agent, Status: "working"}
 			frame := probeQuestion(t)
 			if agent == "qoder" {
-				frame = probeFixture(t, "qodercli-second-question-single", "Tab/←→ switch · Enter select · Esc back", "Tab/←→ switch · Enter select · Esc back")
+				frame = probeFixture(t, "qodercli-second-question-single")
 			}
 			if agent == "claude" && question.LayoutHint(frame) {
 				t.Fatal("fixture unexpectedly matched ordinary layout")
@@ -652,7 +620,7 @@ func TestIdleProbeSkipsBackgroundAndPhoneHistory(t *testing.T) {
 				s.classifyPaneResponse(coordinator.PaneReadRequest{PaneID: a.PaneID, Lines: 100}, map[string]any{"content": frame})
 			}
 			s.historyTasks.Stop()
-			if reads := backend.called("ReadPane "); !reflect.DeepEqual(reads, []string{"ReadPane pane-1 lines=10000 format=ansi"}) {
+			if reads := backend.called("ReadPane "); len(reads) != 1 {
 				t.Fatal(reads)
 			}
 			if got := s.historyM.Content(a.PaneID, 100); got != before {

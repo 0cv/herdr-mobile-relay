@@ -111,7 +111,7 @@ func Classify(text, agent string) Classification {
 		// ANSI styling can precede or split the focus marker and menu number.
 		// Normalize only after removing it, before any dialog parser runs.
 		text = textutil.StripANSI(text)
-		text = agyMenuFocusPattern.ReplaceAllString(text, "${1}❯ ${2}")
+		text = normalizeAgyMenuFocus(text)
 	}
 	p := newPane(text)
 	structuredControls := supportsKind(kind)
@@ -770,6 +770,10 @@ func kimiInputFramePrompt(lines []string, kind string) bool {
 // agyMenuFocusPattern matches Antigravity's focused menu row ("> 1. Yes"). It
 // marks focus with a plain ">" where every other agent uses "❯" or "›".
 var agyMenuFocusPattern = regexp.MustCompile(`(?m)^(\s*)> (\d+\.\s)`)
+
+func normalizeAgyMenuFocus(text string) string {
+	return agyMenuFocusPattern.ReplaceAllString(text, "${1}❯ ${2}")
+}
 
 // agyStatusLinePattern matches the "Context [...]" usage bar Antigravity keeps
 // under its dialogs; it is chrome, not output newer than the menu.

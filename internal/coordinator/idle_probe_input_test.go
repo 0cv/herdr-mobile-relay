@@ -12,35 +12,24 @@ import (
 
 	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 	"github.com/0cv/herdr-mobile-relay/internal/question"
-	"github.com/0cv/herdr-mobile-relay/internal/textutil"
+	"github.com/0cv/herdr-mobile-relay/internal/question/testfixture"
 )
 
-func liveFixture(t *testing.T, set, name string) string {
+func liveFixture(t *testing.T, name string) string {
 	t.Helper()
-	body, err := os.ReadFile(filepath.Join("..", "question", "testdata", set, name+".ansi"))
+	body, err := os.ReadFile(filepath.Join("..", "question", "testdata", "attention", name+".ansi"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	return string(body)
 }
 
-func splitHint(frame, hint, wrapped string) string {
-	rows := strings.Split(frame, "\n")
-	for i, row := range rows {
-		if strings.TrimSpace(textutil.StripANSI(row)) == hint {
-			rows[i] = wrapped
-			break
-		}
-	}
-	return strings.Join(rows, "\n")
-}
-
 func narrowQuestion(t *testing.T, name string) string {
-	return splitHint(liveFixture(t, "attention", name), "Enter to select · ↑/↓ to navigate · Esc to cancel", "Enter to select · ↑/↓ to navigate · Esc to\ncancel")
+	return testfixture.ReplaceRow(t, liveFixture(t, name), "Enter to select · ↑/↓ to navigate · Esc to cancel", "Enter to select · ↑/↓ to navigate · Esc to\ncancel")
 }
 
 func narrowApproval(t *testing.T) string {
-	return splitHint(liveFixture(t, "attention", "claude-single-approval"), "Esc to cancel · Tab to amend", "Esc to cancel · Tab to\namend")
+	return testfixture.ReplaceRow(t, liveFixture(t, "claude-single-approval"), "Esc to cancel · Tab to amend", "Esc to cancel · Tab to\namend")
 }
 
 func promoteFrame(t *testing.T, s *State, frame, agent string) *AgentState {
@@ -92,24 +81,24 @@ func TestProbeNarrowQuestionAndApprovalInput(t *testing.T) {
 }
 
 func TestProbeRejectsStaleOrReplacedInput(t *testing.T) {
-	for _, tc := range []struct{ name, agent, fixture, stale string }{
-		{"OMP ask", "omp", "omp-ask-status-below", "omp-ask-stale-before-status"},
-		{"Pi ask", "pi", "omp-ask-status-below", "omp-ask-stale-before-status"},
-		{"OMP approval", "omp", "omp-tool-approval", "omp-tool-approval-stale-before-status"},
-		{"Pi approval", "pi", "omp-tool-approval", "omp-tool-approval-stale-before-status"},
-		{"Done after footer", "claude", "claude-single-approval", ""},
-		{"read error", "claude", "claude-single-question", ""},
-		{"generation change", "claude", "claude-single-question", ""},
-		{"confirmed end to done", "claude", "claude-single-question", ""},
-		{"changed interaction", "claude", "claude-single-question", ""},
-		{"wrong option", "claude", "claude-single-approval", ""},
+	for _, tc := range []struct{ name, agent, fixture string }{
+		{"OMP ask", "omp", "omp-ask-status-below"},
+		{"Pi ask", "pi", "omp-ask-status-below"},
+		{"OMP approval", "omp", "omp-tool-approval"},
+		{"Pi approval", "pi", "omp-tool-approval"},
+		{"Done after footer", "claude", "claude-single-approval"},
+		{"read error", "claude", "claude-single-question"},
+		{"generation change", "claude", "claude-single-question"},
+		{"confirmed end to done", "claude", "claude-single-question"},
+		{"changed interaction", "claude", "claude-single-question"},
+		{"wrong option", "claude", "claude-single-approval"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			frame := liveFixture(t, "attention", tc.fixture)
+			frame := liveFixture(t, tc.fixture)
 			d, client, a := newPromotedDispatcher(t, frame, tc.agent)
 			msg := probeResponse(a, 0)
-			if tc.stale != "" {
-				client.contents["pane"] = liveFixture(t, "live", tc.stale)
+			if tc.agent == "omp" || tc.agent == "pi" {
+				client.contents["pane"] = testfixture.StaleOMP(t, frame)
 			}
 			now := time.Now()
 			switch tc.name {
@@ -135,6 +124,34 @@ func TestProbeRejectsStaleOrReplacedInput(t *testing.T) {
 			})
 			if result := d.Handle(t.Context(), msg); result.OK || client.count("SendKeys") != 0 || client.count("SendText") != 0 {
 				t.Fatalf("unexpected input: %+v %+v", result, client.recorded())
+			}
+		})
+	}
+}
+
+func TestUnpromotedDoneQuestionIsOnlyAnswerableWithProbeDisabled(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		name := "disabled"
+		if enabled {
+			name = "enabled"
+		}
+		t.Run(name, func(t *testing.T) {
+			frame := liveFixture(t, "claude-single-question")
+			s := NewState(testLogger())
+			if enabled {
+				s.EnableIdleQuestionProbe()
+			}
+			a := probeAgent("done")
+			s.CommitInventory([]*AgentState{a}, 0)
+			client := newFakeBackend()
+			client.contents[a.PaneID] = frame
+			d := newTestDispatcher(t, client, s)
+			result := d.Handle(t.Context(), protocol.Inbound{
+				Type: "answer_question", RequestID: "done", PaneID: a.PaneID,
+				InteractionID: question.Parse(frame, a.Agent).ID, SelectedIndices: []int{0},
+			})
+			if result.OK == enabled || enabled && len(client.recorded()) != 0 || !enabled && client.count("SendKeys") == 0 {
+				t.Fatalf("unexpected result: %+v %+v", result, client.recorded())
 			}
 		})
 	}
@@ -179,7 +196,7 @@ func TestSequentialPromotedApprovalsUseIndependentEvents(t *testing.T) {
 
 func TestPromotedQuestionWatcherUsesStrictVisibleScreen(t *testing.T) {
 	first := narrowQuestion(t, "claude-plan-multi-question")
-	first = splitHint(first, "Enter to select · Tab/Arrow keys to navigate · Esc to cancel", "Enter to select · Tab/Arrow keys to\nnavigate · Esc to cancel")
+	first = testfixture.ReplaceRow(t, first, "Enter to select · Tab/Arrow keys to navigate · Esc to cancel", "Enter to select · Tab/Arrow keys to\nnavigate · Esc to cancel")
 	first = strings.ReplaceAll(first, "☒ Database", "☐ Database")
 	frame := narrowQuestion(t, "claude-plan-submit-answers")
 	d, client, a := newPromotedDispatcher(t, first, "claude")
