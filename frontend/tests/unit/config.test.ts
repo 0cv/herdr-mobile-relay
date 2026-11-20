@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   importQuickSetup,
+  isIosBrowserTab,
   loadRelayConfigs,
   normalizeRelayConfig,
   quickSetupConfig,
@@ -18,6 +19,18 @@ function setupLink(fragment: string): Pick<Location, 'hash' | 'protocol' | 'host
 }
 
 describe('Home Screen setup handoff', () => {
+  it.each([
+    [false, 'iPhone', 0, true],
+    [false, 'iPad', 0, true],
+    [false, 'Macintosh', 5, true],
+    [false, 'Macintosh', 0, false],
+    [true, 'iPhone', 0, false],
+    [undefined, 'iPhone', 0, false],
+    [false, 'Android', 5, false],
+  ])('detects tabs with standalone=%s, device=%s and touch points=%s', (standalone, device, touchPoints, expected) => {
+    expect(isIosBrowserTab(standalone, `Mozilla/5.0 (${device})`, touchPoints)).toBe(expected);
+  });
+
   it('retains a valid setup fragment only in an iOS browser tab', () => {
     const locationValue = setupLink('label=Fedora&relay=wss%3A%2F%2Frelay.example.com');
     expect(shouldRetainSetupFragment(locationValue, false)).toBe(true);

@@ -74,6 +74,8 @@ interface PersistedDeviceAuthState {
   relays: Record<string, RelayInvitation | RelayDeviceCredential>;
 }
 
+export class ExpiredDeviceInvitation extends Error {}
+
 /**
  * Stores one authentication secret for each relay in ordinary browser storage.
  * This is deliberately not described as a hardware-backed credential store:
@@ -85,18 +87,18 @@ export class BrowserDeviceCredentialStore {
     private readonly now: () => number = Date.now,
   ) {}
 
-  get(relayId: string): RelayInvitation | RelayDeviceCredential | null {
+  get(relayId: string, removeExpired = true): RelayInvitation | RelayDeviceCredential | null {
     const id = validIdentifier(relayId, 'relay id');
     const entry = this.read().relays[id];
     if (!entry) return null;
     if (entry.kind === 'invitation' && entry.expiresAt <= this.now()) {
-      this.remove(id);
+      if (removeExpired) this.remove(id);
       return null;
     }
     return cloneAuthentication(entry);
   }
 
-  saveInvitation(relayId: string, invitation: Omit<RelayInvitation, 'kind'>): RelayInvitation {
+  saveInvitation(relayId: string, invitation: Omit<RelayInvitation, 'kind'>, saveRelay?: () => void): RelayInvitation {
     const id = validIdentifier(relayId, 'relay id');
     const entry: RelayInvitation = {
       kind: 'invitation',
@@ -105,10 +107,18 @@ export class BrowserDeviceCredentialStore {
       secret: validSecret(invitation.secret),
       expiresAt: validTimestamp(invitation.expiresAt, 'invitation expiry'),
     };
-    if (entry.expiresAt <= this.now()) throw new Error('The device invitation has expired.');
-    const state = this.read();
+    const previous = this.storage.getItem(DEVICE_AUTH_STORAGE_KEY);
+    const state = this.read(previous);
     state.relays[id] = entry;
+    if (entry.expiresAt <= this.now()) throw new ExpiredDeviceInvitation('The device invitation has expired.');
     this.write(state);
+    try {
+      saveRelay?.();
+    } catch (error) {
+      if (previous === null) this.storage.removeItem(DEVICE_AUTH_STORAGE_KEY);
+      else this.storage.setItem(DEVICE_AUTH_STORAGE_KEY, previous);
+      throw error;
+    }
     return cloneAuthentication(entry);
   }
 
@@ -162,8 +172,7 @@ export class BrowserDeviceCredentialStore {
   }
 
 
-  private read(): PersistedDeviceAuthState {
-    const raw = this.storage.getItem(DEVICE_AUTH_STORAGE_KEY);
+  private read(raw = this.storage.getItem(DEVICE_AUTH_STORAGE_KEY)): PersistedDeviceAuthState {
     if (!raw) return emptyState();
     try {
       const parsed = JSON.parse(raw) as unknown;

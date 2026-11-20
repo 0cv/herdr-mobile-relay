@@ -133,6 +133,14 @@ handshake consumes the invitation. Create a separate invitation for every
 additional controller or reader, or print the setup link again on the
 computer: every print arms the relay's bootstrap for one more phone.
 
+To add a computer from inside the app, tap **Scan QR Code** on the home screen
+before any computers are configured, or in **Settings → Relays** at any time.
+Allow camera access and point the camera at the setup or invitation QR code.
+If access is denied, allow it in your browser or system settings and open the
+scanner again. You can still open the setup link or add the relay in Settings.
+On iPhone and iPad, the scanner is available in the Home Screen app, not in
+Safari tabs. iOS may ask for camera permission each time you open it.
+
 The demo shows fictional devices and an invitation preview. It creates no
 invitation: the sample QR contains only the text `Herdr demo`, not a setup link.
 
@@ -170,8 +178,10 @@ delivery and display behavior.
 
 ## Opening links from other apps on iOS
 
-External links open in Safari, not the installed Home Screen app. To use those
-links, pair Safari as its own device: in the Home Screen app, choose
+External links open in Safari, not the installed Home Screen app. To add a
+computer to the Home Screen app, use **Scan QR Code** there instead. To follow
+notification or agent links from other apps, pair Safari as its own device:
+in the Home Screen app, choose
 **Settings → Devices → Invite Device**, open that invitation in Safari, then
 choose **Pair this browser instead** and confirm. Safari is listed and revocable
 separately; its one-use invitation cannot also pair the Home Screen app.

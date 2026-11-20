@@ -19,6 +19,7 @@
   },
   "dependencies": {
     "@noble/hashes": "2.4.0",
+    "qr": "0.7.2",
     "svelte": "5.57.3"
   },
   "devDependencies": {
