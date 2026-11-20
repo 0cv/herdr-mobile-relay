@@ -466,7 +466,7 @@ func TestBlockedClassificationStartsUnknownAndCommitsUnderEventGuards(t *testing
 		Options: []string{"Approve", "Reject"},
 	}
 	current, _, ok := s.CommitAttentionClassification(
-		"p1", blocked.BlockedEventID, generation, s.ContentRevision("p1"), classification,
+		"p1", blocked.BlockedEventID, generation, s.ContentRevision("p1"), classification, "",
 	)
 	if !ok || current.AttentionKind != question.AttentionApproval ||
 		len(current.Options) != 2 || current.StateRevision == blocked.StateRevision {
@@ -475,7 +475,7 @@ func TestBlockedClassificationStartsUnknownAndCommitsUnderEventGuards(t *testing
 
 	s.CommitEvent("p1", "working", 2000)
 	if _, _, ok := s.CommitAttentionClassification(
-		"p1", blocked.BlockedEventID, generation, s.ContentRevision("p1"), classification,
+		"p1", blocked.BlockedEventID, generation, s.ContentRevision("p1"), classification, "",
 	); ok {
 		t.Fatal("stale blocked classification committed after the status changed")
 	}
@@ -501,7 +501,7 @@ func TestInflightPollPreservesNewerBlockedClassification(t *testing.T) {
 			Kind:    question.AttentionApproval,
 			Command: "make check",
 			Options: []string{"Approve", "Reject"},
-		},
+		}, "",
 	); !ok {
 		t.Fatal("classification setup failed")
 	}
@@ -532,7 +532,7 @@ func TestTopologyCommitPreservesCurrentStatusAndAttention(t *testing.T) {
 		question.Classification{
 			Kind:    question.AttentionApproval,
 			Options: []string{"Approve", "Reject"},
-		},
+		}, "",
 	); !ok {
 		t.Fatal("classification setup failed")
 	}

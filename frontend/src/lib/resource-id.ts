@@ -82,6 +82,11 @@ export function targetRefMatchesAgent(target: FrontendTargetRef, agent: Partial<
     && (normalized.agent_session_id || '') === (current.agent_session_id || ''));
 }
 
+export function agentTargetsDiffer(previous: Agent | undefined, next: Agent): boolean {
+  const target = previous && targetRefForAgent(previous);
+  return Boolean(target && targetRefForAgent(next) && !targetRefMatchesAgent(target, next));
+}
+
 export function targetStoreKey(target: FrontendTargetRef): string | null {
   const normalized = normalizeFrontendTargetRef(target);
   if (!normalized) return null;

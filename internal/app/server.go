@@ -52,6 +52,7 @@ type paneSizer interface {
 	ReleaseClient(context.Context, string) error
 	ReadGeometry(string, string) (int, int, bool)
 	ResizedWithin(string, time.Duration) bool
+	Leased(paneID, terminalID string) bool
 	Run(context.Context)
 	Shutdown(context.Context) error
 }
@@ -398,6 +399,8 @@ func (s *Server) Run(ctx context.Context) error {
 		})
 	})
 
+	probe := s.configureIdleProbe()
+
 	s.dispatcher = coordinator.NewDispatcher(s.herdrC, s.state, s.journal, s.logger)
 	s.dispatcher.SetProfiles(s.profiles)
 	s.dispatcher.SetBroadcast(s.broadcastCommitted)
@@ -437,26 +440,10 @@ func (s *Server) Run(ctx context.Context) error {
 		s.udp = udpListener
 		s.udp.SetOnDirty(func() { s.poller.Wake() })
 		s.udp.SetOnChange(func(agent *coordinator.AgentState) {
-			s.commitAgent(agent, map[string]any{
-				"type":           "agent_update",
-				"pane_id":        agent.PaneID,
-				"raw_pane_id":    agent.RawPaneID,
-				"status":         agent.Status,
-				"agent":          agent.Agent,
-				"tab_id":         agent.TabID,
-				"tab_label":      agent.TabLabel,
-				"tab_number":     agent.TabNumber,
-				"workspace_id":   agent.WorkspaceID,
-				"cwd":            agent.Cwd,
-				"project":        agent.Project,
-				"host":           agent.Host,
-				"session":        agent.Session,
-				"session_name":   agent.SessionName,
-				"updated_at":     agent.UpdatedAt,
-				"event_id":       agent.BlockedEventID,
-				"attention_kind": agent.AttentionKind,
-				"pane_revision":  agent.StateRevision,
-			})
+			s.commitAgent(agent, "agent_update")
+			if probe != nil {
+				probe.offer(agent.PaneID)
+			}
 			s.poller.Wake()
 		})
 	}
@@ -481,7 +468,8 @@ func (s *Server) Run(ctx context.Context) error {
 				setAgentAttention(s.state, a, unknownPaneClassification())
 				continue
 			}
-			setAgentAttention(s.state, a, question.Classify(string(read.Content), a.Agent))
+			content := string(read.Content)
+			s.setNativeAttention(a, question.Classify(content, a.Agent), content)
 		}
 	})
 
@@ -533,6 +521,9 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	s.hybrid = s.startHybridTransport(ctx)
 	startBackground(func() { s.pushM.Run(ctx) })
+	if probe != nil {
+		startBackground(func() { probe.run(ctx) })
+	}
 	startBackground(func() { s.poller.Run(ctx) })
 	startBackground(func() { s.herdrC.RunCapabilityRefresh(ctx, 30*time.Second) })
 	startBackground(func() { s.poller.RunEvents(ctx) })

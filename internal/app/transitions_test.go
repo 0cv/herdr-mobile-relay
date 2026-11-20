@@ -29,6 +29,8 @@ $ true
 Esc to cancel · Enter to confirm
 `
 	s := handlerTestServer(t)
+	s.cfg.IdleQuestionProbe = true
+	s.state.EnableIdleQuestionProbe()
 	s.herdrC = &frameBackend{content: approval}
 	queued := transitionPushQueue(t, s)
 	if !s.state.CommitEvent("pane-1", "blocked", time.Now().UnixMilli()) {
@@ -43,8 +45,10 @@ Esc to cancel · Enter to confirm
 		t.Fatalf("expected one current approval alert, got %#v", alerts)
 	}
 	current, _ := s.state.Agent("pane-1")
-	if current.AttentionKind != question.AttentionApproval {
-		t.Fatalf("pane classified as %q", current.AttentionKind)
+	wantFingerprint := question.ApprovalFingerprint(question.Classify(approval, agent.Agent))
+	if current.AttentionKind != question.AttentionApproval || current.ApprovalFingerprint != wantFingerprint ||
+		current.ScreenAttention != "" || current.StrictAttention {
+		t.Fatalf("native approval changed: %+v", current)
 	}
 }
 
@@ -347,7 +351,7 @@ func TestApprovalPushSuppressedWhenAttentionIsReclassified(t *testing.T) {
 		question.Classification{
 			Kind:   question.AttentionChat,
 			Prompt: "What would you like to work on next?",
-		},
+		}, "",
 	)
 	if !committed {
 		t.Fatal("chat reclassification was not committed")
@@ -372,6 +376,7 @@ func TestApprovalPushSuppressedWhenAttentionIsReclassified(t *testing.T) {
 
 func TestChatCompletionRetiresWaitingAlertAfterUnchangedPoll(t *testing.T) {
 	s := handlerTestServer(t)
+	s.state.EnableIdleQuestionProbe()
 	dir := t.TempDir()
 	s.pushM = newPushManager(t, dir)
 	alert := seedWaitingAlert(t, s, dir)
@@ -381,10 +386,11 @@ func TestChatCompletionRetiresWaitingAlertAfterUnchangedPoll(t *testing.T) {
 		t.Fatal(err)
 	}
 	paneID := alert.Key.PaneID
+	blockedRevision := s.state.Revision(paneID)
 
 	classified, _, ok := s.state.CommitAttentionClassification(
 		paneID, alert.Key.EventID, alert.Key.Generation, s.state.ContentRevision(paneID),
-		question.Classification{Kind: question.AttentionChat, Prompt: "The request has been answered."},
+		question.Classification{Kind: question.AttentionChat, Prompt: "The request has been answered."}, "",
 	)
 	if !ok {
 		t.Fatal("could not classify chat completion")
@@ -395,7 +401,7 @@ func TestChatCompletionRetiresWaitingAlertAfterUnchangedPoll(t *testing.T) {
 	}
 	s.transitionEnrich = func(context.Context, *coordinator.AgentState) {}
 
-	s.handleTransition(t.Context(), paneID, classified.Agent, classified.Project, "blocked", classified.StateRevision, time.Now().UnixMilli())
+	s.handleTransition(t.Context(), paneID, classified.Agent, classified.Project, "blocked", blockedRevision, time.Now().UnixMilli())
 
 	if payloads := queuedPushPayloads(t, dir); len(payloads) != 1 || payloads[0].Key.Category != push.CategoryFinished {
 		t.Fatalf("queue = %#v, want only a completion alert", payloads)

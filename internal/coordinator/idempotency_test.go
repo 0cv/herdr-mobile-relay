@@ -401,7 +401,7 @@ func TestAcknowledgeOnlyBroadcastsDisplayedStatusChanges(t *testing.T) {
 	}
 	select {
 	case update := <-updates:
-		if update.Message["status"] != "idle" || update.Agent.Status != "idle" {
+		if update.Agent.Status != "idle" {
 			t.Fatalf("acknowledgement update = %+v", update)
 		}
 	case <-time.After(time.Second):

@@ -8,6 +8,7 @@ type Lease struct {
 	// its own height, which is never written with a different value.
 	Rows      int
 	ExpiresAt time.Time
+	Released  bool
 }
 
 // Leases holds one pane's leases by client.
@@ -50,6 +51,15 @@ func (l Leases) ActiveAt(now time.Time) Leases {
 	return active
 }
 
+func (l Leases) HeldAt(now time.Time) bool {
+	for _, lease := range l {
+		if !lease.Released && lease.ExpiresAt.After(now) {
+			return true
+		}
+	}
+	return false
+}
+
 // RemoveExpired deletes the leases that ended at or before now and reports the
 // latest of their expiry times.
 func (l Leases) RemoveExpired(now time.Time) (lastExpiry time.Time, removed bool) {
@@ -75,7 +85,8 @@ func (l Leases) Shorten(clientID string, lapse time.Time) Lease {
 	}
 	if lease.ExpiresAt.After(lapse) {
 		lease.ExpiresAt = lapse
-		l[clientID] = lease
 	}
+	lease.Released = true
+	l[clientID] = lease
 	return lease
 }

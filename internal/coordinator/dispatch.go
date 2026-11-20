@@ -221,11 +221,8 @@ func (d *Dispatcher) paneSessionError(token WorkerToken) error {
 	return nil
 }
 
-// AgentUpdate carries the typed agent beside its wire message so the server
-// can commit the agent to its view without parsing the message.
 type AgentUpdate struct {
-	Agent   *AgentState
-	Message map[string]any
+	Agent *AgentState
 }
 
 func (d *Dispatcher) SetBroadcast(fn func(any)) {
@@ -567,13 +564,7 @@ func (d *Dispatcher) handleAcknowledge(requestID, paneID string) *CommandResult 
 	d.wake()
 	if agent, ok := d.state.Agent(paneID); ok && d.broadcast != nil && before != after {
 		agent.Status = after
-		d.broadcast(AgentUpdate{Agent: agent, Message: map[string]any{
-			"type":          "agent_update",
-			"pane_id":       paneID,
-			"raw_pane_id":   paneID,
-			"status":        after,
-			"pane_revision": agent.StateRevision,
-		}})
+		d.broadcast(AgentUpdate{Agent: agent})
 	}
 	return completed(requestID, "acknowledge_pane", paneID, nil)
 }

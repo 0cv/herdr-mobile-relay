@@ -5,6 +5,12 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Pin supported live questions and approvals even when Herdr reports the agent
+  as idle, so the phone can show the choices instead of announcing a completion
+  while the agent still needs an answer.
+
 ### Changed
 
 - An approval or question alert can reach a previously unreachable phone for

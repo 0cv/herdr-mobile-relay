@@ -49,6 +49,19 @@ func TestAuthorizeAuthenticatedIdentity(t *testing.T) {
 	}
 }
 
+func TestReaderCannotAnswerAttention(t *testing.T) {
+	for _, operation := range []string{"respond", "answer_question"} {
+		action, ok := protocol.ClassifyAction(operation)
+		if !ok {
+			t.Fatalf("missing action %q", operation)
+		}
+		reader := transport.AuthenticatedIdentity{Role: string(protocol.RoleReader)}
+		if err := authorizeAuthenticatedIdentity(reader, true, action, ""); err == nil || err.Code != protocol.ErrorReaderDenied {
+			t.Fatalf("%s: %v", operation, err)
+		}
+	}
+}
+
 func TestValidateExactPaneTargetBindsCurrentTerminalGenerationAndAgentSession(t *testing.T) {
 	server := testServer()
 	server.state.CommitInventory([]*coordinator.AgentState{{

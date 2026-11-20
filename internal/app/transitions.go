@@ -3,12 +3,12 @@ package app
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/conversation"
 	"github.com/0cv/herdr-mobile-relay/internal/coordinator"
-	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 	"github.com/0cv/herdr-mobile-relay/internal/push"
 	"github.com/0cv/herdr-mobile-relay/internal/question"
 )
@@ -23,12 +23,13 @@ func agentPushRequest(
 	if agent == nil || agent.TerminalID == "" || eventID == "" {
 		return nil
 	}
+	target := agent.TargetRef()
 	key := push.PushEventKey{
-		ServerSessionID:     protocol.PrimaryServerSessionID,
-		PaneID:              agent.PaneID,
-		TerminalID:          agent.TerminalID,
-		AgentSessionID:      agent.SessionID,
-		Generation:          agent.Generation,
+		ServerSessionID:     target.ServerSessionID,
+		PaneID:              target.PaneID,
+		TerminalID:          target.TerminalID,
+		AgentSessionID:      target.AgentSessionID,
+		Generation:          target.Generation,
 		EventID:             eventID,
 		InteractionRevision: revision,
 		Category:            category,
@@ -103,17 +104,13 @@ func (s *Server) transitionBlocked(
 	paneID, agent, project string,
 	revision, transitionAt int64,
 ) {
-	agentState, agentExists := s.state.Agent(paneID)
-	if !agentExists {
+	agentState, blockedContentRevision, classifiedAttentionRevision, current := s.state.BlockedTransitionAgent(paneID, revision)
+	if !current {
 		return
 	}
 	session := agentState.Session
 	blockedEventID := agentState.BlockedEventID
-	blockedContentRevision := s.state.ContentRevision(paneID)
-	paneGeneration, active := s.state.PaneSession(paneID)
-	if !active || blockedEventID == "" {
-		return
-	}
+	paneGeneration := agentState.Generation
 	transitionCurrent := func() bool {
 		return s.state.BlockedTransitionCurrent(paneID, blockedEventID, paneGeneration)
 	}
@@ -123,25 +120,24 @@ func (s *Server) transitionBlocked(
 	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
 
-	if s.transitionEnrich != nil {
-		s.transitionEnrich(ctx, agentState)
-	} else {
-		s.enrichBlockedTransition(ctx, agentState)
+	if !agentState.StrictAttention {
+		if s.transitionEnrich != nil {
+			s.transitionEnrich(ctx, agentState)
+		} else {
+			s.enrichBlockedTransition(ctx, agentState)
+		}
+		if !transitionCurrent() {
+			return
+		}
+		persisted, attentionRevision, ok := s.state.CommitAttentionClassification(
+			paneID, blockedEventID, paneGeneration, blockedContentRevision, classificationFromAgent(agentState), agentState.LiveIdentity,
+		)
+		if !ok || !transitionCurrent() {
+			return
+		}
+		agentState = persisted
+		classifiedAttentionRevision = attentionRevision
 	}
-	if !transitionCurrent() {
-		return
-	}
-	persisted, classifiedAttentionRevision, ok := s.state.CommitAttentionClassification(
-		paneID,
-		blockedEventID,
-		paneGeneration,
-		blockedContentRevision,
-		classificationFromAgent(agentState),
-	)
-	if !ok || !transitionCurrent() {
-		return
-	}
-	agentState = persisted
 	classifiedCurrent := func() bool {
 		return s.state.AttentionTransitionCurrent(
 			paneID,
@@ -326,15 +322,31 @@ func (s *Server) enrichBlockedTransition(ctx context.Context, agent *coordinator
 	if agent == nil {
 		return
 	}
+	var content string
 	classification, err := classifyBlockedTransition(ctx, agent.Agent, func(readCtx context.Context) (string, error) {
 		attemptCtx, cancel := context.WithTimeout(readCtx, 3*time.Second)
 		defer cancel()
 		read, readErr := s.herdrC.ReadPane(attemptCtx, agent.PaneID, 80, "ansi")
-		return string(read.Content), readErr
+		content = string(read.Content)
+		return content, readErr
 	})
 	if err != nil {
-		setAgentAttention(s.state, agent, unknownPaneClassification())
+		s.setNativeAttention(agent, unknownPaneClassification(), "")
 		return
+	}
+	s.setNativeAttention(agent, classification, content)
+}
+
+func (s *Server) setNativeAttention(agent *coordinator.AgentState, classification question.Classification, content string) {
+	if s.cfg.IdleQuestionProbe {
+		live, _ := question.ClassifyLive(content, agent.Agent)
+		agent.LiveIdentity = ""
+		if classification.Kind == question.AttentionQuestion && live.Interaction != nil &&
+			classification.Interaction != nil && classification.Interaction.ID == live.Interaction.ID ||
+			classification.Kind == question.AttentionApproval && live.Kind == question.AttentionApproval &&
+				classification.Command == live.Command && slices.Equal(classification.Options, live.Options) {
+			agent.LiveIdentity = coordinator.LiveIdentity(live)
+		}
 	}
 	setAgentAttention(s.state, agent, classification)
 }
@@ -429,42 +441,11 @@ func (s *Server) broadcastBlockedAttention(agent *coordinator.AgentState) {
 	if agent == nil || s.transitionBroadcast == nil {
 		return
 	}
-	message := map[string]any{
-		"type":                 "blocked",
-		"pane_id":              agent.PaneID,
-		"raw_pane_id":          agent.RawPaneID,
-		"terminal_id":          agent.TerminalID,
-		"tab_id":               agent.TabID,
-		"tab_label":            agent.TabLabel,
-		"tab_number":           agent.TabNumber,
-		"workspace_id":         agent.WorkspaceID,
-		"agent":                agent.Agent,
-		"name":                 agent.Name,
-		"status":               "blocked",
-		"cwd":                  agent.Cwd,
-		"project":              agent.Project,
-		"host":                 agent.Host,
-		"session":              agent.Session,
-		"session_name":         agent.SessionName,
-		"server_session_id":    protocol.PrimaryServerSessionID,
-		"generation":           s.state.Generation(agent.PaneID),
-		"agent_session_id":     agent.SessionID,
-		"updated_at":           agent.UpdatedAt,
-		"event_id":             agent.BlockedEventID,
-		"attention_kind":       agent.AttentionKind,
-		"prompt":               agent.Prompt,
-		"command":              agent.Command,
-		"options":              agent.Options,
-		"approval_fingerprint": agent.ApprovalFingerprint,
-		"interaction":          agent.Interaction,
-		"interaction_id":       agent.InteractionID,
-		"pane_revision":        agent.StateRevision,
-	}
 	if s.transitionBroadcast == s.hub {
-		s.commitAgent(agent, message)
+		s.commitAgent(agent, "blocked")
 		return
 	}
-	s.transitionBroadcast.Broadcast(message)
+	s.transitionBroadcast.Broadcast(agentUpdateMessage(agent, "blocked"))
 }
 
 func (s *Server) handleChatCompletion(

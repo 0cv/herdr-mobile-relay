@@ -40,6 +40,12 @@ tab creation and close; creating and closing workspaces, and worktrees; the Pi
 integration switch; phone-driven relay updates and app deploys. Core upgrades
 are manual.
 
+## Live questions on idle panes
+
+The core relay uses the [same live-dialog checks as the TUI relay](mobile-app.md#live-questions-when-an-agent-looks-idle),
+reading the current terminal screen, not scrollback. Turning off the probe in
+the core relay's environment does not affect the TUI relay.
+
 ## Conversation on core
 
 | Agent | How its session is found | What the user does |

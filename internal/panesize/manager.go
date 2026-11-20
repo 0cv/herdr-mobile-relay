@@ -249,6 +249,14 @@ func (m *Manager) Available() bool {
 	return m != nil && m.available
 }
 
+func (m *Manager) Leased(paneID, terminalID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	state := m.panes[paneID]
+	return !m.closed && state != nil && state.resolved && terminalID != "" &&
+		state.identity.terminalID == terminalID && state.leases.HeldAt(m.now())
+}
+
 // Acquire creates or renews clientID's lease on paneID and applies the
 // narrowest leased size across clients. Every call re-validates the pane's
 // terminal and reads its current size through the validated descriptor, so a

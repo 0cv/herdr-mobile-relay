@@ -254,7 +254,7 @@ func TestPushOpenRef(t *testing.T) {
 		if _, _, ok := s.state.CommitAttentionClassification(target.PaneID, eventID, target.Generation,
 			s.state.ContentRevision(target.PaneID), question.Classification{
 				Kind: question.AttentionApproval, Command: command, ApprovalIdentity: command,
-			}); !ok {
+			}, ""); !ok {
 			t.Fatal("could not classify blocked pane")
 		}
 	}

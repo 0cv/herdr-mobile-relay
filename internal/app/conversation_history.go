@@ -23,19 +23,32 @@ func (s *Server) captureHistoryLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			for _, agent := range s.state.Snapshot() {
-				if !isClaudeLike(agent.Agent) || (agent.Status != "working" && agent.Status != "blocked") {
-					continue
-				}
-				s.scheduleHistoryCapture(ctx, agent.PaneID)
-			}
+			s.scheduleActiveHistoryCaptures(ctx)
 		}
 	}
 }
 
+func (s *Server) scheduleActiveHistoryCaptures(ctx context.Context) {
+	for _, agent := range s.state.Snapshot() {
+		if historyCaptureEligible(agent) {
+			s.scheduleHistoryCapture(ctx, agent.PaneID)
+		}
+	}
+}
+
+func historyCaptureEligible(agent *coordinator.AgentState) bool {
+	return agent != nil && isClaudeLike(agent.Agent) && (agent.RawStatus == "working" || agent.RawStatus == "blocked")
+}
+
 func (s *Server) scheduleHistoryCapture(ctx context.Context, paneID string) {
-	if s.historyTasks == nil {
+	agent, _ := s.state.Agent(paneID)
+	if s.historyTasks == nil || !historyCaptureEligible(agent) {
 		return
+	}
+	target := agent.TargetRef()
+	currentTargetEligible := func() bool {
+		current, _ := s.state.Agent(paneID)
+		return historyCaptureEligible(current) && current.TargetRef() == target
 	}
 	s.historyCaptureMu.Lock()
 	if s.historyInflight[paneID] || time.Since(s.historyLast[paneID]) < history.CaptureInterval {
@@ -52,20 +65,19 @@ func (s *Server) scheduleHistoryCapture(ctx context.Context, paneID string) {
 			delete(s.historyInflight, paneID)
 			s.historyCaptureMu.Unlock()
 		}()
+		if !currentTargetEligible() {
+			return
+		}
 		readCtx, cancel := context.WithTimeout(taskCtx, 3*time.Second)
 		defer cancel()
 		read, err := s.herdrC.ReadPane(readCtx, paneID, history.MaxLines, "ansi")
 		content := read.Content
-		if err != nil || len(content) == 0 || question.LayoutHint(string(content)) {
-			return
-		}
-		agent, ok := s.state.Agent(paneID)
-		if !ok || !isClaudeLike(agent.Agent) {
+		if err != nil || len(content) == 0 || historyDialog(string(content), agent.Agent, agent.ProbeEnabled) {
 			return
 		}
 		s.historyCaptureMu.Lock()
 		defer s.historyCaptureMu.Unlock()
-		if !s.historyActive[paneID] {
+		if !s.historyActive[paneID] || !currentTargetEligible() {
 			return
 		}
 		s.historyM.Merge(paneID, string(content))
@@ -166,7 +178,19 @@ func (s *Server) latestConversationResponse(agent, sessionID string, project con
 	return entry.Text
 }
 
+func historyDialog(content, agent string, strict bool) bool {
+	if question.LayoutHint(content) {
+		return true
+	}
+	if !strict {
+		return false
+	}
+	classification, _ := question.ClassifyLive(content, agent)
+	return coordinator.LiveIdentity(classification) != ""
+}
+
 func (s *Server) captureFinishedPane(ctx context.Context, paneID, agent, cwd, sessionID string, project conversation.ProjectContext) string {
+	before, _ := s.state.Agent(paneID)
 	if conversation.IsKimi(agent) {
 		current, exists := s.state.Agent(paneID)
 		if !exists || current.Agent != agent || current.SessionID != sessionID || current.Cwd != cwd || s.conversationM == nil {
@@ -195,8 +219,12 @@ func (s *Server) captureFinishedPane(ctx context.Context, paneID, agent, cwd, se
 	}
 	raw := string(content)
 	completionContent := raw
-	if isClaudeLike(agent) && !question.LayoutHint(raw) {
-		completionContent = s.historyM.Merge(paneID, raw)
+	if isClaudeLike(agent) && !historyDialog(raw, agent, s.cfg.IdleQuestionProbe) {
+		after, _ := s.state.Agent(paneID)
+		if before == nil && after == nil || before != nil && after != nil && before.TargetRef() == after.TargetRef() &&
+			!after.ProbePending && after.ScreenAttention != coordinator.ScreenWaiting {
+			completionContent = s.historyM.Merge(paneID, raw)
+		}
 	}
 	if response := question.LatestCompletedResponse(completionContent); response != "" {
 		return response
