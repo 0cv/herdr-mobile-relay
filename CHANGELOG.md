@@ -14,6 +14,8 @@ project follows [Semantic Versioning](https://semver.org/).
   while the agent still needs an answer.
 - Review recorded file edits on your phone in Full history. Supported tool cards
   show the requested additions and removals alongside the tool's result.
+- Scan a computer’s setup QR code from inside the app to pair without going
+  through Safari on iPhone and iPad (#54).
 
 ### Changed
 

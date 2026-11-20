@@ -36,6 +36,7 @@ import { gatewayRendezvous } from './gateway-credentials';
 import {
   BrowserDeviceCredentialStore,
   commitDeviceEnrollment,
+  ExpiredDeviceInvitation,
   isAuthenticationSecret,
   isAuthenticationVersion,
   isDeviceRole,
@@ -302,11 +303,13 @@ class RelayStore {
       clearChangedRelayPreviews(relays, imported);
       relays = imported;
       const relay = setup ? this.relayForSetup(relays, setup) : undefined;
-      const pairingAccepted = relay && this.setupPairingAccepted(relay, location);
+      const pairingAccepted = !!relay && this.setupPairingAccepted(relay, location, invitation);
       if (relay) {
-        if (this.deferPairing(relay, location)) {
+        const deferred = this.shouldDeferPairing(location, pairingAccepted);
+        this.applyPairingDeferral(relay, location, deferred);
+        if (deferred) {
           this.showToast(PAIRING_DEFERRED_MESSAGE);
-        } else if (invitation && this.shouldSaveInvitation(relay.id, invitation)) {
+        } else if (invitation && !pairingAccepted) {
           try {
             this.deviceCredentials.saveInvitation(relay.id, invitation);
           } catch {
@@ -323,17 +326,20 @@ class RelayStore {
     if (connect) this.connectAll();
   }
 
-  /**
-   * Records whether this browser must leave the link's one-use secret for the
-   * installed Home Screen copy to redeem.
-   */
-  private deferPairing(relay: RelayConfig, locationValue: Pick<Location, 'hash' | 'protocol' | 'host'>): boolean {
-    const deferred = !this.setupPairingAccepted(relay, locationValue) && shouldDeferPairingConnection(
+  private shouldDeferPairing(locationValue: Pick<Location, 'hash' | 'protocol' | 'host'>, pairingAccepted: boolean): boolean {
+    return !pairingAccepted && shouldDeferPairingConnection(
       locationValue,
       navigator.standalone,
       navigator.userAgent,
       navigator.maxTouchPoints,
     );
+  }
+
+  /**
+   * Records whether this browser must leave the link's one-use secret for the
+   * installed Home Screen copy to redeem.
+   */
+  private applyPairingDeferral(relay: RelayConfig, locationValue: Pick<Location, 'hash'>, deferred: boolean): void {
     if (deferred) {
       if (!quickSetupInvitation(locationValue) && locationValue.hash === location.hash
         && typeof history.state?.bootstrapPairingFlow !== 'string') {
@@ -345,7 +351,6 @@ class RelayStore {
     } else {
       this.deferredPairingRelays.delete(relay.id);
     }
-    return deferred;
   }
 
   /** A deferred relay shows as a disconnected row that explains why it never dials. */
@@ -368,7 +373,7 @@ class RelayStore {
     return relays.find((relay) => relay.url === setup.url);
   }
   private shouldSaveInvitation(relayId: string, invitation: Omit<RelayInvitation, 'kind'>): boolean {
-    const stored = this.deviceCredentials.get(relayId);
+    const stored = this.deviceCredentials.get(relayId, false);
     if (!stored) return true;
     if (stored.kind === 'invitation') {
       return stored.id !== invitation.id || stored.version !== invitation.version;
@@ -376,8 +381,7 @@ class RelayStore {
     return stored.invitationId !== invitation.id && invitation.expiresAt > stored.issuedAt;
   }
 
-  private setupPairingAccepted(relay: RelayConfig, locationValue: Pick<Location, 'hash'>): boolean {
-    const invitation = quickSetupInvitation(locationValue);
+  private setupPairingAccepted(relay: RelayConfig, locationValue: Pick<Location, 'hash'>, invitation: Omit<RelayInvitation, 'kind'> | null): boolean {
     if (invitation) return !this.shouldSaveInvitation(relay.id, invitation);
     if (locationValue.hash !== location.hash || !this.deviceCredentials.get(relay.id)) return false;
     const flow = history.state?.bootstrapPairingFlow;
@@ -417,33 +421,36 @@ class RelayStore {
     return true;
   }
 
-  importSetupLink(locationValue: Pick<Location, 'hash' | 'protocol' | 'host' | 'pathname' | 'search'> = location, connect = true): boolean {
+  importSetupLink(
+    locationValue: Pick<Location, 'hash' | 'protocol' | 'host'> & Partial<Pick<Location, 'pathname' | 'search'>> = location,
+    connect = true,
+    clearAddress = true,
+  ): boolean | 'expired' {
     const setup = quickSetupConfig(locationValue);
     const invitation = quickSetupInvitation(locationValue);
+    if (!clearAddress && invitation && invitation.expiresAt <= Date.now()) return 'expired';
     const currentRelays = get(this.relayConfigs);
     const imported = importQuickSetup(currentRelays, locationValue);
     if (!imported || !setup) return false;
-    clearChangedRelayPreviews(currentRelays, imported);
     const relay = this.relayForSetup(imported, setup);
     if (!relay) return false;
-    const pairingAccepted = this.setupPairingAccepted(relay, locationValue);
+    const pairingAccepted = this.setupPairingAccepted(relay, locationValue, invitation);
     const connection = this.connectionsValue.get(relay.id);
     const preserveConnection = pairingAccepted && connection && !connection.closed
       && !relayConnectionIdentityChanged(connection.relay, relay);
-    // Persist the entry before deciding, so a deferred relay row exists for
-    // the connection state and the installed copy finds the same relay id.
-    this.relayConfigs.set(imported);
-    saveRelayConfigs(imported);
-    const deferred = this.deferPairing(relay, locationValue);
-    if (!deferred && invitation && this.shouldSaveInvitation(relay.id, invitation)) {
-      try {
-        this.deviceCredentials.saveInvitation(relay.id, invitation);
-      } catch {
-        return false;
-      }
+    const deferred = this.shouldDeferPairing(locationValue, pairingAccepted);
+    const saveRelays = () => saveRelayConfigs(imported);
+    try {
+      if (!deferred && invitation && !pairingAccepted) this.deviceCredentials.saveInvitation(relay.id, invitation, saveRelays);
+      else saveRelays();
+    } catch (error) {
+      return error instanceof ExpiredDeviceInvitation ? 'expired' : false;
     }
-    if (pairingAccepted || !shouldRetainSetupFragment(locationValue, navigator.standalone)) {
-      history.replaceState(history.state, '', locationValue.pathname + locationValue.search);
+    clearChangedRelayPreviews(currentRelays, imported);
+    this.applyPairingDeferral(relay, locationValue, deferred);
+    this.relayConfigs.set(imported);
+    if (clearAddress && (pairingAccepted || !shouldRetainSetupFragment(locationValue, navigator.standalone))) {
+      history.replaceState(history.state, '', (locationValue.pathname ?? location.pathname) + (locationValue.search ?? location.search));
     }
     if (connect && !preserveConnection) this.connectAll(true);
     if (!preserveConnection) {

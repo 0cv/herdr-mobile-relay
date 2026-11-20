@@ -50,6 +50,8 @@ tabs retain it without redeeming it and direct you to the installed app, which
 prevents a disposable Safari tab from consuming the invitation. To use the tab
 itself as a device, choose **Pair this browser instead** in Settings. Each printed
 link pairs one phone within ten minutes; print it again for the next phone.
+If the app is already installed, use **Scan QR Code** inside it instead of the
+system camera.
 
 Keep the pane open for a foreground Quick Start; Ctrl-C stops its relay. An
 installed background service keeps running. A new temporary tunnel gets a new

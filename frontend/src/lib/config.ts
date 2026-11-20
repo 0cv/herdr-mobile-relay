@@ -268,6 +268,9 @@ export function quickSetupConfig(locationValue: Pick<Location, 'hash' | 'protoco
   if (token.length < 16 || token.length > 512) return null;
   if (!['http:', 'https:'].includes(locationValue.protocol)) return null;
   const label = (params.get('label') || 'This computer').trim().slice(0, 48) || 'This computer';
+  const configuredRelay = params.get('relay');
+  const relayOrigin = configuredRelay === null ? null : safeSocketOrigin(configuredRelay, locationValue.protocol);
+  if (configuredRelay !== null && !relayOrigin) return null;
   const configuredGateways = params.get('gateways');
   // `gateway=` was never part of a public phone-app release. Reject it rather
   // than silently treating an incomplete gateway link as a direct relay link.
@@ -288,13 +291,7 @@ export function quickSetupConfig(locationValue: Pick<Location, 'hash' | 'protoco
     if (!isRelayId(gatewayRelayId) || !isRendezvousKey(rendezvousKey)) return null;
     return { ...config, gatewayRelayId, rendezvousKey };
   }
-  const configuredRelay = params.get('relay');
-  let url = `${locationValue.protocol === 'https:' ? 'wss:' : 'ws:'}//${locationValue.host}`;
-  if (configuredRelay) {
-    const origin = safeSocketOrigin(configuredRelay, locationValue.protocol);
-    if (!origin) return null;
-    url = origin;
-  }
+  const url = relayOrigin ?? `${locationValue.protocol === 'https:' ? 'wss:' : 'ws:'}//${locationValue.host}`;
   return { label, url, token: invitation ? '' : token };
 }
 
@@ -303,6 +300,11 @@ export function shouldRetainSetupFragment(
   standalone: boolean | undefined,
 ): boolean {
   return standalone === false && quickSetupConfig(locationValue) !== null;
+}
+
+export function isIosBrowserTab(standalone: boolean | undefined, userAgent: string, maxTouchPoints = 0): boolean {
+  return standalone === false && (/\b(?:iPhone|iPad|iPod)\b/iu.test(userAgent)
+    || (/\bMacintosh\b/iu.test(userAgent) && maxTouchPoints > 1));
 }
 
 /**
@@ -316,10 +318,8 @@ export function shouldDeferPairingConnection(
   userAgent: string,
   maxTouchPoints = 0,
 ): boolean {
-  if (standalone !== false) return false;
-  if (!quickSetupInvitation(locationValue) && !quickSetupConfig(locationValue)?.token) return false;
-  return /\b(?:iPhone|iPad|iPod)\b/iu.test(userAgent)
-    || (/\bMacintosh\b/iu.test(userAgent) && maxTouchPoints > 1);
+  return isIosBrowserTab(standalone, userAgent, maxTouchPoints)
+    && Boolean(quickSetupInvitation(locationValue) || quickSetupConfig(locationValue)?.token);
 }
 
 export function importQuickSetup(

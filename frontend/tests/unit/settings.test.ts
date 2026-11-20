@@ -35,6 +35,16 @@ vi.mock('$lib/transports', async (importOriginal) => {
 });
 
 describe('settings relay status', () => {
+  it('offers QR scanning above the manual form with and without relays', async () => {
+    render(SettingsView);
+    const scan = screen.getByRole('button', { name: 'Scan QR Code' });
+    expect(scan).toBeVisible();
+    expect(scan.nextElementSibling).toBe(screen.getByLabelText('Relay Name').closest('form'));
+    relayStore.relayConfigs.set([]);
+    expect(await screen.findByText('No relays configured.')).toBeVisible();
+    expect(scan).toBeVisible();
+  });
+
   it('exposes Pi Integration per connected relay with reader access kept read-only', async () => {
     const credential = vi.spyOn(relayStore, 'deviceCredential').mockReturnValue({ role: 'reader', deviceId: 'device' } as never);
     const send = vi.spyOn(relayStore, 'sendCommand').mockResolvedValue({ type: 'command_result', request_id: 'pi-setting', ok: true,

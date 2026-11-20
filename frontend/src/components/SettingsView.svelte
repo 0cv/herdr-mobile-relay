@@ -5,6 +5,7 @@
   import PiIntegration from '$components/PiIntegration.svelte';
   import NotificationSettings from '$components/NotificationSettings.svelte';
   import PairDeferredRelay from '$components/PairDeferredRelay.svelte';
+  import ScanSetupCode from '$components/ScanSetupCode.svelte';
   import AppDialog from '$components/ui/AppDialog.svelte';
   import AppSwitch from '$components/ui/AppSwitch.svelte';
   import Button from '$components/ui/Button.svelte';
@@ -505,6 +506,7 @@
 
   <Card>
     <h3>Relays</h3>
+    <ScanSetupCode />
     <form class="form-stack" onsubmit={addRelay}>
       <label for="relay-label">Relay Name</label>
       <input id="relay-label" bind:value={relayLabel} placeholder="Fedora" />

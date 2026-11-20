@@ -4,6 +4,7 @@
   import { onMount } from 'svelte';
   import AgentLogo, { agentDisplayName, hasAgentLogo } from '$components/AgentLogo.svelte';
   import PairDeferredRelay from '$components/PairDeferredRelay.svelte';
+  import ScanSetupCode from '$components/ScanSetupCode.svelte';
   import Button from '$components/ui/Button.svelte';
   import {
     agentLastActiveAt,
@@ -612,8 +613,9 @@
       <ol>
         <li>Run a relay on each computer.</li>
         <li>Give each computer its own <code>wss://</code> URL.</li>
-        <li>Open Settings and add each relay.</li>
+        <li>Use each computer’s setup QR code or add the relay in Settings.</li>
       </ol>
+      <div><ScanSetupCode /></div>
     </div>
   {:else if !agents.length && startingRelays.length}
     <div class="empty-state" role="status">Loading agents…</div>
