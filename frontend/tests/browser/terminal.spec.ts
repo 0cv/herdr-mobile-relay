@@ -361,11 +361,12 @@ test('keeps wide controller panes aligned and horizontally scrollable', async ({
 test('wraps wide terminal output for a paired reader credential', async ({ page }) => {
   // A reader never leases, even opted in on a relay that supports it.
   await page.addInitScript(() => localStorage.setItem('herdr_terminal_resize_session', 'true'));
-  await connectFedora(page, { capabilities: ['attention_classification', 'pane_size_opt_in'] });
+  const capabilities = ['attention_classification', 'pane_size_opt_in', 'paging_keys'];
+  await connectFedora(page, { capabilities });
   await saveDeviceCredential(page, { id: 'credential-reader', deviceId: 'device-reader', secret: 'R'.repeat(43), role: 'reader' });
   // Push a fresh connection snapshot so App's derived reader-role state observes
   // the persisted credential before the agent view is rendered.
-  await handshake(page, 0, { capabilities: ['attention_classification', 'pane_size_opt_in'] });
+  await handshake(page, 0, { capabilities });
   await server(page, 0, {
     type: 'agents',
     agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Reader pane', agent: 'claude' }],
@@ -380,6 +381,7 @@ test('wraps wide terminal output for a paired reader credential', async ({ page 
   const readOnlyFeedback = reader.getByRole('status').filter({ hasText: 'Reader access is read only' });
   await expect(readOnlyFeedback).toContainText('Reader access is read only');
   await expect(readOnlyFeedback).toBeVisible();
+  await expect(reader.getByRole('button', { name: 'Arrow keys' })).toBeDisabled();
   await expect(page.getByRole('combobox', { name: 'Prompt' })).toBeDisabled();
   const terminal = page.getByRole('log');
   const geometry = await terminal.evaluate((element) => {
@@ -552,6 +554,51 @@ test('keeps the terminal key row compact on touch screens', async ({ page }) => 
   await expect(esc).toBeVisible();
   expect(await page.evaluate(() => matchMedia('(pointer: coarse)').matches)).toBe(true);
   expect((await esc.boundingBox())!.height).toBeLessThan(44);
+});
+
+test('fits and sends paging keys in the arrow menu at 320px', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 740 });
+  await openAgent(page, { pane_id: 'w1:p1', status: 'idle', project: 'Paging', agent: 'claude' }, { capabilities: [] });
+  const arrows = page.getByRole('button', { name: 'Arrow keys' });
+  const menu = page.getByRole('group', { name: 'Navigation keys' });
+  const row = page.locator('.term-keys');
+  const controls = () => row.getByRole('button').evaluateAll((buttons) =>
+    buttons.map((button) => button.getAttribute('aria-label') ?? button.textContent?.trim()));
+  await expect(arrows).toBeVisible();
+  const controlsBefore = await controls();
+
+  await arrows.click();
+  await expect(menu).toBeVisible();
+  const before = (await menu.boundingBox())!;
+  await handshake(page, 0, { capabilities: ['paging_keys'] });
+  for (const name of ['Home', 'Page up', 'End', 'Page down']) {
+    const button = menu.getByRole('button', { name, exact: true });
+    await expect(button).toBeVisible();
+    expect(await button.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  }
+  const after = (await menu.boundingBox())!;
+  expect({ width: after.width, height: after.height }).toEqual({ width: before.width, height: before.height });
+  await expect(menu).toBeInViewport({ ratio: 1 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+
+  await arrows.click();
+  await expect(menu).toBeHidden();
+  expect(await controls()).toEqual(controlsBefore);
+  expect(await row.evaluate((element) => {
+    const rowRect = element.getBoundingClientRect();
+    const buttons = [...element.querySelectorAll('button')].map((button) => button.getBoundingClientRect());
+    return buttons.every((rect) => rect.top === buttons[0].top &&
+      rect.left >= rowRect.left && rect.right <= rowRect.right && rect.top >= rowRect.top && rect.bottom <= rowRect.bottom);
+  })).toBe(true);
+
+  const ctrl = page.getByRole('button', { name: 'Ctrl', exact: true });
+  await ctrl.click();
+  await arrows.click();
+  await menu.getByRole('button', { name: 'End', exact: true }).click();
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'send_keys').map((command) => command.keys)).toEqual([['ctrl+end']]);
+  await expect(ctrl).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByRole('textbox', { name: 'Modifier shortcut character' })).toBeFocused();
 });
 
 test('refreshes agents on return home and preserves shared terminal behavior', async ({ page }) => {

@@ -7,6 +7,8 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Use Home, End, Page Up and Page Down from the phone's Arrow keys menu to
+  move through terminal output. Update the relay to see the new keys.
 - Pin supported live questions and approvals even when Herdr reports the agent
   as idle, so the phone can show the choices instead of announcing a completion
   while the agent still needs an answer.

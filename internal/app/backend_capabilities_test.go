@@ -32,7 +32,7 @@ func TestTUIBackendCapabilities(t *testing.T) {
 		"directory_browser", "workspace_management", "worktree_management",
 		"self_update", "structured_questions", "slash_commands",
 		"conversation_history", "conversation_activity", "workspace_inspection",
-		"semantic_input", "manual_terminal_input", "secret_input", "invitation_qr",
+		"semantic_input", "manual_terminal_input", "secret_input", "invitation_qr", "paging_keys",
 		"tab_rename", "agent_launch", "workspace_rename", "workspace_reorder",
 	}
 	for _, capability := range s.effectiveCapabilitiesFor(herdr.ServerStatus{}) {

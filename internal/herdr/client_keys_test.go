@@ -15,16 +15,19 @@ func TestSendKeysEncodesTerminalChords(t *testing.T) {
 		keys []string
 		want []string
 	}{
-		{
-			name: "Ctrl letter",
-			keys: []string{"Ctrl+C"},
-			want: []string{"pane", "send-keys", "pane-1", "ctrl+c"},
-		},
-		{
-			name: "Shift Tab",
-			keys: []string{"Shift+Tab"},
-			want: []string{"pane", "send-text", "pane-1", shiftTabSequence},
-		},
+		{"Ctrl letter", []string{"Ctrl+C"}, []string{"pane", "send-keys", "pane-1", "ctrl+c"}},
+		{"Shift Tab", []string{"Shift+Tab"}, []string{"pane", "send-text", "pane-1", shiftTabSequence}},
+		{"PageUp", []string{"PageUp"}, []string{"pane", "send-text", "pane-1", "\x1b[5~"}},
+		{"PageDown", []string{"PageDown"}, []string{"pane", "send-text", "pane-1", "\x1b[6~"}},
+		{"Home", []string{"Home"}, []string{"pane", "send-text", "pane-1", "\x1b[H"}},
+		{"End", []string{"End"}, []string{"pane", "send-text", "pane-1", "\x1b[F"}},
+		{"Shift PageUp", []string{"shift+pageup"}, []string{"pane", "send-text", "pane-1", "\x1b[5;2~"}},
+		{"Alt PageDown", []string{"alt+pagedown"}, []string{"pane", "send-text", "pane-1", "\x1b[6;3~"}},
+		{"Ctrl End", []string{"ctrl+End"}, []string{"pane", "send-text", "pane-1", "\x1b[1;5F"}},
+		{"Ctrl Alt Shift Home", []string{"ctrl+alt+shift+home"}, []string{"pane", "send-text", "pane-1", "\x1b[1;8H"}},
+		{"Invalid modifier", []string{"meta+home"}, []string{"pane", "send-keys", "pane-1", "meta+home"}},
+		{"Duplicate modifier", []string{"ctrl+ctrl+end"}, []string{"pane", "send-keys", "pane-1", "ctrl+ctrl+end"}},
+		{"Multiple keys", []string{"PageUp", "Enter"}, []string{"pane", "send-keys", "pane-1", "PageUp", "Enter"}},
 	}
 
 	for _, tt := range tests {

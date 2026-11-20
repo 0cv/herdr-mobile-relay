@@ -691,8 +691,13 @@ func (c *Client) Close() error {
 }
 
 func (c *Client) SendKeys(ctx context.Context, paneID string, keys []string) error {
-	if len(keys) == 1 && strings.EqualFold(keys[0], "shift+tab") {
-		return c.SendText(ctx, paneID, shiftTabSequence)
+	if len(keys) == 1 {
+		if strings.EqualFold(keys[0], "shift+tab") {
+			return c.SendText(ctx, paneID, shiftTabSequence)
+		}
+		if sequence := pagingKeySequence(keys[0]); sequence != "" {
+			return c.SendText(ctx, paneID, sequence)
+		}
 	}
 	args := make([]string, 0, 3+len(keys))
 	args = append(args, "pane", "send-keys", paneID)
@@ -701,6 +706,31 @@ func (c *Client) SendKeys(ctx context.Context, paneID string, keys []string) err
 	}
 	_, err := c.runCommand(ctx, args...)
 	return err
+}
+
+func pagingKeySequence(key string) string {
+	base, modifiers, ok := parseTerminalChord(key)
+	if !ok {
+		return ""
+	}
+	var parameter, final string
+	switch base {
+	case "pageup":
+		parameter, final = "5", "~"
+	case "pagedown":
+		parameter, final = "6", "~"
+	case "home":
+		final = "H"
+	case "end":
+		final = "F"
+	default:
+		return ""
+	}
+
+	if modifiers != 0 {
+		parameter = cmp.Or(parameter, "1") + ";" + strconv.Itoa(1+modifiers)
+	}
+	return "\x1b[" + parameter + final
 }
 
 func normalizeTerminalKey(key string) string {

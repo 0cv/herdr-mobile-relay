@@ -599,8 +599,11 @@ one-tap actions through the same ordered key path. Detected actions can be
 dismissed and never replace verified approval or structured-question controls.
 
 The terminal controls send **Esc**, **Tab** (`⇥`), **Enter**, arrow keys, and
-**F1**–**F12** behind the **F keys** row. **Shift** (`⇧`), **Ctrl** (`^`), and
-**Alt** can be combined, remain armed for repeated input, and apply to typed
+**F1**–**F12** from the **F keys** menu. The **Arrow keys** menu also offers
+**Home**, **End**, **Page Up** and **Page Down** on both Herdr TUI and herdr-core
+once you update the relay. On the Herdr TUI relay, some full-screen programs may
+ignore **Home** and **End** without a modifier. **Shift** (`⇧`), **Ctrl** (`^`),
+and **Alt** can be combined, remain armed for repeated input, and apply to typed
 characters or any available terminal key — arm `^` and type `c` to interrupt.
 A live status confirms the exact chord. Toggle the modifiers off or move focus
 to the composer to disarm them.

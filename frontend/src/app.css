@@ -754,6 +754,7 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .key-caret { display: block; font-size: 1.25rem; line-height: 1; transform: translateY(.18em); }
 .arrow-popup { background: var(--card); border: 1px solid var(--border); border-radius: .7rem; bottom: 2.8rem; display: grid; gap: .2rem; grid-template-columns: repeat(3, 2.3rem); padding: .35rem; position: absolute; right: 0; z-index: 10; }
 .arrow-popup button { background: var(--secondary); border: 0; border-radius: .4rem; color: var(--foreground); height: 2.3rem; }
+.arrow-popup .paging-key { font-size: .62rem; padding: 0; }
 .fkey-popup { background: var(--card); border: 1px solid var(--border); border-radius: .7rem; bottom: 2.8rem; display: grid; gap: .2rem; grid-template-columns: repeat(4, 2.6rem); padding: .35rem; position: absolute; right: 0; z-index: 10; }
 .fkey-popup button { background: var(--secondary); border: 0; border-radius: .4rem; color: var(--foreground); font-size: .72rem; height: 2.3rem; }
 .secret-prompt { border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: .4rem; padding: .55rem .75rem; }
