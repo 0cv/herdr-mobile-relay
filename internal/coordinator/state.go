@@ -30,6 +30,12 @@ type AgentState struct {
 	Agent                        string                 `json:"agent"`
 	Name                         string                 `json:"name"`
 	Status                       string                 `json:"status"`
+	ScreenAttention              string                 `json:"screen_attention,omitempty"`
+	RawStatus                    string                 `json:"-"`
+	ProbeEnabled                 bool                   `json:"-"`
+	ProbePending                 bool                   `json:"-"`
+	StrictAttention              bool                   `json:"-"`
+	LiveIdentity                 string                 `json:"-"`
 	Focused                      bool                   `json:"_focused"`
 	Cwd                          string                 `json:"cwd"`
 	Project                      string                 `json:"project"`
@@ -64,6 +70,10 @@ type AgentState struct {
 
 type paneRecord struct {
 	agent            *AgentState
+	rawStatus        string
+	rawRevision      int64
+	probe            idleProbeState
+	blockedRevision  int64
 	revision         int64
 	contentRev       int64
 	attentionRev     int64
@@ -96,6 +106,7 @@ type State struct {
 	lastSuccessAt      time.Time
 	logger             *slog.Logger
 	onTransition       TransitionCallback
+	idleProbeEnabled   bool
 	onInventory        func([]*AgentState)
 	notifyMu           sync.Mutex
 	pendingInventory   []*AgentState
@@ -304,6 +315,30 @@ func (s *State) BumpGeneration(paneID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.generation[paneID]++
+	if rec := s.panes[paneID]; rec != nil && rec.agent.ProbeEnabled {
+		s.topologyGen++
+		s.revCounter++
+		rec.revision = s.revCounter
+		rec.contentRev++
+		rec.attentionRev++
+		rec.probe = idleProbeState{}
+		rec.completion = completionState{}
+		rec.agent.Status = rec.rawStatus
+		rec.agent.ScreenAttention = ""
+		rec.agent.ProbePending = false
+		clearBlockedDetails(rec.agent)
+		delete(s.customAnswers, paneID)
+	}
+}
+
+func (s *State) BlockedTransitionAgent(paneID string, revision int64) (*AgentState, int64, int64, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rec := s.panes[paneID]
+	if rec == nil || rec.blockedRevision != revision || rec.agent.Status != "blocked" || rec.agent.ProbePending || rec.agent.BlockedEventID == "" {
+		return nil, 0, 0, false
+	}
+	return s.cloneAgentLocked(rec), rec.contentRev, rec.attentionRev, true
 }
 
 func (s *State) TransitionCurrent(paneID, status string, revision int64) bool {
@@ -363,7 +398,7 @@ func (s *State) MarkTopologyChanged() {
 // revision, so the fresh poll wins cleanly.
 func (s *State) CommitInventory(agents []*AgentState, baseRev int64) {
 	s.mu.Lock()
-	s.commitInventoryLocked(agents, baseRev)
+	s.commitInventoryLocked(agents, baseRev, false)
 	s.mu.Unlock()
 	s.notifyInventory()
 }
@@ -400,32 +435,10 @@ func (s *State) CommitTopology(
 	if workspaceChanged {
 		s.topologyGen++
 	}
-	s.commitTopologyLocked(agents, baseRev)
+	s.commitInventoryLocked(agents, baseRev, true)
 	s.mu.Unlock()
 	s.notifyInventory()
 	return workspaceChanged
-}
-
-func (s *State) commitTopologyLocked(agents []*AgentState, baseRev int64) {
-	topology := make([]*AgentState, len(agents))
-	for index, incoming := range agents {
-		if incoming == nil {
-			continue
-		}
-		rec := s.panes[incoming.PaneID]
-		if rec == nil || paneSessionReplaced(rec.agent, incoming) {
-			topology[index] = incoming
-			continue
-		}
-		existing := rec.agent
-		cp := *incoming
-		cp.Status = existing.Status
-		if existing.Status == "blocked" {
-			copyBlockedDetails(&cp, existing)
-		}
-		topology[index] = &cp
-	}
-	s.commitInventoryLocked(topology, baseRev)
 }
 
 // CommitPoll validates its token and commits both inventories while holding one
@@ -443,19 +456,19 @@ func (s *State) CommitPoll(
 		return false, false
 	}
 	workspaceChanged = s.commitWorkspacesLocked(workspaces)
-	s.commitInventoryLocked(agents, token.BaseRevision)
+	s.commitInventoryLocked(agents, token.BaseRevision, false)
 	s.mu.Unlock()
 	s.notifyInventory()
 	return workspaceChanged, true
 }
 
-func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
+func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64, topologyOnly bool) {
 	initialSnapshot := !s.inventoryReady
 	topologyChanged := len(agents) != len(s.panes)
 	if !topologyChanged {
 		for _, agent := range agents {
 			rec := s.panes[agent.PaneID]
-			if rec == nil || paneSessionReplaced(rec.agent, agent) {
+			if rec == nil || paneSessionReplaced(rec.agent, agent) || s.probeSessionChanged(rec.agent, agent) {
 				topologyChanged = true
 				break
 			}
@@ -497,9 +510,15 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 		}
 		if replaced {
 			rec.sessionDiscovery = nil
-			topologyChanged = true
 			s.generation[incoming.PaneID]++
+		}
+		if replaced || s.probeSessionChanged(existing, incoming) {
 			rec.completion = completionState{}
+			rec.probe = idleProbeState{}
+			rec.blockedRevision = 0
+			if s.idleProbeEnabled && question.Supports(incoming.Agent) {
+				delete(s.customAnswers, incoming.PaneID)
+			}
 			existing = nil
 			exists = false
 		}
@@ -516,13 +535,16 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 			s.generation[incoming.PaneID]++
 		}
 
-		// If an event landed during this poll (revision advanced past baseRev),
-		// preserve the event's authoritative status.
-		if exists && rec.revision > baseRev && incoming.Status != existing.Status {
-			cp.Status = existing.Status
-			if existing.Status == "blocked" {
-				copyBlockedDetails(&cp, existing)
-			}
+		if rec == nil {
+			rec = &paneRecord{}
+			s.panes[incoming.PaneID] = rec
+		}
+		preserveRaw := exists && (topologyOnly || rec.rawRevision > baseRev && cp.Status != rec.rawStatus)
+		if preserveRaw {
+			cp.Status = rec.rawStatus
+			copyBlockedDetails(&cp, existing)
+		} else {
+			rec.rawRevision = s.revCounter
 		}
 
 		pendingTimestamp := false
@@ -536,6 +558,7 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 			delete(s.pendingEvents, incoming.PaneID)
 		}
 
+		s.applyRawStatusLocked(rec, &cp, existing, !preserveRaw && !pendingTimestamp)
 		if !exists {
 			switch {
 			case pendingTimestamp:
@@ -560,13 +583,9 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 		s.applyBlockedCycleLocked(&cp, existing)
 		attentionChanged := !blockedDetailsEqual(existing, &cp)
 
-		if rec == nil {
-			rec = &paneRecord{}
-			s.panes[incoming.PaneID] = rec
-		}
 		if !exists || existing.Status != cp.Status || existing.Name != cp.Name || existing.Cwd != cp.Cwd ||
 			existing.Agent != cp.Agent || existing.ActivitySeq != cp.ActivitySeq ||
-			attentionChanged {
+			(cp.ProbeEnabled && existing.PaneRevision != cp.PaneRevision) || attentionChanged {
 			rec.contentRev++
 		}
 		if attentionChanged {
@@ -596,7 +615,8 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 		}
 		if prev == "blocked" && cp.Status == "blocked" &&
 			(previousAttention != cp.AttentionKind ||
-				attentionChanged && cp.AttentionKind == question.AttentionApproval) {
+				attentionChanged && cp.AttentionKind == question.AttentionApproval &&
+					(!cp.StrictAttention || cp.BlockedEventID != existing.BlockedEventID)) {
 			s.fireTransition(cp.PaneID, cp.Status)
 		}
 	}
@@ -620,6 +640,10 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 	if s.onInventory != nil {
 		s.pendingInventory = s.snapshotLocked()
 	}
+}
+
+func (s *State) probeSessionChanged(existing, incoming *AgentState) bool {
+	return s.idleProbeEnabled && existing != nil && existing.SessionID != incoming.SessionID && question.Supports(incoming.Agent)
 }
 
 func paneSessionReplaced(existing, incoming *AgentState) bool {
@@ -684,36 +708,34 @@ func (s *State) CommitEventForSession(
 	}
 	s.revCounter++
 	rec.revision = s.revCounter
+	rec.rawRevision = s.revCounter
 
-	a := rec.agent
-	before := *a
-	before.Options = append([]string(nil), a.Options...)
-	prev := a.Status
-	previousAttention := a.AttentionKind
+	before := rec.agent
+	next := *before
+	a := &next
+	prev := before.Status
+	previousAttention := before.AttentionKind
 	a.Status = status
+	s.applyRawStatusLocked(rec, a, before, false)
 	a.UpdatedAt = updatedAt
 	if updatedAt > a.LastActiveAt {
 		a.LastActiveAt = updatedAt
 	} else if updatedAt <= 0 {
 		a.LastActiveAt = time.Now().UnixMilli()
 	}
-	if prev != status {
-		rec.contentRev++
-	}
-	if status == "blocked" {
-		if prev != "blocked" || a.BlockedEventID == "" {
-			clearBlockedDetails(a)
-			a.BlockedEventID = s.newBlockedEventIDLocked()
-			a.AttentionKind = question.AttentionUnknown
-		}
-	} else {
+	if a.Status == "blocked" && prev != "blocked" {
 		clearBlockedDetails(a)
 	}
-	if !blockedDetailsEqual(&before, a) {
+	s.applyBlockedCycleLocked(a, before)
+	if prev != a.Status || !blockedDetailsEqual(before, a) {
+		rec.contentRev++
+	}
+	if !blockedDetailsEqual(before, a) {
 		rec.attentionRev++
 	}
-	s.registerTransition(paneID, prev, status, previousAttention)
-	if !preservesChatCompletion(prev, status, previousAttention) {
+	rec.agent = a
+	s.registerTransition(paneID, prev, a.Status, previousAttention)
+	if !preservesChatCompletion(prev, a.Status, previousAttention) {
 		s.syncAttentionCompletionLocked(paneID, previousAttention, a.AttentionKind)
 	}
 	if s.syncTriageLocked(a) {
@@ -768,6 +790,8 @@ func clearBlockedDetails(agent *AgentState) {
 	agent.ApprovalFingerprint = ""
 	agent.Interaction = nil
 	agent.InteractionID = ""
+	agent.LiveIdentity = ""
+	agent.StrictAttention = false
 }
 
 func copyBlockedDetails(destination, source *AgentState) {
@@ -779,13 +803,18 @@ func copyBlockedDetails(destination, source *AgentState) {
 	destination.ApprovalFingerprint = source.ApprovalFingerprint
 	destination.Interaction = source.Interaction
 	destination.InteractionID = source.InteractionID
+	destination.LiveIdentity = source.LiveIdentity
+	destination.StrictAttention = source.StrictAttention
 }
 
 func (s *State) fireTransition(paneID, status string) {
+	rec := s.panes[paneID]
+	if status == "blocked" {
+		rec.blockedRevision = rec.revision
+	}
 	if s.onTransition == nil {
 		return
 	}
-	rec := s.panes[paneID]
 	s.onTransition(paneID, rec.agent.Agent, rec.agent.Project, status, rec.revision)
 }
 
@@ -871,7 +900,7 @@ func (s *State) CommitAttentionClassification(
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rec := s.panes[paneID]
-	if rec == nil || rec.agent.Status != "blocked" ||
+	if rec == nil || rec.agent.Status != "blocked" || rec.agent.ProbePending || rec.agent.StrictAttention ||
 		rec.agent.BlockedEventID != eventID ||
 		s.generation[paneID] != generation ||
 		rec.contentRev != contentRevision {
@@ -882,6 +911,7 @@ func (s *State) CommitAttentionClassification(
 		classification.Kind = question.AttentionUnknown
 	}
 	previous := agent.AttentionKind
+	agent.LiveIdentity = classification.LiveIdentity
 	changed := applyAttentionClassification(agent, classification)
 	if changed {
 		s.revCounter++
@@ -890,9 +920,7 @@ func (s *State) CommitAttentionClassification(
 		rec.attentionRev++
 		s.syncAttentionCompletionLocked(paneID, previous, agent.AttentionKind)
 	}
-	copy := *agent
-	copy.StateRevision = rec.revision
-	return &copy, true
+	return s.cloneAgentLocked(rec), true
 }
 
 func applyAttentionClassification(
@@ -998,9 +1026,7 @@ func (s *State) Snapshot() []*AgentState {
 func (s *State) snapshotLocked() []*AgentState {
 	result := make([]*AgentState, 0, len(s.panes))
 	for _, rec := range s.panes {
-		cp := rec.agent.Clone()
-		cp.StateRevision = rec.revision
-		cp.Generation = s.generation[cp.PaneID]
+		cp := s.cloneAgentLocked(rec)
 		if doneStatuses[cp.Status] && rec.completion.ackDone {
 			cp.Status = "idle"
 		}
@@ -1114,10 +1140,14 @@ func (s *State) Agent(paneID string) (*AgentState, bool) {
 	if rec == nil {
 		return nil, false
 	}
+	return s.cloneAgentLocked(rec), true
+}
+
+func (s *State) cloneAgentLocked(rec *paneRecord) *AgentState {
 	copy := rec.agent.Clone()
 	copy.StateRevision = rec.revision
-	copy.Generation = s.generation[paneID]
-	return copy, true
+	copy.Generation = s.generation[copy.PaneID]
+	return copy
 }
 
 func (s *State) TopologyGeneration() int64 {
