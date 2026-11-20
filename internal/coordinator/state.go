@@ -65,6 +65,7 @@ type AgentState struct {
 
 type paneRecord struct {
 	agent            *AgentState
+	workingRevision  int64
 	revision         int64
 	contentRev       int64
 	attentionRev     int64
@@ -305,6 +306,10 @@ func (s *State) BumpGeneration(paneID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.generation[paneID]++
+	rec := s.panes[paneID]
+	if rec != nil {
+		rec.workingRevision = 0
+	}
 }
 
 func (s *State) TransitionCurrent(paneID, status string, revision int64) bool {
@@ -312,6 +317,13 @@ func (s *State) TransitionCurrent(paneID, status string, revision int64) bool {
 	defer s.mu.RUnlock()
 	rec := s.panes[paneID]
 	return rec != nil && rec.agent.Status == status && rec.revision == revision
+}
+
+func (s *State) WorkingTransitionCurrent(paneID string, revision int64) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rec := s.panes[paneID]
+	return rec != nil && rec.agent.Status == "working" && revision != 0 && rec.workingRevision == revision
 }
 
 func (s *State) BlockedTransitionCurrent(paneID, eventID string, generation int64) bool {
@@ -355,6 +367,15 @@ func (s *State) WaitingRequestCurrent(target protocol.TargetRef, eventID string,
 		rec.attentionRev == revision &&
 		rec.agent.AttentionKind != question.AttentionChat &&
 		(rec.agent.AttentionKind == question.AttentionQuestion) == isQuestion
+}
+
+func (s *State) CompletionRevision(paneID string) int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if rec := s.panes[paneID]; rec != nil {
+		return rec.completion.completionRev
+	}
+	return 0
 }
 
 func (s *State) CompletionCurrent(paneID string, revision int64) bool {
@@ -511,8 +532,10 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 				}
 			}
 			s.generation[incoming.PaneID]++
+			rec.workingRevision = 0
 		}
 		if replaced {
+			rec.workingRevision = 0
 			rec.sessionDiscovery = nil
 			topologyChanged = true
 			s.generation[incoming.PaneID]++
@@ -799,10 +822,13 @@ func copyBlockedDetails(destination, source *AgentState) {
 }
 
 func (s *State) fireTransition(paneID, status string) {
+	rec := s.panes[paneID]
+	if status == "working" {
+		rec.workingRevision = rec.revision
+	}
 	if s.onTransition == nil {
 		return
 	}
-	rec := s.panes[paneID]
 	s.onTransition(paneID, rec.agent.Agent, rec.agent.Project, status, rec.revision)
 }
 

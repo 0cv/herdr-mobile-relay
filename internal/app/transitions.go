@@ -81,7 +81,7 @@ func (s *Server) transitionWorking(
 	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
 
-	s.applyPanePush(ctx, paneID, nil, func() bool { return s.state.TransitionCurrent(paneID, "working", revision) })
+	s.applyPanePush(ctx, paneID, nil, func() bool { return s.state.WorkingTransitionCurrent(paneID, revision) })
 	summary := agent + " started working"
 	if agent == "" {
 		summary = "Agent started working"
@@ -156,12 +156,16 @@ func (s *Server) transitionBlocked(
 			classifiedAttentionRevision,
 		)
 	}
-	if !classifiedCurrent() {
+	if agentState.AttentionKind == question.AttentionChat {
+		completionRevision := s.state.CompletionRevision(paneID)
+		if !classifiedCurrent() {
+			return
+		}
+		s.broadcastBlockedAttention(agentState)
+		s.handleChatCompletion(ctx, agentState, completionRevision)
 		return
 	}
-	if agentState.AttentionKind == question.AttentionChat {
-		s.broadcastBlockedAttention(agentState)
-		s.handleChatCompletion(ctx, agentState)
+	if !classifiedCurrent() {
 		return
 	}
 
@@ -475,11 +479,11 @@ func (s *Server) broadcastBlockedAttention(agent *coordinator.AgentState) {
 func (s *Server) handleChatCompletion(
 	ctx context.Context,
 	agent *coordinator.AgentState,
+	revision int64,
 ) {
-	if agent == nil {
+	if agent == nil || revision == 0 {
 		return
 	}
-	revision := agent.StateRevision
 	current := func() bool {
 		return s.state.CompletionCurrent(agent.PaneID, revision)
 	}
