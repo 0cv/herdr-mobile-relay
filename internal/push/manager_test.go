@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -281,6 +283,168 @@ func TestSubscriptionsPersist(t *testing.T) {
 		t.Error("subscriptions should persist across restarts")
 	}
 }
+func TestWaitingTopic(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "signer.key")
+	secret, err := hex.DecodeString("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, secret, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	signer, err := loadOrCreateReferenceSigner(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := PushEventKey{DeviceID: "device-1", ServerSessionID: "primary", PaneID: "pane-1", Category: CategoryAttention}
+	topic := signer.waitingTopic(key)
+	if topic != "bnVaZyJfb4BZzSyx372-lKi0q9qpIxQz" || !regexp.MustCompile(`^[A-Za-z0-9_-]{32}$`).MatchString(topic) {
+		t.Fatalf("topic = %q", topic)
+	}
+	revision := key
+	revision.EventID = "another-event"
+	revision.InteractionRevision++
+	revision.Category = CategoryQuestion
+	if signer.waitingTopic(revision) != topic {
+		t.Fatal("event, revision or waiting category changed the topic")
+	}
+	device, session, pane := key, key, key
+	device.DeviceID = "another-device"
+	session.ServerSessionID = "another-session"
+	pane.PaneID = "another-pane"
+	for _, different := range []PushEventKey{device, session, pane} {
+		if signer.waitingTopic(different) == topic {
+			t.Fatalf("scope change did not change topic: %#v", different)
+		}
+	}
+	other := &ReferenceSigner{key: make([]byte, 32)}
+	if other.waitingTopic(key) == topic {
+		t.Fatal("different signer did not change the topic")
+	}
+	recovered, err := loadOrCreateReferenceSigner(path)
+	if err != nil || recovered.waitingTopic(key) != topic {
+		t.Fatalf("reloaded signer changed topic: %v", err)
+	}
+}
+
+type pushTestTransport func(*http.Request) (*http.Response, error)
+
+func (f pushTestTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+func TestWaitingDeliveryHTTPHeaders(t *testing.T) {
+	manager, dir := newDeliveringManager(t, endpointOne)
+	policy := manager.Policy("device-1", "en")
+	for _, category := range []Category{CategoryFinished, CategoryBrief, CategoryUpdate, CategoryTest} {
+		policy.Categories[category] = true
+	}
+	if err := manager.SetPolicy(policy); err != nil {
+		t.Fatal(err)
+	}
+	sub := manager.Subscriptions()[0]
+	keyPair, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sub.Keys.P256dh = base64.RawURLEncoding.EncodeToString(elliptic.Marshal(elliptic.P256(), keyPair.X, keyPair.Y))
+	sub.Keys.Auth = base64.RawURLEncoding.EncodeToString(make([]byte, 16))
+	if err := manager.Subscribe(sub); err != nil {
+		t.Fatal(err)
+	}
+
+	var requests []*http.Request
+	client := &http.Client{Transport: pushTestTransport(func(r *http.Request) (*http.Response, error) {
+		requests = append(requests, r.Clone(r.Context()))
+		return &http.Response{StatusCode: http.StatusCreated, Body: http.NoBody}, nil
+	})}
+	now := deliveryNow.Add(10 * time.Second)
+	setup := func(m *Manager) {
+		m.now = func() time.Time { return now }
+		m.httpClient = client
+	}
+	setup(manager)
+	check := func(ttl, topic string, endpoints ...string) {
+		t.Helper()
+		if _, err := manager.RunOnce(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		if len(requests) != len(endpoints) {
+			t.Fatalf("HTTP calls = %d, want %d", len(requests), len(endpoints))
+		}
+		seen := make(map[string]bool)
+		for _, r := range requests {
+			seen[r.URL.String()] = true
+			if r.Header.Get("TTL") != ttl || r.Header.Get("Topic") != topic || r.Header.Values("Urgency") != nil {
+				t.Fatalf("TTL/Topic/Urgency = %q/%q/%q, want %q/%q/unset",
+					r.Header.Get("TTL"), r.Header.Get("Topic"), r.Header.Get("Urgency"), ttl, topic)
+			}
+		}
+		for _, endpoint := range endpoints {
+			if !seen[endpoint] {
+				t.Fatalf("missing HTTP call to %s", endpoint)
+			}
+		}
+		requests = nil
+	}
+
+	a := exactKey("approval")
+	a.Category = CategoryAttention
+	applyWaiting(t, manager, a, deliveryNow)
+	second := sub
+	second.Endpoint = endpointTwo
+	if err := manager.Subscribe(second); err != nil {
+		t.Fatal(err)
+	}
+	entry := manager.queue.state.Entries[deliveryID(a, sub.Endpoint)]
+	if _, err := manager.queue.enqueue(entry.Event, second, entry.DueAt); err != nil {
+		t.Fatal(err)
+	}
+	topic := manager.signer.waitingTopic(a)
+	check("86390", topic, sub.Endpoint, second.Endpoint)
+	for range 2 {
+		if err := manager.Resolve(t.Context(), a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	check("300", topic, sub.Endpoint, second.Endpoint)
+	check("", "")
+
+	b := a
+	b.Category, b.EventID = CategoryQuestion, "question"
+	applyWaiting(t, manager, b, deliveryNow)
+	check("86390", topic, second.Endpoint)
+	manager, err = NewManager(dir, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	setup(manager)
+	if err := manager.Reconcile(t.Context(), func(PushEventKey) bool { return false }); err != nil {
+		t.Fatal(err)
+	}
+	check("300", topic, second.Endpoint)
+	b.InteractionRevision++
+	applyWaiting(t, manager, b, now)
+	check("86400", topic, second.Endpoint)
+
+	unsent := exactKey("unsent")
+	unsent.PaneID = "other-pane"
+	applyWaiting(t, manager, unsent, now)
+	if err := manager.Resolve(t.Context(), unsent); err != nil {
+		t.Fatal(err)
+	}
+	check("", "")
+
+	for _, category := range []Category{CategoryFinished, CategoryBrief, CategoryUpdate, CategoryTest} {
+		key := exactKey(string(category))
+		key.Category = category
+		if result, err := manager.Publish(t.Context(), PublishRequest{Key: key, Preview: PreviewHidden}); err != nil || result.Queued != 1 {
+			t.Fatalf("publish %s = %#v, %v", category, result, err)
+		}
+		check("300", "", second.Endpoint)
+	}
+}
+
 func TestSendOneUsesRoutableVAPIDSubject(t *testing.T) {
 	var authorization string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -311,7 +475,7 @@ func TestSendOneUsesRoutableVAPIDSubject(t *testing.T) {
 	))
 	sub.Keys.Auth = base64.RawURLEncoding.EncodeToString(authSecret)
 
-	if err := manager.sendOne(t.Context(), sub, []byte("test")); err != nil {
+	if err := manager.sendOne(t.Context(), sub, []byte("test"), sendOptions{TTL: 300}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -419,7 +583,7 @@ func TestManagerPublishRetriesGenerationZero(t *testing.T) {
 		t.Fatal(err)
 	}
 	attempts := 0
-	manager.sendPush = func(_ context.Context, _ Subscription, payload []byte) error {
+	manager.sendPush = func(_ context.Context, _ Subscription, payload []byte, _ sendOptions) error {
 		attempts++
 		var typed Payload
 		if err := json.Unmarshal(payload, &typed); err != nil || typed.Version != 1 || typed.Key.Generation != 0 {
@@ -438,11 +602,11 @@ func TestManagerPublishRetriesGenerationZero(t *testing.T) {
 	if err != nil || published.Queued != 1 {
 		t.Fatalf("Publish() = %#v, %v", published, err)
 	}
-	results, err := manager.RunOnce(t.Context(), now)
+	results, err := runAt(t.Context(), manager, now)
 	if err != nil || len(results) != 1 || results[0].Disposition != DeliveryRetrying {
 		t.Fatalf("first RunOnce() = %#v, %v", results, err)
 	}
-	results, err = manager.RunOnce(t.Context(), results[0].NextAttempt)
+	results, err = runAt(t.Context(), manager, results[0].NextAttempt)
 	if err != nil || len(results) != 1 || results[0].Disposition != DeliveryAccepted {
 		t.Fatalf("second RunOnce() = %#v, %v", results, err)
 	}
@@ -462,7 +626,7 @@ func TestManagerResolveRetractsExactAcceptedEvent(t *testing.T) {
 		t.Fatal(err)
 	}
 	var sent []Payload
-	manager.sendPush = func(_ context.Context, _ Subscription, payload []byte) error {
+	manager.sendPush = func(_ context.Context, _ Subscription, payload []byte, _ sendOptions) error {
 		var typed Payload
 		if err := json.Unmarshal(payload, &typed); err != nil {
 			return err
@@ -477,14 +641,14 @@ func TestManagerResolveRetractsExactAcceptedEvent(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := manager.RunOnce(t.Context(), now); err != nil {
+	if _, err := runAt(t.Context(), manager, now); err != nil {
 		t.Fatal(err)
 	}
 	exactKey := typedTestKey("device-1")
 	if err := manager.Resolve(t.Context(), exactKey); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := manager.RunOnce(t.Context(), time.Now().UTC()); err != nil {
+	if _, err := runAt(t.Context(), manager, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	if len(sent) != 2 || sent[0].Key != exactKey || sent[1].Key != exactKey || !sent[1].Retract {
@@ -517,18 +681,18 @@ func TestRecoveredManagerWaitsForAuthoritativeReconcile(t *testing.T) {
 		t.Fatal(err)
 	}
 	sends := 0
-	recovered.sendPush = func(context.Context, Subscription, []byte) error {
+	recovered.sendPush = func(context.Context, Subscription, []byte, sendOptions) error {
 		sends++
 		return nil
 	}
-	if results, err := recovered.RunOnce(t.Context(), now); err != nil || len(results) != 0 || sends != 0 {
+	if results, err := runAt(t.Context(), recovered, now); err != nil || len(results) != 0 || sends != 0 {
 		t.Fatalf("pre-reconcile RunOnce() = %#v, %v, sends %d", results, err, sends)
 	}
 	current := typedTestKey("device-1")
 	if err := recovered.Reconcile(t.Context(), func(key PushEventKey) bool { return key == current }); err != nil {
 		t.Fatal(err)
 	}
-	if results, err := recovered.RunOnce(t.Context(), now); err != nil || len(results) != 1 || sends != 1 {
+	if results, err := runAt(t.Context(), recovered, now); err != nil || len(results) != 1 || sends != 1 {
 		t.Fatalf("post-reconcile RunOnce() = %#v, %v, sends %d", results, err, sends)
 	}
 }
@@ -580,11 +744,11 @@ func TestRunOnceRechecksLivePolicyBeforeDelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 	sends := 0
-	manager.sendPush = func(context.Context, Subscription, []byte) error {
+	manager.sendPush = func(context.Context, Subscription, []byte, sendOptions) error {
 		sends++
 		return nil
 	}
-	results, err := manager.RunOnce(t.Context(), now.Add(time.Minute))
+	results, err := runAt(t.Context(), manager, now.Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}

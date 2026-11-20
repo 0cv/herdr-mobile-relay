@@ -16,6 +16,9 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- An approval or question alert can reach a previously unreachable phone for
+  up to 24 hours, depending on the push provider. An answered or replaced
+  request can be withdrawn before the phone reconnects.
 - Tap an approval or question notification for up to 48 hours, as long as the
   original request is still current. The tap opens the agent without approving
   or replying.

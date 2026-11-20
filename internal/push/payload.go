@@ -63,6 +63,14 @@ func loadOrCreateReferenceSigner(path string) (*ReferenceSigner, error) {
 	return &ReferenceSigner{key: key}, nil
 }
 
+func (s *ReferenceSigner) waitingTopic(key PushEventKey) string {
+	scope, _ := json.Marshal([3]string{key.DeviceID, key.ServerSessionID, key.PaneID})
+	mac := hmac.New(sha256.New, s.key)
+	_, _ = mac.Write([]byte("push-topic-v1\x00"))
+	_, _ = mac.Write(scope)
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil)[:24])
+}
+
 func (s *ReferenceSigner) Sign(claims ReferenceClaims) (string, error) {
 	if s == nil || len(s.key) == 0 {
 		return "", ErrInvalidReference

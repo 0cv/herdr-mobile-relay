@@ -32,7 +32,7 @@ func TestPaneTransitionSupersedesOlderRetry(t *testing.T) {
 			a := exactKey("blocked")
 			b := a
 			b.InteractionRevision++
-			manager.sendPush = func(_ context.Context, sub Subscription, payload []byte) error {
+			manager.sendPush = func(_ context.Context, sub Subscription, payload []byte, _ sendOptions) error {
 				if err := log.record(sub, payload); err != nil {
 					return err
 				}
@@ -111,7 +111,7 @@ func TestWaitingAlertWaitsForRetract(t *testing.T) {
 			first := manager.queue.state.Entries[id]
 			log := &sendLog{}
 			fail := true
-			sender := func(_ context.Context, sub Subscription, payload []byte) error {
+			sender := func(_ context.Context, sub Subscription, payload []byte, _ sendOptions) error {
 				if err := log.record(sub, payload); err != nil {
 					return err
 				}
@@ -212,7 +212,7 @@ func TestWaitingRetractDoesNotHoldOtherDeliveries(t *testing.T) {
 	}
 	at := manager.queue.state.Entries[deliveryID(a, endpointTwo)].DueAt
 	log := &sendLog{}
-	manager.sendPush = func(_ context.Context, sub Subscription, payload []byte) error {
+	manager.sendPush = func(_ context.Context, sub Subscription, payload []byte, _ sendOptions) error {
 		if err := log.record(sub, payload); err != nil {
 			return err
 		}

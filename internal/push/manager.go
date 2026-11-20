@@ -38,7 +38,8 @@ type Manager struct {
 	vapidPublic   string
 	vapidPrivate  string
 	httpClient    webpush.HTTPClient
-	sendPush      func(context.Context, Subscription, []byte) error
+	sendPush      func(context.Context, Subscription, []byte, sendOptions) error
+	now           func() time.Time
 	queue         *durableQueue
 	policy        *PolicyEngine
 	signer        *ReferenceSigner
@@ -58,6 +59,7 @@ func NewManager(pushDir string, logger *slog.Logger) (*Manager, error) {
 	m := &Manager{
 		path:   filepath.Join(pushDir, "subscriptions.json"),
 		logger: logger,
+		now:    time.Now,
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
@@ -152,7 +154,7 @@ func (m *Manager) updateQueue(ctx context.Context, request *PublishRequest, supe
 	next := m.queue.state.clone()
 	var retire []PushEventKey
 	if superseded != nil {
-		now := time.Now().UTC()
+		now := m.now().UTC()
 		for key := range m.active {
 			if superseded(key) {
 				if err := m.retract(&next, key, now); err != nil {
@@ -191,7 +193,7 @@ func (m *Manager) publish(next *queueFile, request PublishRequest) (PublishResul
 	var result PublishResult
 	now := request.CreatedAt
 	if now.IsZero() {
-		now = time.Now().UTC()
+		now = m.now().UTC()
 	}
 	expiresAt := request.ExpiresAt
 	if expiresAt.IsZero() {
@@ -304,7 +306,7 @@ func (m *Manager) Run(ctx context.Context) {
 		case <-ticker.C:
 		case <-m.wake:
 		}
-		if _, err := m.RunOnce(ctx, time.Now().UTC()); err != nil && !errors.Is(err, context.Canceled) {
+		if _, err := m.RunOnce(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			m.logger.Warn("push queue processing failed", "error", err)
 		}
 	}

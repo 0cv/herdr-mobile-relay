@@ -121,7 +121,11 @@ notification-open references resolve only after startup inventory has
 reconciled them against a current exact target. A waiting alert can open for
 up to 48 hours after creation, only on its paired device and only while the
 original request and revision are still current. The tap opens the agent with
-the device’s existing access; it cannot approve or reply.
+the device's existing access; it cannot approve or reply. For waiting alerts
+and their withdrawals, an opaque topic lets the push provider recognize
+messages for the same relay, device, server session, and pane. The topic does
+not contain those identifiers; request details, including the open reference,
+remain encrypted.
 
 ## Device verification
 

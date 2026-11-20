@@ -151,6 +151,15 @@ When an agent's approval or question changes, the relay cancels any unsent
 alert for the old request, including retries. It withdraws an old alert only
 if the push service already accepted it.
 
+The relay has five minutes to send a waiting alert. After accepting it, the
+push provider can hold it for an unreachable phone for up to 24 hours from
+the alert's creation. The relay does not retry for a day. The provider can
+replace an undelivered alert with its withdrawal or a newer alert for that
+pane. This is best effort: providers can limit retention and storage, and
+a withdrawal lasts only five minutes. If it doesn't arrive, an old alert
+already on screen can remain, but tapping it won't open an answered or
+replaced request.
+
 ## Opening links from other apps on iOS
 
 External links open in Safari, not the installed Home Screen app. To use those
