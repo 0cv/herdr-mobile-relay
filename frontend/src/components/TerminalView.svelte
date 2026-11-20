@@ -7,6 +7,7 @@
   import TerminalFind from '$components/TerminalFind.svelte';
   import TerminalResponseActions from '$components/TerminalResponseActions.svelte';
   import { promptDispatchRestriction } from '$lib/terminal-input';
+  import { fileLinkContext, type FileLinkContext } from '$lib/file-links';
   import type { ComposerSubmitAdapter } from '$lib/composer';
   import Button from '$components/ui/Button.svelte';
   import KeyboardIcon from '$components/ui/KeyboardIcon.svelte';
@@ -102,6 +103,8 @@
   let lastContent = '';
   let lastPreserveLineEnds = false;
   let lastRenderColumnCap = 0;
+  let lastFileLinks: FileLinkContext | null = null;
+  const fileLinks = $derived(fileLinkContext(agent, $connections.get(agent.relay_id)));
   let findOpen = $state(false);
   let find = $state<TerminalFind>();
   let sendingPrompt = $state(false);
@@ -234,13 +237,7 @@
   // must repaint the cached frame rather than wait for the next output.
   $effect(() => {
     void $theme;
-    untrack(() => {
-      if (!lastContent) return;
-      const next = frame;
-      if (!next || next.paneId !== agent.pane_id) return;
-      lastContent = '';
-      void applyFrame(next, lastPreserveLineEnds);
-    });
+    untrack(() => refreshPaintedFrame(fileLinks));
   });
 
   $effect(() => {
@@ -253,6 +250,7 @@
     // yet. A reader cannot lease at all, so its rows wrap at the phone instead
     // of trailing off the side of a desktop-width grid.
     const preserveLineEnds = !resizeSessionActive && !readOnly;
+    const linkContext = fileLinks;
     // A frame read while the agent repaints at a new width is transient. Keep
     // the phone's last stable frame painted until the new stable frame lands,
     // but never past the deadline: a relay that keeps flagging frames would
@@ -279,10 +277,15 @@
       });
       if (cachedFrame) {
         historyTruncated = Boolean(cachedFrame.truncated);
-        untrack(() => { void applyFrame(cachedFrame, preserveLineEnds) });
+        untrack(() => { void applyFrame(cachedFrame, preserveLineEnds, linkContext) });
         return;
       }
-      if (renderedRows.length) return;
+      if (renderedRows.length) {
+        untrack(() => {
+          if (fileLinkContextChanged(linkContext)) refreshPaintedFrame(linkContext);
+        });
+        return;
+      }
     }
     if (!matchingFrame || waitingForResizedFrame) {
       untrack(() => {
@@ -303,7 +306,7 @@
     }
     if (resizeSessionActive && lease.columns > 0) lease.renderedColumns = lease.columns;
     historyTruncated = Boolean(matchingFrame.truncated);
-    untrack(() => { void applyFrame(matchingFrame, preserveLineEnds) });
+    untrack(() => { void applyFrame(matchingFrame, preserveLineEnds, linkContext) });
   });
 
   $effect(() => {
@@ -484,9 +487,32 @@
     };
   });
 
+  function fileLinkContextChanged(linkContext: FileLinkContext | null) {
+    return linkContext?.cwd !== lastFileLinks?.cwd || linkContext?.home !== lastFileLinks?.home;
+  }
+
+  function renderFrame(content: string, format: string, preserveLineEnds: boolean, renderColumnCap: number, fileLinks: FileLinkContext | null) {
+    return renderTerminalContent(content, format, {
+      preserveLayout: true,
+      preserveLineEnds,
+      fileLinks,
+      maxFixedGridColumns: renderColumnCap,
+    });
+  }
+
+  function refreshPaintedFrame(linkContext: FileLinkContext | null) {
+    if (!lastFormat || terminalLayoutSuspended) return;
+    const rendered = renderFrame(lastContent, lastFormat, lastPreserveLineEnds, lastRenderColumnCap, linkContext);
+    lastFileLinks = linkContext;
+    renderedHtml = rendered.html;
+    renderedRows = rendered.rows;
+    renderVirtualWindow(terminalElement?.scrollTop || 0, true);
+  }
+
   async function applyFrame(
     next: TerminalFrame,
     preserveLineEnds: boolean,
+    linkContext: FileLinkContext | null,
   ) {
     if (terminalLayoutSuspended) return;
     const renderColumnCap = resizeLayoutActive
@@ -494,23 +520,13 @@
       : (resizeLayoutPending ? measuredPaneColumns() || 0 : 0);
     const layoutChanged = preserveLineEnds !== lastPreserveLineEnds
       || renderColumnCap !== lastRenderColumnCap;
-    if (next.content === lastContent && next.format === lastFormat && !layoutChanged) return;
-    const rendered = renderTerminalContent(
-      next.content,
-      next.format,
-      {
-        preserveLayout: true,
-        preserveLineEnds,
-        // Cap box-drawing rows at the width in force. A fixed-grid row is a run
-        // of fixed-width cells with no wrap opportunity between them, so past
-        // the cap it must render as plain text that can wrap instead. Zero means
-        // "no cap", which only a relay that cannot lease is entitled to.
-        maxFixedGridColumns: renderColumnCap,
-      },
-    );
+    const linksChanged = fileLinkContextChanged(linkContext);
+    if (next.content === lastContent && next.format === lastFormat && !layoutChanged && !linksChanged) return;
+    const rendered = renderFrame(next.content, next.format, preserveLineEnds, renderColumnCap, linkContext);
     lastContent = next.content;
+    lastFileLinks = linkContext;
     if (rendered.display === displayed && rendered.html === renderedHtml
-      && next.format === lastFormat && !layoutChanged) return;
+      && next.format === lastFormat && !layoutChanged && !linksChanged) return;
     // Exactly at the bottom counts too: the scroll event that would say so may
     // not have run yet when this frame arrives.
     const frameStick = virtualStickToBottom || Boolean(terminalElement

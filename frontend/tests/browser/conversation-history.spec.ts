@@ -1,7 +1,7 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import { scrollConversationToBottom, showOlderConversationEntry } from '../support/journey-conversation';
 import { captureClipboard, copiedText, distanceFromBottom } from '../support/journey-device';
-import { commands, composerTarget, connectFedora, reply, server, setAutoCommands, setConversationFixture } from '../support/journey-relay';
+import { closeSocket, commands, composerTarget, connectFedora, lastCommand, reply, server, setAutoCommands, setConversationFixture, type ConversationFixture } from '../support/journey-relay';
 
 test('reads and replies from native conversation history', async ({ page }) => {
   await page.addInitScript(() => {
@@ -584,7 +584,11 @@ for (const availability of ['available', 'no-capability', 'no-directory'] as con
   test(`Conversation workspace button is compact and ${availability}`, async ({ page }) => {
     await page.setViewportSize({ width: 360, height: 740 });
     await connectFedora(page, { capabilities: ['conversation_history', ...(availability !== 'no-capability' ? ['workspace_inspection'] : [])] });
-    await setConversationFixture(page, { entries: [{ id: 'workspace:answer', timestamp: '', role: 'assistant', text: 'Workspace conversation' }], total: 1 });
+    const longPath = `src/${'a'.repeat(83)}.ts`;
+    await setConversationFixture(page, {
+      entries: [{ id: 'workspace:answer', timestamp: '', role: 'assistant', text: `Updated \`src/main.ts:42\` and ${longPath}. See https://example.com/docs/guide.html` }],
+      total: 1,
+    });
     await server(page, 0, { type: 'agents', agents: [{ ...composerTarget, status: 'idle', project: 'Conversation workspace with a long title', agent: 'pi', cwd: availability === 'no-directory' ? '' : '/work/mobile', conversation_history_available: true }] });
     await page.getByRole('button', { name: 'Open Conversation workspace with a long title on Fedora' }).click();
     await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
@@ -597,13 +601,23 @@ for (const availability of ['available', 'no-capability', 'no-directory'] as con
       expect(box!.x + box!.width).toBeLessThanOrEqual(360);
     }
     expect((await header.boundingBox())!.height).toBeLessThanOrEqual(50);
+    const path = page.getByRole('button', { name: 'src/main.ts:42', exact: true });
+    await expect(page.getByText('src/main.ts:42', { exact: true })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'https://example.com/docs/guide.html' })).toHaveAttribute('target', '_blank');
+    expect((await commands(page)).filter(({ type }) => String(type).startsWith('workspace_'))).toEqual([]);
     if (availability !== 'available') {
+      await expect(path).toHaveCount(0);
       await expect(inspect).toBeDisabled();
       await expect(inspect).toHaveAttribute('title', 'Workspace inspection is unavailable');
       return;
     }
     await expect(inspect).toBeEnabled();
     await expect(inspect).toHaveAttribute('title', 'Inspect workspace files and Git changes');
+    await expect(path).toBeVisible();
+    await page.setViewportSize({ width: 320, height: 740 });
+    const wrapped = page.getByRole('button', { name: longPath, exact: true });
+    await expect.poll(() => wrapped.evaluate((element) => element.getClientRects().length)).toBeGreaterThan(1);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(await page.evaluate(() => innerWidth));
     await inspect.click();
     const dialog = page.getByRole('dialog', { name: 'Workspace', exact: true });
     await expect(dialog).toBeVisible();
@@ -614,6 +628,184 @@ for (const availability of ['available', 'no-capability', 'no-directory'] as con
     await expect(dialog.getByLabel('Diff for README.md')).toContainText('+Read-only change');
   });
 }
+
+async function openFileLinkConversation(page: Page, conversation: string | ConversationFixture) {
+  await connectFedora(page, { capabilities: ['conversation_history', 'workspace_inspection'] });
+  await setConversationFixture(page, typeof conversation === 'string'
+    ? { entries: [{ id: 'path-answer', role: 'assistant', text: conversation, timestamp: '' }], total: 1 }
+    : conversation);
+  await server(page, 0, { type: 'agents', agents: [{ ...composerTarget, status: 'idle', project: 'File links', agent: 'codex', cwd: '/work/mobile', conversation_history_available: true }] });
+  await page.getByRole('button', { name: 'Open File links on Fedora' }).click();
+  await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
+}
+
+test('opens a Conversation file link by touch and keyboard, without changing the toolbar inspector', async ({ page }) => {
+  await openFileLinkConversation(page, 'Updated src/main.ts');
+  const link = page.getByRole('button', { name: 'src/main.ts', exact: true });
+  const dialog = page.getByRole('dialog', { name: 'Workspace', exact: true });
+  const preview = dialog.getByRole('main', { name: 'Workspace preview' });
+  const close = dialog.getByRole('button', { name: 'Close workspace inspector' });
+  await link.tap();
+  await expect(preview.locator('.preview-heading')).toContainText('src/main.ts');
+  await expect(dialog.getByRole('complementary', { name: 'Workspace files' })).toHaveCount(0);
+  const reads = (await commands(page)).filter(({ type }) => String(type).startsWith('workspace_'));
+  expect(reads.map(({ type }) => type).sort()).toEqual(['workspace_file', 'workspace_git_status', 'workspace_tree']);
+  expect(reads.find(({ type }) => type === 'workspace_file')).toMatchObject({ pane_id: 'w1:p1', path: 'src/main.ts' });
+  await close.click();
+  for (const key of ['Enter', 'Space']) {
+    await link.focus();
+    await page.keyboard.press(key);
+    await expect(preview.getByRole('textbox', { name: 'Contents of src/main.ts' })).toBeVisible();
+    await close.click();
+  }
+  await page.getByRole('button', { name: 'Inspect workspace' }).click();
+  await expect(dialog.getByRole('complementary', { name: 'Workspace files' })).toBeVisible();
+  await expect(preview).toContainText('Choose a file to preview it.');
+});
+
+test('closes a linked file preview without issuing new reads when the working directory changes', async ({ page }) => {
+  const path = '/work/mobile/src/main.ts';
+  await openFileLinkConversation(page, `Updated ${path}`);
+  const link = page.getByRole('button', { name: path, exact: true });
+  await link.tap();
+  const dialog = page.getByRole('dialog', { name: 'Workspace', exact: true });
+  await expect(dialog.getByLabel('Contents of src/main.ts')).toBeVisible();
+  const workspaceReads = async () => (await commands(page)).filter(({ type }) => String(type).startsWith('workspace_'));
+  const reads = await workspaceReads();
+  expect(reads.find(({ type }) => type === 'workspace_file')).toMatchObject({ pane_id: 'w1:p1', path: 'src/main.ts' });
+
+  await server(page, 0, { type: 'agents', agents: [{ ...composerTarget, status: 'idle', project: 'File links', agent: 'codex', cwd: '/work/other', conversation_history_available: true }] });
+  await expect(dialog).toBeHidden();
+  await expect(page.getByText(`Updated ${path}`, { exact: true })).toBeVisible();
+  await expect(link).toHaveCount(0);
+  expect(await workspaceReads()).toEqual(reads);
+
+  await page.getByRole('button', { name: 'Inspect workspace' }).click();
+  await expect(dialog.getByText('/work/other', { exact: true })).toBeVisible();
+  await expect(dialog.getByRole('complementary', { name: 'Workspace files' })).toBeVisible();
+  await expect(dialog.getByText('Choose a file to preview it.')).toBeVisible();
+});
+
+test('scrolls a file link preview to its line, clamps near the end, and ignores unavailable lines', async ({ page }) => {
+  await openFileLinkConversation(page, 'See src/long.ts:42 src/long.ts:295 src/long.ts:999 and docs/home.png:3');
+  const dialog = page.getByRole('dialog', { name: 'Workspace', exact: true });
+  const heading = dialog.locator('.preview-heading');
+  const textarea = dialog.getByRole('textbox', { name: 'Contents of src/long.ts' });
+  const close = dialog.getByRole('button', { name: 'Close workspace inspector' });
+  await page.getByRole('button', { name: 'src/long.ts:42', exact: true }).tap();
+  await expect(heading).toContainText('Line 42');
+  await expect(textarea).toHaveAttribute('readonly', '');
+  const position = await textarea.evaluate((element: HTMLTextAreaElement) => {
+    const { paddingTop, lineHeight } = getComputedStyle(element);
+    return {
+      scrollTop: element.scrollTop,
+      expected: parseFloat(paddingTop) + 41 * parseFloat(lineHeight),
+      selection: element.value.slice(element.selectionStart, element.selectionEnd),
+    };
+  });
+  expect(Math.abs(position.scrollTop - position.expected)).toBeLessThanOrEqual(1);
+  expect(position.selection).toBe('// Line 42');
+  await close.click();
+
+  await page.getByRole('button', { name: 'src/long.ts:295', exact: true }).tap();
+  await expect(heading).toContainText('Line 295');
+  await expect.poll(() => distanceFromBottom(textarea)).toBeLessThanOrEqual(1);
+  await close.click();
+
+  await page.getByRole('button', { name: 'src/long.ts:999', exact: true }).tap();
+  await expect(heading).toContainText('src/long.ts');
+  await expect(heading).not.toContainText('Line');
+  expect(await textarea.evaluate((element) => element.scrollTop)).toBe(0);
+  await close.click();
+
+  await page.getByRole('button', { name: 'docs/home.png:3', exact: true }).tap();
+  const image = dialog.getByRole('img', { name: 'Preview of docs/home.png' });
+  await expect(image).toBeVisible();
+  await expect.poll(() => image.evaluate((element: HTMLImageElement) => element.naturalWidth)).toBe(1);
+  await expect(dialog).not.toContainText('Line 3');
+});
+
+test('names a missing file and lets the reader choose another file from the list', async ({ page }) => {
+  await openFileLinkConversation(page, 'Removed missing/gone.ts');
+  await page.getByRole('button', { name: 'missing/gone.ts', exact: true }).tap();
+  const dialog = page.getByRole('dialog', { name: 'Workspace', exact: true });
+  await expect(dialog.getByRole('alert')).toHaveText('Could not open missing/gone.ts: Workspace file was not found');
+  await expect(dialog.locator('textarea')).toHaveCount(0);
+  await dialog.getByRole('button', { name: 'Show file list' }).click();
+  await dialog.getByRole('complementary', { name: 'Workspace files' }).getByRole('button', { name: 'README.md', exact: true }).click();
+  await expect(dialog.getByLabel('Contents of README.md')).toHaveValue('# Workspace preview\n\nRead-only file contents.');
+});
+
+test('names the file when the relay is disconnected and the tree also fails', async ({ page }) => {
+  await openFileLinkConversation(page, 'Updated src/main.ts');
+  const link = page.getByRole('button', { name: 'src/main.ts', exact: true });
+  await expect(link).toBeVisible();
+  await closeSocket(page, 0);
+  await link.tap();
+  const dialog = page.getByRole('dialog', { name: 'Workspace', exact: true });
+  await expect(dialog.getByRole('alert')).toHaveText('Could not open src/main.ts: Relay is not connected');
+  await expect(dialog.locator('textarea')).toHaveCount(0);
+  await dialog.getByRole('button', { name: 'Show file list' }).click();
+  await expect(dialog.getByRole('complementary').getByRole('alert')).toHaveText('Relay is not connected');
+  await expect(dialog.getByRole('main', { name: 'Workspace preview' }).getByRole('alert')).toHaveText('Could not open src/main.ts: Relay is not connected');
+  await dialog.getByRole('button', { name: 'Close workspace inspector' }).click();
+  await expect(link).toBeVisible();
+});
+
+test('keeps the linked file visible when a later tree request fails', async ({ page }) => {
+  await openFileLinkConversation(page, 'Updated src/main.ts');
+  const link = page.getByRole('button', { name: 'src/main.ts', exact: true });
+  await expect(link).toBeVisible();
+  await setAutoCommands(page, false);
+  await link.tap();
+  const file = await lastCommand(page, 'workspace_file');
+  const tree = await lastCommand(page, 'workspace_tree');
+  const git = await lastCommand(page, 'workspace_git_status');
+  await reply(page, file, { path: 'src/main.ts', kind: 'text', text: 'File ready', size: 10 });
+  const dialog = page.getByRole('dialog', { name: 'Workspace', exact: true });
+  const preview = dialog.getByLabel('Contents of src/main.ts');
+  await expect(preview).toHaveValue('File ready');
+  await reply(page, tree, undefined, { ok: false, phase: 'failed', error: 'Could not read tree' });
+  await reply(page, git, { available: false, files: [] });
+  await dialog.getByRole('button', { name: 'Show file list' }).click();
+  await expect(dialog.getByRole('alert')).toHaveText('Could not read tree');
+  await expect(preview).toHaveValue('File ready');
+});
+
+test('returns from a file link to the same Conversation scroll, older turns and draft', async ({ page }) => {
+  const entries = Array.from({ length: 24 }, (_, index) => ({
+    id: `file-turn-${index}`, role: index % 2 ? 'assistant' : 'user', timestamp: '',
+    text: index === 5 ? 'Updated src/main.ts' : `Conversation turn ${index}`,
+  }));
+  await openFileLinkConversation(page, {
+    entries: entries.slice(12), total: entries.length, hasMore: true, nextCursor: 'older-files',
+    pages: { 'older-files': { entries: entries.slice(0, 12) } },
+  });
+  await page.getByRole('button', { name: 'Load older turns' }).click();
+  const list = page.locator('.conversation-list');
+  await expect(list.locator('article')).toHaveCount(entries.length);
+  const link = list.getByRole('button', { name: 'src/main.ts', exact: true });
+  const composer = page.getByRole('combobox', { name: 'Prompt' });
+  await composer.fill('A draft to keep');
+  await link.evaluate((element) => element.scrollIntoView({ block: 'center' }));
+  await expect(link).toBeInViewport({ ratio: 1 });
+  expect(await distanceFromBottom(list)).toBeGreaterThan(200);
+  const scrollTop = await list.evaluate((element) => element.scrollTop);
+  expect(scrollTop).toBeGreaterThan(0);
+  const historyLength = await page.evaluate(() => history.length);
+
+  await link.tap();
+  const dialog = page.getByRole('dialog', { name: 'Workspace', exact: true });
+  await expect(dialog.getByLabel('Contents of src/main.ts')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeHidden();
+  await expect(list.locator('article')).toHaveCount(entries.length);
+  await expect(composer).toHaveValue('A draft to keep');
+  expect(await list.evaluate((element) => element.scrollTop)).toBe(scrollTop);
+  expect(await page.evaluate(() => history.length)).toBe(historyLength);
+  await page.getByRole('button', { name: 'Back', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Open File links on Fedora' })).toBeVisible();
+});
 
 test('inspects workspace files and Git changes without write controls', async ({ page }) => {
   await connectFedora(page, {

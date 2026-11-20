@@ -1,3 +1,5 @@
+export const HTTP_URL_PATTERN = /https?:\/\/[^\s<>"']+/giu;
+
 export function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (character) => ({
     '&': '&amp;',

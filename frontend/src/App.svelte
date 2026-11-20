@@ -53,6 +53,7 @@
   import { createViewedPaneReporter } from '$lib/viewed-pane';
   import type { Agent, ConversationPage, NotificationTarget } from '$lib/types';
   import type { ViewState } from '$lib/router';
+  import type { WorkspaceFileTarget } from '$lib/workspace-inspection';
 
   const relays = relayStore.relayConfigs;
   const connections = relayStore.connections;
@@ -67,6 +68,7 @@
   let terminalView = $state<{ openFind: () => void } | null>(null);
   let jumpOpen = $state(false);
   let workspaceOpen = $state(false);
+  let workspaceFileTarget = $state.raw<WorkspaceFileTarget | null>(null);
   let workspaceDisclosure = $state<Record<string, boolean>>({});
   let previousView = '';
   let terminalUnavailable = $state(false);
@@ -172,11 +174,14 @@
   });
 
   $effect(() => {
-    if ($securityState.locked) stopSpeech();
+    if (!$securityState.locked) return;
+    workspaceOpen = false;
+    stopSpeech();
   });
 
   $effect(() => {
     const view = $currentView.view;
+    workspaceOpen = false;
     document.body.dataset.view = view;
     if (view === 'agents' && previousView && previousView !== 'agents') relayStore.requestAgents();
     previousView = view;
@@ -280,6 +285,26 @@
     };
   });
 
+  function openWorkspace(target: WorkspaceFileTarget | null = null) {
+    workspaceFileTarget = target;
+    workspaceOpen = true;
+  }
+
+  function activateFileLink(event: MouseEvent | KeyboardEvent) {
+    if (event instanceof KeyboardEvent && event.key !== 'Enter' && event.key !== ' ') return;
+    if (!activeAgent || !workspaceInspectionAvailable || workspaceOpen || $securityState.locked) return;
+    if (!(event.target instanceof Element)) return;
+    const link = event.target.closest<HTMLElement>('[data-file-path]');
+    if (!link?.dataset.filePath) return;
+    event.preventDefault();
+    openWorkspace({
+      path: link.dataset.filePath,
+      line: Number(link.dataset.fileLine) || undefined,
+      pane_id: activeAgent.pane_id,
+      cwd: activeAgent.cwd,
+    });
+  }
+
   function openAgent(agent: Agent) {
     if (relayStore.deviceCredential(agent.relay_id)?.role !== 'reader') {
       void relayStore.acknowledgePane(agent);
@@ -329,6 +354,8 @@
     return matches.length === 1 ? matches[0] : null;
   }
 </script>
+
+<svelte:document onclick={activateFileLink} onkeydown={activateFileLink} />
 
 <div class="app-shell">
   <header
@@ -392,7 +419,7 @@
           aria-label="Inspect workspace"
           disabled={!workspaceInspectionAvailable}
           title={workspaceInspectionAvailable ? 'Inspect workspace files and Git changes' : 'Workspace inspection is unavailable'}
-          onclick={() => { workspaceOpen = true; }}
+          onclick={() => openWorkspace()}
         >
           <svg class="header-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
             <path d="M3 5.5h7l2 2h9v11H3z"></path>
@@ -419,7 +446,7 @@
           aria-label="Inspect workspace"
           disabled={!workspaceInspectionAvailable}
           title={workspaceInspectionAvailable ? 'Inspect workspace files and Git changes' : 'Workspace inspection is unavailable'}
-          onclick={() => { workspaceOpen = true; }}
+          onclick={() => openWorkspace()}
         >
           <svg class="header-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
             <path d="M3 5.5h7l2 2h9v11H3z"></path>
@@ -543,6 +570,6 @@
 <UpdateProgressDialog {readOnlyRelayIds} />
 <ManageDialog bind:open={manageOpen} agent={activeAgent} readOnly={activeReadOnly} />
 <GlobalJump bind:open={jumpOpen} agents={$agents} onselect={openAgent} />
-<WorkspaceInspector bind:open={workspaceOpen} agent={activeAgent} />
+<WorkspaceInspector bind:open={workspaceOpen} agent={activeAgent} fileTarget={workspaceFileTarget} />
 <LockScreen />
 <Toast />

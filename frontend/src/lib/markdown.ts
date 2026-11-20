@@ -1,6 +1,8 @@
-import { escapeHtml, safeExternalUrl, trimUrlPunctuation } from './rich-output';
+import { fileLinksInFragments, findFileLinks, findUriSpans, outsideUnsupportedUris, renderFileLinks, type FileLink, type FileLinkContext } from './file-links';
+import { escapeHtml, HTTP_URL_PATTERN, safeExternalUrl, trimUrlPunctuation } from './rich-output';
 
-const INLINE_PATTERN = /(`[^`\n]+`|\*\*[^*\n]+\*\*|\[[^\]\n]+\]\(https?:\/\/[^\s)]+\)|https?:\/\/[^\s<>"']+)/giu;
+const INLINE_MARKUP = /`[^`\n]+`|\*\*[^*\n]+\*\*|\[[^\]\n]+\]\(https?:\/\/[^\s)]+\)/iyu;
+const INLINE_PATTERN = new RegExp(`${INLINE_MARKUP.source}|${HTTP_URL_PATTERN.source}`, 'giu');
 // Markdown does not treat a number longer than nine digits as a list number.
 const LIST_ITEM = /^(\s*)(?:([-*+])|(\d{1,9})[.)])(\s+)(.+)$/u;
 const CODE_FENCE = /^\s*```\s*([A-Za-z0-9_+.-]*)\s*$/u;
@@ -30,54 +32,67 @@ function listItem(line: string): ListItem | null {
   return { type: bullet ? 'ul' : 'ol', indent, content: markerEnd + (spaces > 4 ? 1 : spaces), start: bullet ? 1 : Number(number), text };
 }
 
-export function escapedWithHighlight(value: string, highlight: string): string {
-  const needle = highlight.trim();
-  if (!needle) return escapeHtml(value);
-  const lower = value.toLocaleLowerCase();
-  const lowerNeedle = needle.toLocaleLowerCase();
-  let cursor = 0;
-  let output = '';
-  while (cursor < value.length) {
-    const index = lower.indexOf(lowerNeedle, cursor);
-    if (index < 0) {
-      output += escapeHtml(value.slice(cursor));
-      break;
-    }
-    output += escapeHtml(value.slice(cursor, index));
-    output += `<mark>${escapeHtml(value.slice(index, index + needle.length))}</mark>`;
-    cursor = index + needle.length;
-  }
-  return output;
+export function renderOutputText(value: string, highlight: string, fileLinks?: FileLinkContext | null): string {
+  return renderText(value, highlight, findFileLinks(value, fileLinks));
 }
 
-function renderInline(value: string, highlight: string): string {
+function renderText(value: string, highlight: string, links: FileLink[]): string {
+  const needle = highlight.trim();
+  if (!needle) return renderFileLinks(value, links);
+  const lower = value.toLocaleLowerCase();
+  const lowerNeedle = needle.toLocaleLowerCase();
+  let match = lower.indexOf(lowerNeedle);
+  return renderFileLinks(value, links, (start, end) => {
+    let html = '';
+    while (match >= 0 && match < end) {
+      const matchStart = Math.max(start, match);
+      const matchEnd = match + needle.length;
+      html += escapeHtml(value.slice(start, matchStart));
+      html += `<mark>${escapeHtml(value.slice(matchStart, Math.min(end, matchEnd)))}</mark>`;
+      if (matchEnd > end) return html;
+      start = matchEnd;
+      match = lower.indexOf(lowerNeedle, matchEnd);
+    }
+    return html + escapeHtml(value.slice(start, end));
+  });
+}
+
+function inlineMarkupEnd(value: string, start: number): number | undefined {
+  INLINE_MARKUP.lastIndex = start;
+  return INLINE_MARKUP.test(value) ? INLINE_MARKUP.lastIndex : undefined;
+}
+
+function renderInline(value: string, highlight: string, fileLinks?: FileLinkContext | null): string {
   let output = '';
   let cursor = 0;
-  for (const match of value.matchAll(INLINE_PATTERN)) {
-    const index = match.index || 0;
-    output += escapedWithHighlight(value.slice(cursor, index), highlight);
+  const uris = findUriSpans(value, inlineMarkupEnd);
+  const inlineMatches = outsideUnsupportedUris(uris);
+  const filesIn = fileLinksInFragments(findFileLinks(value, fileLinks, uris));
+  const renderProse = (end: number) => renderText(value.slice(cursor, end), highlight, filesIn(cursor, end));
+  for (const match of inlineMatches(value, INLINE_PATTERN)) {
+    const index = match.index;
+    output += renderProse(index);
     const token = match[0];
     if (token.startsWith('`') && token.endsWith('`')) {
-      output += `<code>${escapedWithHighlight(token.slice(1, -1), highlight)}</code>`;
+      output += `<code>${renderOutputText(token.slice(1, -1), highlight, fileLinks)}</code>`;
     } else if (token.startsWith('**') && token.endsWith('**')) {
-      output += `<strong>${renderInline(token.slice(2, -2), highlight)}</strong>`;
+      output += `<strong>${renderInline(token.slice(2, -2), highlight, fileLinks)}</strong>`;
     } else if (token.startsWith('[')) {
       const link = token.match(/^\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)$/iu);
       const href = link ? safeExternalUrl(link[2]) : '';
       output += href
-        ? `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">${escapedWithHighlight(link![1], highlight)}</a>`
-        : escapedWithHighlight(token, highlight);
+        ? `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">${renderOutputText(link![1], highlight)}</a>`
+        : renderOutputText(token, highlight);
     } else {
       const [candidate, suffix] = trimUrlPunctuation(token);
       const href = safeExternalUrl(candidate);
       output += href
-        ? `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">${escapedWithHighlight(candidate, highlight)}</a>${escapedWithHighlight(suffix, highlight)}`
-        : escapedWithHighlight(token, highlight);
+        ? `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">${renderOutputText(candidate, highlight)}</a>${renderOutputText(suffix, highlight)}`
+        : renderOutputText(token, highlight);
     }
     cursor = index + token.length;
   }
-  output += escapedWithHighlight(value.slice(cursor), highlight);
-  return output;
+  return output + renderProse(value.length);
 }
 
 type TableAlignment = '' | 'left' | 'center' | 'right';
@@ -127,11 +142,11 @@ function tableAlignments(row: string): TableAlignment[] | null {
   return alignments;
 }
 
-function renderTableRow(cells: string[], alignments: TableAlignment[], tag: 'th' | 'td', highlight: string): string {
+function renderTableRow(cells: string[], alignments: TableAlignment[], tag: 'th' | 'td', inline: (text: string) => string): string {
   let html = '<tr>';
   for (let column = 0; column < alignments.length; column += 1) {
     const align = alignments[column] ? ` style="text-align:${alignments[column]}"` : '';
-    html += `<${tag}${align}>${renderInline(cells[column] || '', highlight)}</${tag}>`;
+    html += `<${tag}${align}>${inline(cells[column] || '')}</${tag}>`;
   }
   return `${html}</tr>`;
 }
@@ -191,7 +206,8 @@ export function speakableText(value: string): string {
   return lines.filter(Boolean).join('\n').replace(/[ \t]+/gu, ' ').trim();
 }
 
-export function safeMarkdownHtml(value: string, highlight = '', _role?: string): string {
+export function safeMarkdownHtml(value: string, highlight = '', fileLinks?: FileLinkContext | null, _role?: string): string {
+  const inline = (text: string) => renderInline(text, highlight, fileLinks);
   const lines = value.replace(/\r\n?/g, '\n').split('\n');
   const output: string[] = [];
   let inCode = false;
@@ -208,13 +224,13 @@ export function safeMarkdownHtml(value: string, highlight = '', _role?: string):
 
   const flushParagraph = () => {
     if (!paragraph.length) return;
-    output.push(`<p>${paragraph.map((line) => renderInline(line, highlight)).join('<br>')}</p>`);
+    output.push(`<p>${paragraph.map(inline).join('<br>')}</p>`);
     paragraph = [];
   };
   const flushCode = () => {
     if (!inCode) return;
     const language = /^[A-Za-z0-9_+.-]{1,32}$/u.test(codeLanguage) ? ` class="language-${escapeHtml(codeLanguage)}"` : '';
-    output.push(`<pre><code${language}>${escapedWithHighlight(codeLines.join('\n'), highlight)}</code></pre>`);
+    output.push(`<pre><code${language}>${renderOutputText(codeLines.join('\n'), highlight)}</code></pre>`);
     inCode = false;
     codeLanguage = '';
     codeLines = [];
@@ -222,7 +238,7 @@ export function safeMarkdownHtml(value: string, highlight = '', _role?: string):
   };
   const flushItemLines = () => {
     if (!itemLines.length) return;
-    const html = itemLines.map((line) => renderInline(line, highlight)).join('<br>');
+    const html = itemLines.map(inline).join('<br>');
     output.push(itemParagraph ? `<p>${html}</p>` : html);
     itemLines = [];
     itemParagraph = false;
@@ -301,7 +317,7 @@ export function safeMarkdownHtml(value: string, highlight = '', _role?: string):
       flushParagraph();
       flushList();
       const level = Math.min(6, heading[1].length + 2);
-      output.push(`<h${level}>${renderInline(heading[2], highlight)}</h${level}>`);
+      output.push(`<h${level}>${inline(heading[2])}</h${level}>`);
       continue;
     }
     const item = listItem(line);
@@ -313,7 +329,7 @@ export function safeMarkdownHtml(value: string, highlight = '', _role?: string):
     if (quote) {
       flushParagraph();
       flushList();
-      output.push(`<blockquote>${renderInline(quote[1], highlight)}</blockquote>`);
+      output.push(`<blockquote>${inline(quote[1])}</blockquote>`);
       continue;
     }
     if (/^\s*(?:---+|___+|\*\*\*+)\s*$/u.test(line)) {
@@ -330,12 +346,12 @@ export function safeMarkdownHtml(value: string, highlight = '', _role?: string):
       const body: string[] = [];
       let row = index + 2;
       while (row < lines.length && lines[row].trim() && lines[row].includes('|') && !lines[row].trimStart().startsWith('```')) {
-        body.push(renderTableRow(splitTableRow(lines[row]), alignments, 'td', highlight));
+        body.push(renderTableRow(splitTableRow(lines[row]), alignments, 'td', inline));
         row += 1;
       }
       index = row - 1;
       const tbody = body.length ? `<tbody>${body.join('')}</tbody>` : '';
-      output.push(`<div class="conversation-table"><table><thead>${renderTableRow(header, alignments, 'th', highlight)}</thead>${tbody}</table></div>`);
+      output.push(`<div class="conversation-table"><table><thead>${renderTableRow(header, alignments, 'th', inline)}</thead>${tbody}</table></div>`);
       continue;
     }
     // An indented plain line continues the deepest item whose content it reaches, or the outermost item.

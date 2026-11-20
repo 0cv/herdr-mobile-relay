@@ -12,7 +12,8 @@ setup and want to know what every screen and control is for.
 - Start, rename, clear, and stop agents from relay-provided launch profiles.
 - Send prompts, atomic terminal text-and-key input, slash commands, and
   cancellable attachment batches; drafts survive locally for 48 hours. Search
-  loaded terminal output and open explicit HTTP(S) links.
+  loaded terminal output, open explicit HTTP(S) links, and tap workspace file
+  links in Terminal or Conversation to preview them read-only.
 - Answer approvals bound to the current prompt, command, and ordered choices
   from Codex, Claude Code, Qoder, Oh My Pi, and Pi, plus structured questions
   from those agents and OpenCode.
@@ -272,9 +273,19 @@ notification missed while disconnected.
 
 **Inspect Workspace** is read-only and is available only when the connected
 relay advertises workspace inspection and the agent reports a working
-directory. The relay confines reads to that directory, skips symlinks and
-common generated directories, and returns at most 4,000 tree entries. Text
-previews are limited to 1 MiB and image previews to 5 MiB.
+directory. The relay confines reads to that directory and refuses symlinks.
+The file list hides common generated directories and shows at most 4,000
+entries. Text previews are limited to 1 MiB and image previews to 5 MiB.
+
+When **Inspect Workspace** is available, paths in Terminal and Conversation
+become links if they have a directory part and a file extension. Bare names
+and paths in fenced code stay plain. Paths are resolved from the agent's
+working directory; absolute and `~/` paths only link inside it. Tap to open a
+read-only preview, scrolled to the referenced line for suffixes such as `:42`,
+`:42:7`, `:42-50`, `#L42`, or `#L42C7`. Links can open files hidden from the
+file list. If a file can't be opened, the preview names it and explains why.
+This works for readers and controllers on both Herdr TUI and herdr-core
+relays that offer workspace inspection, without a relay update.
 
 Git inspection disables hooks, pagers, text conversion, external diffs, lazy
 fetches, and user/system Git configuration. Status is limited to 2,000 changed
@@ -593,8 +604,11 @@ Terminal Refresh controls how often the relay checks a visible pane: 100 ms,
 visible matches, and moves between the first 1,000 of them.
 
 Explicit HTTP(S) URLs in terminal output become external links with opener and
-referrer isolation. When the last terminal lines name supported key hints such
-as arrows, Enter, Esc, Tab, Y/N, or a modifier chord, the app offers matching
+referrer isolation. Recognised workspace file paths open in the read-only
+workspace inspector instead.
+
+When the last terminal lines name supported key hints such as arrows, Enter,
+Esc, Tab, Y/N, or a modifier chord, the app offers matching
 one-tap actions through the same ordered key path. Detected actions can be
 dismissed and never replace verified approval or structured-question controls.
 

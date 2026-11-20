@@ -85,7 +85,8 @@ import { appScriptPattern, appStylePattern, releaseEntryPath } from './release-r
 // Raised from 169 to 170 KiB by owner authorization after merging the Svelte
 // 5.57 runtime (which already used one KiB of headroom) with the work above;
 // this ceiling is not permission for future increases.
-const limitKiB = 170;
+// Raised from 170 to 172 KiB by owner authorization for file path links (2,062 B gzip).
+const limitKiB = 172;
 const limit = limitKiB * 1024;
 const root = resolve(process.argv[2] || 'dist');
 const assetNames = await readdir(join(root, 'assets'));

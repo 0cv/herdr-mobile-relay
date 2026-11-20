@@ -361,7 +361,7 @@ test('keeps wide controller panes aligned and horizontally scrollable', async ({
 test('wraps wide terminal output for a paired reader credential', async ({ page }) => {
   // A reader never leases, even opted in on a relay that supports it.
   await page.addInitScript(() => localStorage.setItem('herdr_terminal_resize_session', 'true'));
-  const capabilities = ['attention_classification', 'pane_size_opt_in', 'paging_keys'];
+  const capabilities = ['attention_classification', 'pane_size_opt_in', 'paging_keys', 'workspace_inspection'];
   await connectFedora(page, { capabilities });
   await saveDeviceCredential(page, { id: 'credential-reader', deviceId: 'device-reader', secret: 'R'.repeat(43), role: 'reader' });
   // Push a fresh connection snapshot so App's derived reader-role state observes
@@ -369,12 +369,12 @@ test('wraps wide terminal output for a paired reader credential', async ({ page 
   await handshake(page, 0, { capabilities });
   await server(page, 0, {
     type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Reader pane', agent: 'claude' }],
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Reader pane', agent: 'claude', cwd: '/work/mobile' }],
   });
   await page.getByRole('button', { name: 'Open Reader pane on Fedora' }).click();
   const wideRow = `https://example.test/${'reader-output'.repeat(40)}`;
   await server(page, 0, {
-    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: wideRow,
+    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: `${wideRow}\nSee dist/generated.ts`,
   });
 
   const reader = page.getByRole('main', { name: 'Terminal for Reader pane', exact: true });
@@ -395,6 +395,19 @@ test('wraps wide terminal output for a paired reader credential', async ({ page 
   });
   expect(geometry.rowHeight).toBeGreaterThan(geometry.lineHeight * 1.5);
   expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.clientWidth + 1);
+
+  await terminal.getByRole('button', { name: 'dist/generated.ts', exact: true }).tap();
+  const dialog = page.getByRole('dialog', { name: 'Workspace', exact: true });
+  await expect(dialog.getByRole('textbox', { name: 'Contents of dist/generated.ts' })).toHaveAttribute('readonly', '');
+  await expect(dialog.getByRole('button')).toHaveCount(2);
+  await expect(dialog.getByRole('button', { name: 'Show file list' })).toBeVisible();
+  await dialog.getByRole('button', { name: 'Close workspace inspector' }).click();
+  await expect(readOnlyFeedback).toBeVisible();
+  for (const name of ['Send prompt', 'Attach files']) await expect(reader.getByRole('button', { name, exact: true })).toBeDisabled();
+  await expect(reader.getByRole('combobox', { name: 'Prompt' })).toBeDisabled();
+  const keyPad = reader.locator('.term-keys');
+  await expect(keyPad.getByRole('button', { name: 'Enter', exact: true })).toBeDisabled();
+  await expect(keyPad.locator('button:enabled, input:enabled')).toHaveCount(0);
   await page.getByRole('button', { name: 'Back', exact: true }).click();
   await page.getByRole('navigation', { name: 'Application' })
     .getByRole('button', { name: /^Settings(?:,|$)/ }).click();
@@ -545,6 +558,88 @@ test('finds and highlights matches across virtualized terminal output', async ({
   await search.press('Escape');
   await expect(search).toBeHidden();
   await expect(page.locator('mark.terminal-find-match')).toHaveCount(0);
+});
+
+for (const availability of ['available', 'no-capability', 'no-directory'] as const) {
+  test(`Terminal file links are ${availability}`, async ({ page }) => {
+    const cwd = availability === 'no-directory' ? '' : '/work/mobile';
+    await openAgent(page, { pane_id: 'w1:p1', status: 'working', project: 'File links', agent: 'codex', cwd }, {
+      capabilities: availability === 'no-capability' ? [] : ['workspace_inspection'],
+    });
+    const terminal = page.getByRole('log');
+    await server(page, 0, {
+      type: 'pane_content', pane_id: 'w1:p1', format: 'plain',
+      content: ' M src/main.ts:42\nSee https://example.com/docs/guide.html',
+    });
+    await expect(terminal).toContainText(' M src/main.ts:42');
+    await expect(terminal.getByRole('link', { name: 'https://example.com/docs/guide.html' })).toHaveAttribute('target', '_blank');
+    expect((await commands(page)).filter(({ type }) => String(type).startsWith('workspace_'))).toEqual([]);
+    const path = terminal.getByRole('button', { name: 'src/main.ts:42', exact: true });
+    if (availability !== 'available') await expect(path).toHaveCount(0);
+    if (availability === 'no-directory') return;
+    if (availability === 'no-capability') await handshake(page, 0, { capabilities: ['workspace_inspection'] });
+    await expect(path).toBeVisible();
+    await page.getByRole('button', { name: 'Find in terminal', exact: true }).click();
+    await page.getByRole('searchbox', { name: 'Find in terminal output' }).fill('main');
+    await expect(terminal.locator('[data-file-path="src/main.ts"] mark.terminal-find-match.active')).toHaveText('main');
+  });
+}
+
+test('taps a Terminal file link and sends the resolved workspace-relative path', async ({ page }) => {
+  await openAgent(page, { pane_id: 'w1:p1', status: 'working', project: 'File links', agent: 'codex', cwd: '/work/mobile' }, {
+    capabilities: ['workspace_inspection'],
+  });
+  const terminal = page.getByRole('log');
+  const rows = Array.from({ length: 110 }, (_, index) => index === 25 ? ' M /work/mobile/src/main.ts' : `Terminal row ${index}`);
+  await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: rows.join('\n') });
+  await expect(terminal).toContainText('Terminal row 109');
+  await terminal.evaluate(element => { element.scrollTop = 300; });
+  const link = terminal.getByRole('button', { name: '/work/mobile/src/main.ts', exact: true });
+  await expect(link).toBeInViewport({ ratio: 1 });
+  const scrollTop = await terminal.evaluate(element => element.scrollTop);
+  expect(scrollTop).toBeGreaterThan(0);
+  expect(await distanceFromBottom(terminal)).toBeGreaterThan(200);
+  await link.tap();
+  const dialog = page.getByRole('dialog', { name: 'Workspace', exact: true });
+  await expect(dialog.getByLabel('Contents of src/main.ts')).toHaveValue('# Workspace preview\n\nRead-only file contents.');
+  await expect(dialog.getByRole('complementary', { name: 'Workspace files' })).toHaveCount(0);
+  expect(await lastCommand(page, 'workspace_file')).toMatchObject({ pane_id: 'w1:p1', path: 'src/main.ts' });
+  await dialog.getByRole('button', { name: 'Close workspace inspector' }).click();
+  await expect(dialog).toBeHidden();
+  expect(await terminal.evaluate(element => element.scrollTop)).toBe(scrollTop);
+  await page.getByRole('button', { name: 'Inspect workspace' }).click();
+  await expect(dialog.getByRole('complementary', { name: 'Workspace files' })).toBeVisible();
+  await expect(dialog.getByText('Choose a file to preview it.')).toBeVisible();
+});
+
+test('refreshes file links on the held Terminal frame when the working directory changes during Resize Session', async ({ page }) => {
+  const agent = { pane_id: 'w1:p1', status: 'working', project: 'Resizing file links', agent: 'codex', cwd: '/work/mobile' };
+  await openAgent(page, agent, { capabilities: ['workspace_inspection'] });
+  const terminal = page.getByRole('log');
+  const oldPath = '/work/mobile/src/main.ts';
+  const newPath = '/work/other/src/main.ts';
+  const oldLink = terminal.getByRole('button', { name: oldPath, exact: true });
+  const newLink = terminal.getByRole('button', { name: newPath, exact: true });
+  await server(page, 0, {
+    type: 'pane_content', pane_id: agent.pane_id, format: 'plain', content: `${oldPath}\n${newPath}`,
+  });
+  await expect(oldLink).toBeVisible();
+  await expect(newLink).toHaveCount(0);
+
+  await handshake(page, 0, { capabilities: ['workspace_inspection', 'pane_size_opt_in'] });
+  await expect(terminal).toHaveClass(/resize-layout/);
+  await server(page, 0, {
+    type: 'pane_content', pane_id: agent.pane_id, format: 'plain', content: 'Transient repaint', resize_settling: true,
+  });
+  await expect(oldLink).toBeVisible();
+  await server(page, 0, { type: 'agents', agents: [{ ...agent, cwd: '/work/other' }] });
+
+  await expect(newLink).toBeVisible();
+  await expect(oldLink).toHaveCount(0);
+  await expect(terminal).not.toContainText('Transient repaint');
+  await terminal.getByText(oldPath, { exact: false }).click();
+  await expect(page.getByRole('dialog', { name: 'Workspace', exact: true })).toBeHidden();
+  expect((await commands(page)).filter(({ type }) => String(type).startsWith('workspace_'))).toEqual([]);
 });
 
 test('keeps the terminal key row compact on touch screens', async ({ page }) => {

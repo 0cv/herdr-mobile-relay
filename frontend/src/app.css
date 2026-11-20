@@ -483,7 +483,8 @@ textarea { min-height: 6.5rem; resize: vertical; }
   line-height: 1.45;
 }
 .activity-extract { background: var(--terminal); border: 1px solid var(--border); border-radius: .7rem; position: relative; }
-.term-content a.terminal-link { color: var(--terminal-link); cursor: pointer; text-decoration: underline; text-decoration-color: color-mix(in srgb, currentColor 60%, transparent); text-underline-offset: .12em; }
+.term-content a.terminal-link, .term-content a.file-link { color: var(--terminal-link); cursor: pointer; text-decoration: underline; text-decoration-color: color-mix(in srgb, currentColor 60%, transparent); text-underline-offset: .12em; }
+.file-link { cursor: pointer; }
 .term-content a.terminal-link:visited { color: var(--terminal-link-visited); }
 .activity-extract pre { color: var(--terminal-text); margin: 0; max-height: 55dvh; overflow: auto; overflow-wrap: anywhere; padding: .8rem; padding-top: 2.4rem; white-space: pre-wrap; word-break: normal; }
 .activity-extract .empty-state { color: color-mix(in srgb, var(--terminal-text) 60%, transparent); padding: 1rem; }

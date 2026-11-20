@@ -1,5 +1,6 @@
 import type { TerminalScheme } from './config';
-import { escapeHtml as escapeHtmlString, safeExternalUrl, trimUrlPunctuation } from './rich-output';
+import { fileLinksInFragments, findFileLinks, findUriSpans, outsideUnsupportedUris, renderFileLinks, type FileLinkContext } from './file-links';
+import { escapeHtml as escapeHtmlString, HTTP_URL_PATTERN, safeExternalUrl, trimUrlPunctuation } from './rich-output';
 
 // Everything that depends on whether the phone's terminal pane is dark or
 // light. The desktop pane may run the opposite scheme, so each entry also says
@@ -237,22 +238,25 @@ function terminalGraphemeWidth(grapheme: string): number {
   return isWideTerminalCodePoint(codePoint) ? 2 : 1;
 }
 
-function terminalCellsHtml(text: string, startingColumn: number): { html: string; column: number } {
+function terminalCellsHtml(text: string, startingColumn: number, offset: number, render: TerminalFragmentRenderer): { html: string; column: number } {
   let column = startingColumn;
   let html = '';
-  let plain = '';
+  let plainStart = offset;
   let plainCells = 0;
+  const tabs: number[] = [];
   let horizontal = '';
   let horizontalCells = 0;
   // Run widths multiply the probed cell advance, not ch: Safari can resolve
   // 1ch against different font metrics than the rendered glyph advance, which
   // clipped grid runs and cut rules short (issue #11). The 1ch fallback only
   // covers the frame before the probe has measured.
-  const flushPlain = () => {
-    if (!plain) return;
-    html += `<span class="terminal-cell-run" style="width:calc(${plainCells} * var(--terminal-cell-width, 1ch))">${linkifyTerminalText(plain)}</span>`;
-    plain = '';
+  const flushPlain = (end: number) => {
+    if (!plainCells) return;
+    const content = render(plainStart, end);
+    let tab = 0;
+    html += `<span class="terminal-cell-run" style="width:calc(${plainCells} * var(--terminal-cell-width, 1ch))">${tabs.length ? content.replace(/\t/g, () => ' '.repeat(tabs[tab++])) : content}</span>`;
     plainCells = 0;
+    tabs.length = 0;
   };
   const flushHorizontal = () => {
     if (!horizontal) return;
@@ -262,26 +266,31 @@ function terminalCellsHtml(text: string, startingColumn: number): { html: string
     horizontalCells = 0;
   };
   for (const segment of terminalGraphemes(text)) {
+    const start = offset;
+    offset += segment.length;
     if (segment === '\t') {
       flushHorizontal();
       const spaces = 8 - (column % 8);
-      plain += ' '.repeat(spaces);
+      tabs.push(spaces);
       plainCells += spaces;
       column += spaces;
       continue;
+    }
+    const ascii = /^[\x20-\x7e]$/u.test(segment);
+    if (!ascii) {
+      flushPlain(start);
+      plainStart = offset;
     }
     const width = terminalGraphemeWidth(segment);
     const box = TERMINAL_BOX_RENDERINGS[segment];
     if (box) {
       flushHorizontal();
-      flushPlain();
       const style = box.style ? ` style="${box.style}"` : '';
       html += `<span class="terminal-cell ${box.className}"${style}>${escapeHtml(segment)}</span>`;
       column += width;
       continue;
     }
     if (TERMINAL_HORIZONTAL_CELLS[segment]) {
-      flushPlain();
       if (horizontal && horizontal[0] !== segment) flushHorizontal();
       horizontal += segment;
       horizontalCells += width;
@@ -289,18 +298,16 @@ function terminalCellsHtml(text: string, startingColumn: number): { html: string
       continue;
     }
     flushHorizontal();
-    if (/^[\x20-\x7e]$/u.test(segment)) {
-      plain += segment;
+    if (ascii) {
       plainCells += width;
     } else {
-      flushPlain();
       const className = width === 2 ? ' terminal-cell-wide' : '';
       html += `<span class="terminal-cell${className}">${escapeHtml(segment)}</span>`;
     }
     column += width;
   }
   flushHorizontal();
-  flushPlain();
+  flushPlain(offset);
   return { html, column };
 }
 
@@ -309,23 +316,32 @@ export function escapeHtml(text: unknown): string {
   return escapeHtmlString(String(text ?? ''));
 }
 
-const TERMINAL_URL_PATTERN = /https?:\/\/[^\s<>"']+/giu;
+type TerminalFragmentRenderer = (start: number, end: number) => string;
 
-export function linkifyTerminalText(value: string): string {
-  let html = '';
-  let cursor = 0;
-  for (const match of value.matchAll(TERMINAL_URL_PATTERN)) {
-    const index = match.index || 0;
-    html += escapeHtml(value.slice(cursor, index));
-    const [candidate, suffix] = trimUrlPunctuation(match[0]);
-    const href = safeExternalUrl(candidate);
-    html += href
-      ? `<a class="terminal-link" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">${escapeHtml(candidate)}</a>${escapeHtml(suffix)}`
-      : escapeHtml(match[0]);
-    cursor = index + match[0].length;
-  }
-  html += escapeHtml(value.slice(cursor));
-  return html;
+function terminalFragmentRenderer(row: string, fileLinks?: FileLinkContext | null): TerminalFragmentRenderer {
+  const uris = findUriSpans(row);
+  const webMatches = outsideUnsupportedUris(uris);
+  const filesIn = fileLinksInFragments(findFileLinks(row, fileLinks, uris));
+  return (start, end) => {
+    let html = '';
+    let cursor = start;
+    const renderText = (limit: number) => renderFileLinks(row.slice(cursor, limit), filesIn(cursor, limit));
+    for (const match of webMatches(row.slice(start, end), HTTP_URL_PATTERN, start)) {
+      const index = start + match.index;
+      html += renderText(index);
+      const [candidate, suffix] = trimUrlPunctuation(match[0]);
+      const href = safeExternalUrl(candidate);
+      html += href
+        ? `<a class="terminal-link" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">${escapeHtml(candidate)}</a>${escapeHtml(suffix)}`
+        : escapeHtml(match[0]);
+      cursor = index + match[0].length;
+    }
+    return html + renderText(end);
+  };
+}
+
+export function linkifyTerminalText(value: string, fileLinks?: FileLinkContext | null): string {
+  return terminalFragmentRenderer(value, fileLinks)(0, value.length);
 }
 
 export function stripAnsi(text: unknown): string {
@@ -591,9 +607,10 @@ function ansiExtendedColor(codes: number[], position: number): { color: string; 
 }
 
 type SgrSegment = { text: string } | { codes: number[] };
+const SGR_PATTERN = /\x1b\[([0-9;]*)m/g;
 
 function* sgrSegments(text: string): Generator<SgrSegment> {
-  const parts = text.split(/\x1b\[([0-9;]*)m/g);
+  const parts = text.split(SGR_PATTERN);
   for (let index = 0; index < parts.length; index += 1) {
     if (index % 2 === 0) yield { text: parts[index] };
     else yield { codes: parts[index] ? parts[index].split(';').map(Number) : [0] };
@@ -626,6 +643,7 @@ export interface AnsiHtmlOptions {
   normalizeNearWhiteBackground?: boolean;
   normalizeNearBlackForeground?: boolean;
   preserveTerminalCells?: boolean;
+  fileLinks?: FileLinkContext | null;
 }
 
 export function ansiToHtml(text: string, options: AnsiHtmlOptions = {}): string {
@@ -633,20 +651,25 @@ export function ansiToHtml(text: string, options: AnsiHtmlOptions = {}): string 
     normalizeNearWhiteBackground = false,
     normalizeNearBlackForeground = false,
     preserveTerminalCells = false,
+    fileLinks,
   } = options;
   let html = '';
   let open = false;
   let styles: Record<string, string> = {};
   let column = 0;
+  let offset = 0;
+  const render = terminalFragmentRenderer(text.replace(SGR_PATTERN, ''), fileLinks);
   for (const segment of sgrSegments(text)) {
     if ('text' in segment) {
+      const end = offset + segment.text.length;
       if (preserveTerminalCells) {
-        const rendered = terminalCellsHtml(segment.text, column);
+        const rendered = terminalCellsHtml(segment.text, column, offset, render);
         html += rendered.html;
         column = rendered.column;
       } else {
-        html += linkifyTerminalText(segment.text);
+        html += render(offset, end);
       }
+      offset = end;
       continue;
     }
     if (open) {
@@ -896,10 +919,11 @@ export interface TerminalRowsOptions {
   normalizeLightPalette?: boolean;
   preserveLineEnds?: boolean;
   maxFixedGridColumns?: number;
+  fileLinks?: FileLinkContext | null;
 }
 
 export function terminalHtmlRows(text: string, options: TerminalRowsOptions = {}): RenderedTerminalRow[] {
-  const { normalizeLightPalette = false, preserveLineEnds = false, maxFixedGridColumns = 0 } = options;
+  const { normalizeLightPalette = false, preserveLineEnds = false, maxFixedGridColumns = 0, fileLinks } = options;
   const lines = text.split('\n');
   const backgrounds = ansiLineBackgrounds(lines);
   return lines.map((line, index) => {
@@ -936,6 +960,7 @@ export function terminalHtmlRows(text: string, options: TerminalRowsOptions = {}
         normalizeNearWhiteBackground: normalizeRow,
         normalizeNearBlackForeground: normalizeDarkText,
         preserveTerminalCells: fixedGrid || wideGrid,
+        fileLinks,
       })}</span>`,
       text: renderedText,
       columns,
@@ -977,6 +1002,7 @@ export interface TerminalContentOptions {
   preserveLayout?: boolean;
   preserveLineEnds?: boolean;
   maxFixedGridColumns?: number;
+  fileLinks?: FileLinkContext | null;
 }
 
 export function renderTerminalContent(
@@ -984,7 +1010,7 @@ export function renderTerminalContent(
   format: string,
   options: TerminalContentOptions = {},
 ): RenderedTerminalContent {
-  const { preserveLayout = false, preserveLineEnds = preserveLayout, maxFixedGridColumns = 0 } = options;
+  const { preserveLayout = false, preserveLineEnds = preserveLayout, maxFixedGridColumns = 0, fileLinks } = options;
   const markedDisplay = preserveLayout
     ? preservedTerminalDisplayContent(content)
     : compactSeparatorLines(terminalDisplayContent(content));
@@ -1006,7 +1032,7 @@ export function renderTerminalContent(
         const { fixedGrid, wideGrid } = classifyGridRow(preserveLayout, line, columns, maxFixedGridColumns);
         const classes = `ansi-line${fixedGrid ? ' terminal-grid-line' : ''}${wideGrid ? ' terminal-wide-grid' : ''}`;
         return {
-          html: `<span class="${classes}">${linkifyTerminalText(line)}</span>`,
+          html: `<span class="${classes}">${linkifyTerminalText(line, fileLinks)}</span>`,
           text: line,
           columns,
           fixedGrid,
@@ -1020,6 +1046,7 @@ export function renderTerminalContent(
     normalizeLightPalette: true,
     preserveLineEnds: preserveLayout,
     maxFixedGridColumns,
+    fileLinks,
   });
   return {
     display,
