@@ -123,7 +123,8 @@ func (s *Server) classifyPaneResponse(request coordinator.PaneReadRequest, respo
 		// not commit rows from frames read inside this window as history.
 		response["resize_settling"] = true
 	}
-	if classification.Interaction != nil || !isClaudeLike(agentName) {
+	if classification.Interaction != nil || !isClaudeLike(agentName) ||
+		agent != nil && (agent.ProbePending || agent.ScreenAttention == coordinator.ScreenWaiting) {
 		return response
 	}
 	if viewportOnly, _ := response["viewport_only"].(bool); viewportOnly {

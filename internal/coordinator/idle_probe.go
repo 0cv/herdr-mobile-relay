@@ -210,7 +210,6 @@ func (s *State) commitProbeStateLocked(rec *paneRecord, next *AgentState, newEve
 	rec.contentRev++
 	rec.attentionRev++
 	next.UpdatedAt = now.UnixMilli()
-	next.LastActiveAt = max(next.LastActiveAt, next.UpdatedAt)
 	rec.agent = next
 	s.registerTransition(next.PaneID, previous.Status, next.Status, previous.AttentionKind)
 	if !preservesChatCompletion(previous.Status, next.Status, previous.AttentionKind) {
@@ -218,9 +217,6 @@ func (s *State) commitProbeStateLocked(rec *paneRecord, next *AgentState, newEve
 	}
 	if newEvent && previous.Status == next.Status {
 		s.fireTransition(next.PaneID, next.Status)
-	}
-	if s.syncTriageLocked(next) {
-		s.persistTriageLocked()
 	}
 }
 

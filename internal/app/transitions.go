@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -102,17 +103,13 @@ func (s *Server) transitionBlocked(
 	paneID, agent, project string,
 	revision, transitionAt int64,
 ) {
-	agentState, agentExists := s.state.Agent(paneID)
-	if !agentExists {
+	agentState, blockedContentRevision, classifiedAttentionRevision, current := s.state.BlockedTransitionAgent(paneID, revision)
+	if !current {
 		return
 	}
 	session := agentState.Session
 	blockedEventID := agentState.BlockedEventID
-	blockedContentRevision := s.state.ContentRevision(paneID)
-	paneGeneration, active := s.state.PaneSession(paneID)
-	if !active || blockedEventID == "" {
-		return
-	}
+	paneGeneration := agentState.Generation
 	transitionCurrent := func() bool {
 		return s.state.BlockedTransitionCurrent(paneID, blockedEventID, paneGeneration)
 	}
@@ -122,26 +119,21 @@ func (s *Server) transitionBlocked(
 	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
 
-	if s.transitionEnrich != nil {
-		s.transitionEnrich(ctx, agentState)
-	} else {
-		s.enrichBlockedTransition(ctx, agentState)
+	if !agentState.StrictAttention {
+		if s.transitionEnrich != nil {
+			s.transitionEnrich(ctx, agentState)
+		} else {
+			s.enrichBlockedTransition(ctx, agentState)
+		}
+		persisted, ok := s.state.CommitAttentionClassification(
+			paneID, blockedEventID, paneGeneration, blockedContentRevision, classificationFromAgent(agentState),
+		)
+		if !ok || !transitionCurrent() {
+			return
+		}
+		agentState = persisted
+		classifiedAttentionRevision = s.state.AttentionRevision(paneID)
 	}
-	if !transitionCurrent() {
-		return
-	}
-	persisted, ok := s.state.CommitAttentionClassification(
-		paneID,
-		blockedEventID,
-		paneGeneration,
-		blockedContentRevision,
-		classificationFromAgent(agentState),
-	)
-	if !ok || !transitionCurrent() {
-		return
-	}
-	agentState = persisted
-	classifiedAttentionRevision := s.state.AttentionRevision(paneID)
 	classifiedCurrent := func() bool {
 		return s.state.AttentionTransitionCurrent(
 			paneID,
@@ -328,15 +320,31 @@ func (s *Server) enrichBlockedTransition(ctx context.Context, agent *coordinator
 	if agent == nil {
 		return
 	}
+	var content string
 	classification, err := classifyBlockedTransition(ctx, agent.Agent, func(readCtx context.Context) (string, error) {
 		attemptCtx, cancel := context.WithTimeout(readCtx, 3*time.Second)
 		defer cancel()
 		read, readErr := s.herdrC.ReadPane(attemptCtx, agent.PaneID, 80, "ansi")
-		return string(read.Content), readErr
+		content = string(read.Content)
+		return content, readErr
 	})
 	if err != nil {
-		setAgentAttention(s.state, agent, unknownPaneClassification())
+		s.setNativeAttention(agent, unknownPaneClassification(), "")
 		return
+	}
+	s.setNativeAttention(agent, classification, content)
+}
+
+func (s *Server) setNativeAttention(agent *coordinator.AgentState, classification question.Classification, content string) {
+	if s.cfg.IdleQuestionProbe {
+		live, _ := question.ClassifyLive(content, agent.Agent)
+		agent.LiveIdentity = ""
+		if classification.Kind == question.AttentionQuestion && live.Interaction != nil &&
+			classification.Interaction != nil && classification.Interaction.ID == live.Interaction.ID ||
+			classification.Kind == question.AttentionApproval && live.Kind == question.AttentionApproval &&
+				classification.Command == live.Command && slices.Equal(classification.Options, live.Options) {
+			agent.LiveIdentity = coordinator.LiveIdentity(live)
+		}
 	}
 	setAgentAttention(s.state, agent, classification)
 }
@@ -423,6 +431,7 @@ func classificationFromAgent(agent *coordinator.AgentState) question.Classificat
 		Command:          agent.Command,
 		Options:          append([]string(nil), agent.Options...),
 		ApprovalIdentity: agent.ApprovalFingerprint,
+		LiveIdentity:     agent.LiveIdentity,
 		Interaction:      agent.Interaction,
 	}
 }

@@ -101,6 +101,10 @@ func TestPaneSizerLeases(t *testing.T) {
 		}
 	}
 	acquire("a", 80, 0, 80, 45)
+	pane, err := c.PaneGet(t.Context(), "t1")
+	if err != nil || !m.Leased("t1", pane.TerminalID) || m.Leased("t1", "replacement") {
+		t.Fatalf("lease was not bound to its terminal: %v", err)
+	}
 	acquire("b", 60, 20, 60, 20)
 	acquire("a", 50, 0, 50, 20)
 	if _, _, ok := m.ReadGeometry("outsider", "t1"); ok {
@@ -122,6 +126,9 @@ func TestPaneSizerLeases(t *testing.T) {
 	if err := m.Release(t.Context(), "a", "t1", false); err != nil {
 		t.Fatal(err)
 	}
+	if m.Leased("t1", pane.TerminalID) {
+		t.Fatal("resize grace should not hold a lease")
+	}
 	now = now.Add(panesize.ReleaseGrace - time.Second)
 	m.sweep(t.Context())
 	if len(m.panes) != 1 {
@@ -134,6 +141,9 @@ func TestPaneSizerLeases(t *testing.T) {
 	}
 	acquire("a", 70, 30, 70, 30)
 	now = now.Add(panesize.LeaseTTL)
+	if m.Leased("t1", pane.TerminalID) {
+		t.Fatal("expired lease is still active before sweep")
+	}
 	m.sweep(t.Context())
 	if len(m.panes) != 0 {
 		t.Fatal("TTL not expired")
