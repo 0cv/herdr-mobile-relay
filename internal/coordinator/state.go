@@ -404,6 +404,15 @@ func (s *State) WaitingRequestCurrent(target protocol.TargetRef, eventID string,
 		(rec.agent.AttentionKind == question.AttentionQuestion) == isQuestion
 }
 
+func (s *State) CompletionRevision(paneID string) int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if rec := s.panes[paneID]; rec != nil {
+		return rec.completion.completionRev
+	}
+	return 0
+}
+
 func (s *State) CompletionCurrent(paneID string, revision int64) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -204,6 +205,81 @@ func (b *recordingTransitionBroadcast) Broadcast(message any) {
 	b.messages <- message
 }
 
+func seedAcceptedWaitingAlert(t *testing.T, s *Server, dir string) push.Payload {
+	t.Helper()
+	subscribeDevice(t, s.pushM, pushIdentity.DeviceID, "https://fcm.googleapis.com/phone")
+	target := currentPaneTarget(t, s)
+	if !s.state.CommitEvent(target.PaneID, "blocked", time.Now().UnixMilli()) {
+		t.Fatal("could not block pane")
+	}
+	agent, _ := s.state.Agent(target.PaneID)
+	if result := publishAttention(t, s, pushIdentity.DeviceID, agent.BlockedEventID, target); result.Queued != 1 {
+		t.Fatalf("publish = %#v, want one waiting alert", result)
+	}
+	payloads := queuedPushPayloads(t, dir)
+	if len(payloads) != 1 {
+		t.Fatalf("waiting alerts = %#v", payloads)
+	}
+	alert := payloads[0]
+	queuePath := filepath.Join(dir, "queue.json")
+	stored, err := json.Marshal(map[string]any{
+		"delivered": map[string]any{
+			"accepted": map[string]any{
+				"key": alert.Key, "tag": alert.Tag, "accepted_at": time.Now(),
+				"subscription": s.pushM.Subscriptions()[0],
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(queuePath, stored, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s.pushM = newPushManager(t, dir)
+	if err := s.pushM.Reconcile(t.Context(), s.pushEventCurrent); err != nil {
+		t.Fatal(err)
+	}
+	return alert
+}
+
+func TestWorkingTransitionWithdrawsAcceptedAlertAfterUnchangedPoll(t *testing.T) {
+	s, conn, client, dir := pushActionServer(t)
+	alert := seedAcceptedWaitingAlert(t, s, dir)
+	open := func() map[string]any {
+		t.Helper()
+		s.handlePushOpenRef(client, protocol.Inbound{RequestID: "tap", EventRef: alert.EventRef}, "push_open_ref", pushIdentity)
+		return readFrame(t, conn)
+	}
+	requireCompleted(t, open(), "push_open_ref")
+
+	paneID := alert.Key.PaneID
+	var workingRevision int64
+	s.state.SetOnTransition(func(_, _, _, status string, revision int64) {
+		if status == "working" {
+			workingRevision = revision
+		}
+	})
+	if !s.state.CommitEvent(paneID, "working", time.Now().UnixMilli()) || workingRevision == 0 {
+		t.Fatal("missing working transition")
+	}
+	working, _ := s.state.Agent(paneID)
+	s.state.CommitInventory([]*coordinator.AgentState{working}, s.state.RevisionCounter())
+	if s.state.Revision(paneID) == workingRevision {
+		t.Fatal("poll did not advance the pane revision")
+	}
+
+	s.handleTransition(t.Context(), paneID, working.Agent, working.Project, working.Status, workingRevision, time.Now().UnixMilli())
+	requireFailedResult(t, open(), "push_open_ref", "Notification target is no longer available")
+	withdrawals := queuedPushPayloads(t, dir)
+	if len(withdrawals) != 1 || !withdrawals[0].Retract || withdrawals[0].Key != alert.Key {
+		t.Fatalf("queue = %#v, want one withdrawal of the accepted alert", withdrawals)
+	}
+	if _, err := s.pushM.VerifyEventReference(alert.EventRef, time.Now()); !errors.Is(err, push.ErrStaleReference) {
+		t.Fatalf("withdrawn reference = %v, want stale", err)
+	}
+}
+
 func TestUnchangedPollPreservesBlockedTransitionSideEffects(t *testing.T) {
 	root := t.TempDir()
 	s := testServer()
@@ -369,9 +445,37 @@ func TestApprovalPushSuppressedWhenAttentionIsReclassified(t *testing.T) {
 	default:
 	}
 
-	s.handleChatCompletion(context.Background(), reclassified)
+	s.handleChatCompletion(context.Background(), reclassified, s.state.CompletionRevision(reclassified.PaneID))
 	if payloads := queuedPushes(); len(payloads) != 1 || payloads[0].Key.Category != push.CategoryFinished {
 		t.Fatalf("chat reclassification pushes = %+v, want one completion", payloads)
+	}
+}
+
+func TestChatCompletionWithdrawsAcceptedAlertAfterUnchangedPoll(t *testing.T) {
+	s, _, _, dir := pushActionServer(t)
+	s.state.EnableIdleQuestionProbe()
+	alert := seedAcceptedWaitingAlert(t, s, dir)
+	paneID := alert.Key.PaneID
+	blockedRevision := s.state.Revision(paneID)
+
+	classified, _, ok := s.state.CommitAttentionClassification(
+		paneID, alert.Key.EventID, alert.Key.Generation, s.state.ContentRevision(paneID),
+		question.Classification{Kind: question.AttentionChat, Prompt: "The request has been answered."}, "",
+	)
+	if !ok {
+		t.Fatal("could not classify chat completion")
+	}
+	s.state.CommitInventory([]*coordinator.AgentState{classified}, s.state.RevisionCounter())
+	if s.state.Revision(paneID) == classified.StateRevision {
+		t.Fatal("poll did not advance the pane revision")
+	}
+	s.transitionEnrich = func(context.Context, *coordinator.AgentState) {}
+
+	s.handleTransition(t.Context(), paneID, classified.Agent, classified.Project, "blocked", blockedRevision, time.Now().UnixMilli())
+
+	withdrawals := queuedPushPayloads(t, dir)
+	if len(withdrawals) != 1 || !withdrawals[0].Retract || withdrawals[0].Key != alert.Key {
+		t.Fatalf("queue = %#v, want one withdrawal of the accepted alert", withdrawals)
 	}
 }
 

@@ -336,6 +336,40 @@ func TestInitialDoneAndDoneSynonymsDoNotPublishCompletion(t *testing.T) {
 	}
 }
 
+func TestWorkingTransitionCurrentSurvivesReportsButNotGenerationChanges(t *testing.T) {
+	for _, change := range []string{"explicit bump", "session change", "pane replacement"} {
+		t.Run(change, func(t *testing.T) {
+			s := testState()
+			pane := &AgentState{PaneID: "p1", TerminalID: "terminal-1", Status: "blocked"}
+			poll := func() { s.CommitInventory([]*AgentState{pane}, s.RevisionCounter()) }
+			poll()
+			if !s.CommitEvent(pane.PaneID, "working", 1) {
+				t.Fatal("missing working transition")
+			}
+			workingRevision := s.Revision(pane.PaneID)
+			s.CommitEvent(pane.PaneID, "working", 2)
+			pane.Status = "working"
+			poll()
+			if !s.WorkingTransitionCurrent(pane.PaneID, workingRevision) {
+				t.Fatal("repeat working reports invalidated the transition")
+			}
+			switch change {
+			case "explicit bump":
+				s.BumpGeneration(pane.PaneID)
+			case "session change":
+				pane.SessionID = "session-1"
+				poll()
+			case "pane replacement":
+				pane.TerminalID = "terminal-2"
+				poll()
+			}
+			if s.WorkingTransitionCurrent(pane.PaneID, workingRevision) {
+				t.Fatal("old working transition survived a new pane generation")
+			}
+		})
+	}
+}
+
 func TestFinishedRegistrationRequiresAttentionTransition(t *testing.T) {
 	s := testState()
 	s.CommitInventory([]*AgentState{{PaneID: "p1", Status: "working"}}, s.RevisionCounter())
