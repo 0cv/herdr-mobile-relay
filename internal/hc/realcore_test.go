@@ -354,7 +354,7 @@ func TestRealCore(t *testing.T) {
 		observe("less", less)
 	})
 	cat := start([]string{"/bin/sh", "-c", "trap '' INT; exec cat"})
-	for _, key := range []string{"Enter", "Escape", "Tab", "Up", "Down", "Left", "Right", "Shift+Tab", "ctrl+c", "f5", "A"} {
+	for _, key := range []string{"Enter", "Escape", "Tab", "Up", "Down", "Left", "Right", "Shift+Tab", "ctrl+c", "f5", "A", "PageUp", "PageDown", "Home", "End", "ctrl+End", "shift+PageUp"} {
 		t.Run("key/"+key, func(t *testing.T) {
 			if err := client.SendKeys(ctx, cat, []string{key}); err != nil {
 				t.Fatalf("client/core key mismatch for %q: %v", key, err)

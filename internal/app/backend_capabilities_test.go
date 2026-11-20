@@ -16,6 +16,9 @@ func TestCoreBackendCapabilities(t *testing.T) {
 	want := s.effectiveCapabilitiesFor(herdr.ServerStatus{})
 	want = append(want, "agent_launch", "tab_rename", "tab_reorder", "pane_realtime_delta", "manual_terminal_input", "secret_input", "workspace_rename", "workspace_reorder", "workspace_reorder_block")
 	got := s.effectiveCapabilitiesFor(hc.New("/nonexistent/core.sock").CapabilityStatus())
+	if !slices.Contains(got, "paging_keys") {
+		t.Fatalf("capabilities missing paging_keys: %v", got)
+	}
 	slices.Sort(want)
 	slices.Sort(got)
 	if !slices.Equal(got, want) {
@@ -32,7 +35,7 @@ func TestTUIBackendCapabilities(t *testing.T) {
 		"directory_browser", "workspace_management", "worktree_management",
 		"self_update", "structured_questions", "slash_commands",
 		"conversation_history", "conversation_activity", "workspace_inspection",
-		"semantic_input", "manual_terminal_input", "secret_input", "invitation_qr",
+		"semantic_input", "manual_terminal_input", "secret_input", "invitation_qr", "paging_keys",
 		"tab_rename", "agent_launch", "workspace_rename", "workspace_reorder",
 	}
 	for _, capability := range s.effectiveCapabilitiesFor(herdr.ServerStatus{}) {

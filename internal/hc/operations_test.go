@@ -67,8 +67,8 @@ func TestOperations(t *testing.T) {
 		run          func(*Client) error
 	}{
 		{"prompt", "terminal.send", map[string]any{"text": "answer", "force": true}, func(c *Client) error { return c.Prompt(t.Context(), "term", "answer") }},
-		{"keys", "terminal.keys", map[string]any{"keys": []string{"enter", "shift+tab", "down", "f5", "ctrl+c", "esc", "shift+x", "up", "left", "right", "tab", "alt+x", "ctrl+shift+a", "space", "ctrl+u"}}, func(c *Client) error {
-			return c.SendKeys(t.Context(), "term", []string{"Enter", "Shift+Tab", "Down", "f5", "ctrl+c", "Escape", "X", "Up", "Left", "Right", "Tab", "alt+x", "ctrl+shift+a", "Space", "Ctrl+U"})
+		{"keys", "terminal.keys", map[string]any{"keys": []string{"enter", "shift+tab", "down", "f5", "ctrl+c", "esc", "shift+x", "up", "left", "right", "tab", "alt+x", "ctrl+shift+a", "space", "ctrl+u", "pageup", "pagedown", "home", "end", "ctrl+shift+pageup"}}, func(c *Client) error {
+			return c.SendKeys(t.Context(), "term", []string{"Enter", "Shift+Tab", "Down", "f5", "ctrl+c", "Escape", "X", "Up", "Left", "Right", "Tab", "alt+x", "ctrl+shift+a", "Space", "Ctrl+U", "PageUp", "PageDown", "Home", "End", "ctrl+shift+PageUp"})
 		}},
 		{"literal uppercase", "terminal.keys", map[string]any{"keys": []string{"shift+x"}}, func(c *Client) error { return c.SendLiteralKey(t.Context(), "term", "X") }},
 		{"literal space", "terminal.keys", map[string]any{"keys": []string{"space"}}, func(c *Client) error { return c.SendLiteralKey(t.Context(), "term", " ") }},
