@@ -401,6 +401,20 @@ test('wraps wide terminal output for a paired reader credential', async ({ page 
     .toHaveAccessibleDescription(/controller terminals keep the desktop width and scroll horizontally; read-only reader panes wrap to the phone width\./);
 });
 
+test('disables the arrow menu for readers on a relay with paging keys', async ({ page }) => {
+  const capabilities = ['paging_keys'];
+  await connectFedora(page, { capabilities });
+  await saveDeviceCredential(page, { id: 'credential-reader', deviceId: 'device-reader', secret: 'R'.repeat(43), role: 'reader' });
+  await handshake(page, 0, { capabilities });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Reader paging', agent: 'claude' }],
+  });
+  await page.getByRole('button', { name: 'Open Reader paging on Fedora' }).click();
+
+  await expect(page.getByRole('button', { name: 'Arrow keys' })).toBeDisabled();
+});
+
 test('does not repopulate prompts after an unsafe dispatch failure', async ({ page }) => {
   await openAgent(page, { pane_id: 'w1:p1', status: 'idle', project: 'Unsafe retry app', agent: 'codex' });
   const prompt = page.getByRole('combobox', { name: 'Prompt' });
@@ -552,6 +566,57 @@ test('keeps the terminal key row compact on touch screens', async ({ page }) => 
   await expect(esc).toBeVisible();
   expect(await page.evaluate(() => matchMedia('(pointer: coarse)').matches)).toBe(true);
   expect((await esc.boundingBox())!.height).toBeLessThan(44);
+});
+
+test('fits and sends paging keys in the arrow menu at 320px', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 740 });
+  await openAgent(page, { pane_id: 'w1:p1', status: 'idle', project: 'Paging', agent: 'claude' }, { capabilities: [] });
+  const arrows = page.getByRole('button', { name: 'Arrow keys' });
+  const menu = page.getByRole('group', { name: 'Arrow and paging keys' });
+  await arrows.click();
+  await expect(menu.getByRole('button')).toHaveCount(4);
+  const before = (await menu.boundingBox())!;
+
+  await handshake(page, 0, { capabilities: ['paging_keys'] });
+  await expect(menu.getByRole('button')).toHaveCount(8);
+  const row = page.locator('.term-keys');
+  const geometry = await row.evaluate((element) => {
+    const rowRect = element.getBoundingClientRect();
+    const buttons = [...element.querySelectorAll('.button')].map((button) => button.getBoundingClientRect());
+    return {
+      count: buttons.length,
+      onOneLine: buttons.every((rect) => rect.top === buttons[0].top),
+      insideRow: buttons.every((rect) => (
+        rect.left >= rowRect.left && rect.right <= rowRect.right && rect.top >= rowRect.top && rect.bottom <= rowRect.bottom
+      )),
+      fitsViewport: document.documentElement.scrollWidth <= innerWidth,
+    };
+  });
+  expect(geometry).toEqual({ count: 8, onOneLine: true, insideRow: true, fitsViewport: true });
+  const after = (await menu.boundingBox())!;
+  expect(after.width).toBe(before.width);
+  expect(after.height).toBe(before.height);
+  expect(after.x).toBeGreaterThanOrEqual(0);
+  expect(after.y).toBeGreaterThanOrEqual(0);
+  expect(after.x + after.width).toBeLessThanOrEqual(320);
+  expect(after.y + after.height).toBeLessThanOrEqual(740);
+
+  for (const name of ['Home', 'Page up', 'End', 'Page down']) {
+    const button = menu.getByRole('button', { name, exact: true });
+    expect(await button.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  }
+  const sentKeys = async () => (await commands(page))
+    .filter((command) => command.type === 'send_keys').map((command) => command.keys);
+  await menu.getByRole('button', { name: 'Page down', exact: true }).click();
+  await expect.poll(sentKeys).toEqual([['PageDown']]);
+  await expect(menu).toBeVisible();
+
+  const ctrl = page.getByRole('button', { name: 'Ctrl', exact: true });
+  await ctrl.click();
+  await arrows.click();
+  await menu.getByRole('button', { name: 'End', exact: true }).click();
+  await expect.poll(sentKeys).toEqual([['PageDown'], ['ctrl+end']]);
+  await expect(ctrl).toHaveAttribute('aria-pressed', 'true');
 });
 
 test('refreshes agents on return home and preserves shared terminal behavior', async ({ page }) => {

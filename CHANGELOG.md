@@ -5,6 +5,11 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Use Home, End, Page Up and Page Down from the phone's Arrow keys menu to
+  move through terminal output. Update the relay to see the new keys.
+
 ## [0.26.1] - 2026-11-19
 
 ### Added

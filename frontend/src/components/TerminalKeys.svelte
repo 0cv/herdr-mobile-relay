@@ -28,6 +28,8 @@
   let keyFeedbackError = $state(false);
   const keySending = $derived(sending || blocked);
   const disabled = $derived(readOnly || blocked || !targetRefForAgent(agent));
+  const { connections } = relayStore;
+  const pagingKeys = $derived($connections.get(agent.relay_id)?.capabilities.includes('paging_keys'));
   const FUNCTION_KEYS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
   let componentMounted = true;
   let keyFeedbackTimer: ReturnType<typeof setTimeout> | undefined;
@@ -130,7 +132,7 @@
     toggleModifier('shift');
   }
 
-  function modifierChord(key: string): { chord: string; label: string } | null {
+  function modifierChord(key: string, displayName?: string): { chord: string; label: string } | null {
     const parts: string[] = [];
     const labels: string[] = [];
     if (ctrlArmed) { parts.push('ctrl'); labels.push('Ctrl'); }
@@ -138,7 +140,7 @@
     if (shiftArmed) { parts.push('shift'); labels.push('Shift'); }
     if (!parts.length) return null;
     parts.push(key.toLocaleLowerCase());
-    labels.push(key.length === 1 ? key.toLocaleUpperCase() : key[0].toLocaleUpperCase() + key.slice(1).toLocaleLowerCase());
+    labels.push(displayName ?? (key.length === 1 ? key.toLocaleUpperCase() : key[0].toLocaleUpperCase() + key.slice(1).toLocaleLowerCase()));
     return { chord: parts.join('+'), label: labels.join('+') };
   }
 
@@ -157,8 +159,8 @@
     sendTerminalKey(character);
   }
 
-  function sendTerminalKey(key: string, plainLabel = key) {
-    const result = modifierChord(key);
+  function sendTerminalKey(key: string, { displayName, plainLabel = displayName ?? key }: { displayName?: string; plainLabel?: string } = {}) {
+    const result = modifierChord(key, displayName);
     void sendKeys([result?.chord || key], result?.label || plainLabel);
   }
 
@@ -168,7 +170,7 @@
 
   function sendFunctionKey(number: number) {
     fkeysOpen = false;
-    sendTerminalKey(`f${number}`, `F${number}`);
+    sendTerminalKey(`f${number}`, { displayName: `F${number}` });
   }
 
   function modifierKeydown(event: KeyboardEvent) {
@@ -214,18 +216,32 @@
   </svg>
 {/snippet}
 
+{#snippet pagingKey(key: string, name: string, text: string)}
+  {#if pagingKeys}
+    <button
+      class="paging-key"
+      disabled={disabled}
+      aria-label={name}
+      onpointerdown={(event) => event.preventDefault()}
+      onclick={() => sendTerminalKey(key, { displayName: name })}
+    >{text}</button>
+  {:else}
+    <span aria-hidden="true"></span>
+  {/if}
+{/snippet}
+
 {#snippet arrowPopup()}
   {#if arrowsOpen}
-    <div class="arrow-popup">
-      <span aria-hidden="true"></span>
+    <div class="arrow-popup" role="group" aria-label="Arrow and paging keys">
+      {@render pagingKey('Home', 'Home', 'Home')}
       <button disabled={disabled} aria-label="Up" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Up')}>↑</button>
-      <span aria-hidden="true"></span>
+      {@render pagingKey('PageUp', 'Page up', 'PgUp')}
       <button disabled={disabled} aria-label="Left" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Left')}>←</button>
       <span aria-hidden="true"></span>
       <button disabled={disabled} aria-label="Right" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Right')}>→</button>
-      <span aria-hidden="true"></span>
+      {@render pagingKey('End', 'End', 'End')}
       <button disabled={disabled} aria-label="Down" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Down')}>↓</button>
-      <span aria-hidden="true"></span>
+      {@render pagingKey('PageDown', 'Page down', 'PgDn')}
     </div>
   {/if}
 {/snippet}
@@ -250,7 +266,7 @@
       <p class:error={keyFeedbackError} class="key-feedback" role="status" aria-live="polite">{keyControlStatus}</p>
     {/if}
     <div class="term-keys" aria-busy={keySending}>
-      <Button variant="secondary" size="sm" disabled={disabled} onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Escape', 'Cancelled prompt')}>Esc</Button>
+      <Button variant="secondary" size="sm" disabled={disabled} onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Escape', { plainLabel: 'Cancelled prompt' })}>Esc</Button>
       <Button variant="secondary" size="sm" disabled={disabled} aria-label="Tab" title="Send Tab" onpointerdown={(event) => event.preventDefault()} onclick={sendTab}>{@render tabIcon()}</Button>
       <div class="modifier-menu">
         <input

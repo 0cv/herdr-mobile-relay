@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/svelte';
+import { render, screen, waitFor, within } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import TerminalKeys from '$components/TerminalKeys.svelte';
@@ -16,9 +16,77 @@ function commandResult(requestId: string): CommandResult {
   return { type: 'command_result', request_id: requestId, ok: true };
 }
 
+function setPagingCapability(relayId = agent.relay_id) {
+  relayStore.connections.set(new Map([[relayId, { capabilities: ['paging_keys'] }]] as never));
+}
+
 describe('TerminalKeys', () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    relayStore.connections.set(new Map());
+  });
+
+  it('only shows arrows when the agent relay does not advertise paging keys', async () => {
+    setPagingCapability('another-relay');
+    render(TerminalKeys, { agent });
+
+    await userEvent.click(screen.getByRole('button', { name: 'Arrow keys' }));
+    const menu = within(screen.getByRole('group', { name: 'Arrow and paging keys' }));
+    expect(menu.getAllByRole('button')).toHaveLength(4);
+    for (const name of ['Up', 'Left', 'Right', 'Down']) {
+      expect(menu.getByRole('button', { name })).toBeVisible();
+    }
+  });
+
+  it.each([
+    { name: 'Page down', modifiers: [], key: 'PageDown', label: 'Page down' },
+    { name: 'Home', modifiers: ['Ctrl', 'Shift'], key: 'ctrl+shift+home', label: 'Ctrl+Shift+Home' },
+    { name: 'Page down', modifiers: ['Ctrl'], key: 'ctrl+pagedown', label: 'Ctrl+Page down' },
+  ])('sends $label and keeps the arrow menu open', async ({ name, modifiers, key, label }) => {
+    setPagingCapability();
+    const user = userEvent.setup();
+    vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
+    const send = vi.spyOn(relayStore, 'sendToAgent').mockResolvedValue(commandResult('paging-1'));
+    render(TerminalKeys, { agent });
+    for (const modifier of modifiers) {
+      await user.click(screen.getByRole('button', { name: modifier }));
+    }
+    await user.click(screen.getByRole('button', { name: 'Arrow keys' }));
+    await user.click(screen.getByRole('button', { name }));
+
+    expect(send).toHaveBeenCalledExactlyOnceWith(agent, { type: 'send_keys', keys: [key], activity_label: label });
+    expect(screen.getByRole('status')).toHaveTextContent(`${label} sent`);
+    expect(screen.getByRole('group', { name: 'Arrow and paging keys' })).toBeVisible();
+    for (const modifier of modifiers) {
+      expect(screen.getByRole('button', { name: modifier })).toHaveAttribute('aria-pressed', 'true');
+    }
+  });
+
+  it('disables Arrow keys for readers even when paging keys are available', () => {
+    setPagingCapability();
+    render(TerminalKeys, { agent, readOnly: true });
+
+    expect(screen.getByRole('button', { name: 'Arrow keys' })).toBeDisabled();
+  });
+
+  it('reports a rejected paging key and drops the next queued key', async () => {
+    setPagingCapability();
+    const user = userEvent.setup();
+    let rejectSend!: (error: Error) => void;
+    const send = vi.spyOn(relayStore, 'sendToAgent').mockImplementation(() => (
+      new Promise((_, reject) => { rejectSend = reject; })
+    ));
+    const toast = vi.spyOn(relayStore, 'showToast').mockImplementation(() => undefined);
+    render(TerminalKeys, { agent });
+
+    await user.click(screen.getByRole('button', { name: 'Arrow keys' }));
+    await user.click(screen.getByRole('button', { name: 'Page down' }));
+    await user.click(screen.getByRole('button', { name: 'Page up' }));
+    rejectSend(new Error('Relay refused the key'));
+
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Key send failed'));
+    expect(toast).toHaveBeenCalledWith('Relay refused the key', true);
+    expect(send).toHaveBeenCalledOnce();
   });
 
   it('queues a second Escape press while the first key send is in flight', async () => {
