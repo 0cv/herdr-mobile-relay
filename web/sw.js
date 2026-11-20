@@ -137,6 +137,7 @@ async function displayPush(payload) {
   if (payload.retract === true) return;
 
   if (newer) {
+    // A push must show a notification or the browser may show its own or penalize the subscription.
     const {body, icon, badge, actions, data} = newer;
     await self.registration.showNotification(newer.title, {body, icon, badge, actions, data, tag: newer.tag, renotify: false});
   } else {
