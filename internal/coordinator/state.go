@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 	"github.com/0cv/herdr-mobile-relay/internal/question"
 )
 
@@ -338,6 +339,22 @@ func (s *State) AttentionTransitionCurrent(
 		s.generation[paneID] == generation &&
 		string(rec.agent.AttentionKind) == attentionKind &&
 		rec.attentionRev == attentionRevision
+}
+
+func (s *State) WaitingRequestCurrent(target protocol.TargetRef, eventID string, revision int64, isQuestion bool) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rec := s.panes[target.PaneID]
+	return rec != nil &&
+		target.ServerSessionID == protocol.PrimaryServerSessionID &&
+		target.TerminalID != "" && target.TerminalID == rec.agent.TerminalID &&
+		target.AgentSessionID == rec.agent.SessionID &&
+		target.Generation == s.generation[target.PaneID] &&
+		rec.agent.Status == "blocked" &&
+		rec.agent.BlockedEventID == eventID &&
+		rec.attentionRev == revision &&
+		rec.agent.AttentionKind != question.AttentionChat &&
+		(rec.agent.AttentionKind == question.AttentionQuestion) == isQuestion
 }
 
 func (s *State) CompletionCurrent(paneID string, revision int64) bool {

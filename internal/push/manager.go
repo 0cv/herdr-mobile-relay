@@ -150,11 +150,15 @@ func (m *Manager) Publish(ctx context.Context, request PublishRequest) (PublishR
 			result.Suppressed++
 			continue
 		}
+		refExpiry := expiresAt
+		if key.Category.Waiting() {
+			refExpiry = now.Add(48 * time.Hour)
+		}
 		payload, err := BuildPayload(PayloadRequest{
 			Key:       key,
 			Locale:    subscription.Locale,
 			Preview:   request.Preview,
-			ExpiresAt: expiresAt,
+			ExpiresAt: refExpiry,
 		}, m.signer)
 		if err != nil {
 			return result, err

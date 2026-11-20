@@ -16,6 +16,9 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Tap an approval or question notification for up to 48 hours, as long as the
+  original request is still current. The tap opens the agent without approving
+  or replying.
 - The relay now starts even if old push keys or subscriptions cannot be parsed.
   If push notifications stop after updating, turning Push Notifications off and
   on in Settings restores them.

@@ -970,17 +970,27 @@ func TestTerminalFailureMovesOtherQueuedEntriesToRetainedEndpoint(t *testing.T) 
 
 func TestVerifyEventReference(t *testing.T) {
 	manager, dir := newDeliveringManager(t, endpointOne)
-	publishQuestion(t, manager, "event-1", deliveryNow)
+	acceptingManager(manager)
+	publishQuestionFor(t, manager, "event-1", deliveryNow, 5*time.Minute)
 	token := queuedEventRef(t, dir, "event-1")
 
-	claims, err := manager.VerifyEventReference(token, deliveryNow)
+	for _, entry := range manager.queue.state.Entries {
+		if !entry.Event.ExpiresAt.Equal(deliveryNow.Add(5 * time.Minute)) {
+			t.Fatalf("local deadline = %v", entry.Event.ExpiresAt)
+		}
+	}
+	if results := runPass(t, manager, deliveryNow); len(results) != 1 || results[0].Disposition != DeliveryAccepted {
+		t.Fatalf("delivery = %#v", results)
+	}
+	late := deliveryNow.Add(47 * time.Hour)
+	claims, err := manager.VerifyEventReference(token, late)
 	if err != nil || claims.Key != exactKey("event-1") {
 		t.Fatalf("VerifyEventReference() = %#v, %v", claims, err)
 	}
 	if _, err := manager.VerifyEventReference("not-a-token", deliveryNow); !errors.Is(err, ErrInvalidReference) {
 		t.Fatalf("garbage token error = %v, want %v", err, ErrInvalidReference)
 	}
-	if _, err := manager.VerifyEventReference(token, deliveryNow.Add(2*time.Hour)); !errors.Is(err, ErrExpiredReference) {
+	if _, err := manager.VerifyEventReference(token, deliveryNow.Add(48*time.Hour)); !errors.Is(err, ErrExpiredReference) {
 		t.Fatalf("expired token error = %v, want %v", err, ErrExpiredReference)
 	}
 
@@ -997,5 +1007,22 @@ func TestVerifyEventReference(t *testing.T) {
 	if err := manager.Resolve(t.Context(), exactKey("event-1")); err != nil {
 		t.Fatal(err)
 	}
-	requireReferenceStale(t, manager, token)
+	if _, err := manager.VerifyEventReference(token, late); !errors.Is(err, ErrStaleReference) {
+		t.Fatalf("resolved token error = %v, want %v", err, ErrStaleReference)
+	}
+	policy := manager.Policy("device-1", "en")
+	policy.Categories[CategoryFinished] = true
+	if err := manager.SetPolicy(policy); err != nil {
+		t.Fatal(err)
+	}
+	finished := exactKey("finished")
+	finished.Category = CategoryFinished
+	if _, err := manager.Publish(t.Context(), PublishRequest{Key: finished, Preview: PreviewBrief, CreatedAt: deliveryNow}); err != nil {
+		t.Fatal(err)
+	}
+	ref := queuedEventRef(t, dir, "finished")
+	requireReferenceAccepted(t, manager, ref)
+	if _, err := manager.VerifyEventReference(ref, deliveryNow.Add(5*time.Minute)); !errors.Is(err, ErrExpiredReference) {
+		t.Fatalf("finished token error = %v, want %v", err, ErrExpiredReference)
+	}
 }
