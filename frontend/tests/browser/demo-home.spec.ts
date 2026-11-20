@@ -315,6 +315,9 @@ async function exerciseTerminal(page: Page) {
   await expectTerminalExchange(page, 'Keys: Tab', 'Demo response: Key input received; no terminal action ran.');
   await exerciseSampleChecks(page);
   const key = (name: string) => page.getByRole('button', { name, exact: true });
+  const arrowMenu = page.getByRole('group', { name: 'Arrow and paging keys' });
+  await arrowMenu.getByRole('button', { name: 'Page down', exact: true }).click();
+  await expectTerminalExchange(page, 'Keys: PageDown', 'Demo response: Key input received; no terminal action ran.');
   await key('Right').click();
   await expectTerminalExchange(page, 'Keys: Right', '› Sample check 1/3: make test');
   await key('Esc').click();

@@ -31,7 +31,7 @@ describe('TerminalKeys', () => {
     render(TerminalKeys, { agent });
 
     await userEvent.click(screen.getByRole('button', { name: 'Arrow keys' }));
-    const menu = within(screen.getByRole('group', { name: 'Arrow and paging keys' }));
+    const menu = within(screen.getByRole('group', { name: 'Arrow keys' }));
     expect(menu.getAllByRole('button')).toHaveLength(4);
     for (const name of ['Up', 'Left', 'Right', 'Down']) {
       expect(menu.getByRole('button', { name })).toBeVisible();

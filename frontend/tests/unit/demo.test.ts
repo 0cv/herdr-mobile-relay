@@ -405,6 +405,17 @@ describe('demo responder', () => {
     expect(relay.respond({ type: 'refresh_agents' })).toEqual(inventory);
   });
 
+  it('accepts plain and modified paging keys on Atlas', () => {
+    const [atlas] = createDemoScene();
+    const relay = createDemoResponder(atlas.id);
+    const pane = paneCommand(atlas.id, atlas.agents[3]);
+
+    for (const key of ['PageUp', 'PageDown', 'Home', 'End', 'shift+pageup', 'alt+pagedown', 'ctrl+alt+shift+home', 'ctrl+end']) {
+      expect(relay.respond({ ...pane, type: 'send_keys', keys: [key] })).toMatchObject([{ ok: true, phase: 'completed' }]);
+      expect(readPane(relay, pane).content).toContain(`Keys: ${key}\nDemo response: Key input received`);
+    }
+  });
+
   it('moves a per-terminal check cursor and cancels or commits staged text', () => {
     const [atlas] = createDemoScene();
     const relay = createDemoResponder(atlas.id);

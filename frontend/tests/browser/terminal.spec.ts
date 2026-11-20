@@ -572,12 +572,13 @@ test('fits and sends paging keys in the arrow menu at 320px', async ({ page }) =
   await page.setViewportSize({ width: 320, height: 740 });
   await openAgent(page, { pane_id: 'w1:p1', status: 'idle', project: 'Paging', agent: 'claude' }, { capabilities: [] });
   const arrows = page.getByRole('button', { name: 'Arrow keys' });
-  const menu = page.getByRole('group', { name: 'Arrow and paging keys' });
   await arrows.click();
-  await expect(menu.getByRole('button')).toHaveCount(4);
-  const before = (await menu.boundingBox())!;
+  const arrowsOnly = page.getByRole('group', { name: 'Arrow keys', exact: true });
+  await expect(arrowsOnly.getByRole('button')).toHaveCount(4);
+  const before = (await arrowsOnly.boundingBox())!;
 
   await handshake(page, 0, { capabilities: ['paging_keys'] });
+  const menu = page.getByRole('group', { name: 'Arrow and paging keys' });
   await expect(menu.getByRole('button')).toHaveCount(8);
   const row = page.locator('.term-keys');
   const geometry = await row.evaluate((element) => {

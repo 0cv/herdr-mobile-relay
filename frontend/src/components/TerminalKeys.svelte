@@ -232,7 +232,7 @@
 
 {#snippet arrowPopup()}
   {#if arrowsOpen}
-    <div class="arrow-popup" role="group" aria-label="Arrow and paging keys">
+    <div class="arrow-popup" role="group" aria-label={pagingKeys ? 'Arrow and paging keys' : 'Arrow keys'}>
       {@render pagingKey('Home', 'Home', 'Home')}
       <button disabled={disabled} aria-label="Up" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Up')}>↑</button>
       {@render pagingKey('PageUp', 'Page up', 'PgUp')}

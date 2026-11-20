@@ -121,7 +121,7 @@ export function createDemoScene(epoch: number): DemoComputer[] {
       home: '/home/demo',
       capabilities: [
         'attention_classification', 'conversation_history', 'manual_terminal_input', 'agent_launch',
-        'directory_browser', 'workspace_inspection', 'invitation_qr', 'device_management',
+        'directory_browser', 'workspace_inspection', 'invitation_qr', 'device_management', 'paging_keys',
       ],
       workspaces: [
         {
