@@ -85,6 +85,33 @@ func TestPollerInventoryChangePublishesCurrentState(t *testing.T) {
 	}
 }
 
+func TestPollerReportsStoppedHerdrAndRecovers(t *testing.T) {
+	client := newFakeBackend()
+	client.panes = []herdr.Pane{{ID: "pane-1", Agent: "codex", Status: "idle"}}
+	client.setHook("GetInventory", func(context.Context, fakeCall) error {
+		return fmt.Errorf("herdr inventory: %w", herdr.ErrServerNotRunning)
+	})
+	state := testState()
+	poller := NewPoller(client, state, time.Second, testLogger())
+
+	poller.poll(context.Background())
+	status := state.InventoryStatus()
+	if status["state"] != "error" || status["error_code"] != "server_not_running" ||
+		status["message"] != "Herdr is not running on this computer. Start it with `herdr`." {
+		t.Fatalf("inventory status = %+v, want actionable server-not-running error", status)
+	}
+
+	client.setHook("GetInventory", nil)
+	poller.poll(context.Background())
+	snapshot := state.InventorySnapshot()
+	if status := snapshot.Status; status["state"] != "ready" || status["error_code"] != "" || status["message"] != "" {
+		t.Fatalf("inventory status = %+v, want ready without an error", status)
+	}
+	if len(snapshot.Agents) != 1 || snapshot.Agents[0].PaneID != "pane-1" {
+		t.Fatalf("inventory agents = %+v, want pane-1", snapshot.Agents)
+	}
+}
+
 func TestAgentsFromTopologyPreservesForegroundCwd(t *testing.T) {
 	state := testState()
 	poller := NewPoller(nil, state, time.Second, testLogger())

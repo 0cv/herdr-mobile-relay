@@ -29,6 +29,11 @@ project follows [Semantic Versioning](https://semver.org/).
   original request is still current. The tap opens the agent without approving
   or replying.
 
+### Fixed
+
+- When the Herdr TUI is stopped, the phone now tells you to start it with
+  `herdr` instead of showing a generic inventory error.
+
 ## [0.26.1] - 2026-11-19
 
 ### Added
