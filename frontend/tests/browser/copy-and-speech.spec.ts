@@ -165,7 +165,7 @@ test('speak reports the relay copy failure when no parser can read the pane', as
   expect((await commandsForSocket(page, 0)).filter((command) => command.type === 'speak_text')).toHaveLength(0);
 });
 
-test('a reader speaks the latest transcript turn without the relay copy command', async ({ page }) => {
+test('a Terminal reader speaks the exact transcript even after a deploy removes lazy history assets', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await saveDeviceCredential(page, { id: 'credential-reader', deviceId: 'device-reader', secret: 'R'.repeat(43), role: 'reader' });
@@ -190,6 +190,7 @@ test('a reader speaks the latest transcript turn without the relay copy command'
   await expect(readOnlyFeedback).toContainText('Reader access is read only');
   await expect(readOnlyFeedback).toBeVisible();
   await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'plain', content: ' Completed omp response.' });
+  await page.route('**/assets/{ConversationHistory,conversation-page}-*.js', (route) => route.fulfill({ status: 404, body: '' }));
 
   await page.getByRole('button', { name: 'Read latest response aloud' }).click();
   await expect.poll(async () => (await commandsForSocket(page, 0))

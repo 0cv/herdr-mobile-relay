@@ -305,6 +305,15 @@ export interface Activity {
   activity_key: string;
 }
 
+export interface ConversationEditDiff {
+  kind: 'edit' | 'write';
+  path: string;
+  added: number;
+  removed: number;
+  text: string;
+  truncated: boolean;
+}
+
 export interface ConversationTool {
   id?: string;
   name: string;
@@ -314,6 +323,7 @@ export interface ConversationTool {
   output?: string;
   error?: boolean;
   truncated?: boolean;
+  diff?: ConversationEditDiff;
 }
 
 export interface ConversationEntry {

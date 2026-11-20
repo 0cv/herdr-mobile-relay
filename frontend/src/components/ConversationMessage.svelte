@@ -1,5 +1,6 @@
 <script lang="ts">
   import ToolPayload from '$components/ToolPayload.svelte';
+  import ConversationToolCard from '$components/ConversationToolCard.svelte';
   import { isChosenOption, parseAskUserQuestion } from '$lib/conversation';
   import { safeMarkdownHtml } from '$lib/markdown';
   import type { ConversationTool } from '$lib/types';
@@ -36,27 +37,12 @@
     };
   }
 
-  function preserveToolState(node: HTMLDetailsElement, initial: { state: ConversationMessageViewState; key: string }) {
-    let current = initial;
-    node.open = current.state.openTools.has(current.key);
-    const save = () => {
-      if (node.open && current.state.openTools.size < 64) current.state.openTools.add(current.key);
-      else if (!node.open) current.state.openTools.delete(current.key);
-    };
-    node.addEventListener('toggle', save);
-    return {
-      update(next: typeof initial) {
-        if (next.state !== current.state || next.key !== current.key) { current = next; node.open = current.state.openTools.has(current.key); }
-      },
-      destroy() { save(); node.removeEventListener('toggle', save); },
-    };
-  }
-
   let {
     text,
     role,
     viewState,
     tools = [],
+    showDiffs = true,
     highlight = '',
     awaiting = null,
   }: {
@@ -64,6 +50,7 @@
     role?: string;
     viewState: ConversationMessageViewState;
     tools?: ConversationTool[];
+    showDiffs?: boolean;
     highlight?: string;
     awaiting?: 'below' | 'elsewhere' | null;
   } = $props();
@@ -111,25 +98,7 @@
           {#if tool.truncated}<p>Tool detail was truncated by the relay.</p>{/if}
         </section>
       {:else}
-        <details class:error={tool.error} use:preserveToolState={{ state: viewState, key: `${tool.id || tool.name}:${index}` }}>
-          <summary>
-            <span aria-hidden="true">{tool.error ? '!' : '›'}</span>
-            <strong>{tool.name}</strong>
-            <small>{tool.state || (tool.error ? 'failed' : tool.output ? 'completed' : 'called')}</small>
-            {#if tool.parentId}<small>nested tool</small>{/if}
-          </summary>
-          <div class="conversation-tool-detail">
-            {#if tool.input}
-              <ToolPayload label="Input" raw={tool.input} />
-            {/if}
-            {#if tool.output}
-              <ToolPayload label="Output" raw={tool.output} />
-            {:else}
-              <p>{tool.state === 'running' ? 'Waiting for tool output…' : 'No output was captured in this session log.'}</p>
-            {/if}
-            {#if tool.truncated}<p>Tool detail was truncated by the relay.</p>{/if}
-          </div>
-        </details>
+        <ConversationToolCard {tool} diff={showDiffs ? tool.diff : undefined} {viewState} cardKey={`${tool.id || tool.name}:${index}`} />
       {/if}
     {/each}
   </div>

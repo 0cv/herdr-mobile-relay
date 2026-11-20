@@ -150,6 +150,7 @@ func (s *Server) handleConversationHistory(client *transport.ClientConn, inbound
 		reply.fail("Conversation history could not be read")
 		return
 	}
+	page = page.WithEditDiffs(agent.Agent)
 	if s.conversationHistoryReadObserver != nil {
 		s.conversationHistoryReadObserver()
 	}

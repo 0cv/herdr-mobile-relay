@@ -6,6 +6,7 @@ import { securityState } from '$lib/security';
 import ManualTerminalInput from '$components/ManualTerminalInput.svelte';
 import { TerminalInputDelivery } from '$lib/terminal-input-delivery.svelte';
 import unavailablePage from '../../../contracts/fixtures/conversation_unavailable.json';
+import editFixture from '../../../contracts/fixtures/conversation_edit_diff.json';
 import piCatalogFixture from '../../../contracts/fixtures/pi_command_catalog.json';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { makeRelayId } from '$lib/config';
@@ -132,6 +133,35 @@ describe('relay command store', () => {
     vi.useRealTimers();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  it('accepts edit previews in pages and batches only from the advertising target relay', async () => {
+    relayStore.addRelay({ label: 'Other', url: 'ws://127.0.0.1:8872', token: '' });
+    const [firstSocket, secondSocket] = MockWebSocket.instances.slice(-2);
+    const enabled = connectRelay({ capabilities: ['conversation_history', 'conversation_activity', 'conversation_edit_diffs'] }, firstSocket);
+    const other = connectRelay({ capabilities: ['conversation_history', 'conversation_activity'] }, secondSocket);
+    const [firstConfig, secondConfig] = get(relayStore.relayConfigs);
+    const entry = { id: 'edit', role: 'assistant', tools: [editFixture] };
+    for (const [config, socket, expected] of [[firstConfig, enabled, editFixture.diff], [secondConfig, other, undefined]] as const) {
+      const agent = preferenceAgent(config.id, 'w1:p1', 'terminal');
+      const awaitRequest = (type: string) => vi.waitFor(() => {
+        const sent = socket.messages().find(message => message.type === type);
+        expect(sent?.request_id).toBeTruthy();
+        return sent!.request_id;
+      });
+      const page = relayStore.getConversationHistory(agent);
+      socket.message({ type: 'command_result', request_id: await awaitRequest('get_conversation_history'), ok: true, phase: 'completed', data: {
+        available: true, has_more: false, state: 'ready', mode: 'recent', entries: [entry], provisional: [{ ...entry, id: 'live:edit' }],
+      } });
+      const normalized = await page;
+      expect(normalized.entries[0].tools![0].diff).toEqual(expected);
+      expect(normalized.provisional![0].tools![0].diff).toEqual(expected);
+      const updates = relayStore.getConversationUpdates(agent, 'r', 0, new AbortController().signal, 'sub');
+      socket.message({ type: 'command_result', request_id: await awaitRequest('get_conversation_updates'), ok: true, phase: 'completed', data: {
+        kind: 'batch', subscription_id: 'sub', source_revision: 'r', sequence: 1, entries: [entry], remove: [], state: 'ready',
+      } });
+      expect((await updates).entries[0].tools![0].diff).toEqual(expected);
+    }
   });
 
   it('retains authoritative unknown-kind agents without profiles, sessions or workspace records', () => {

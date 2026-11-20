@@ -89,6 +89,7 @@
   let sourceChangedNotice = $state('');
   let query = $state('');
   let mode = $state<'conversation' | 'activity'>('conversation');
+  const showDiffs = $derived(mode === 'activity' && $connections.get(agent.relay_id)?.capabilities.includes('conversation_edit_diffs') === true);
   let listElement = $state<HTMLElement>(null!);
   let streamElement = $state<HTMLElement>(null!);
   /**
@@ -719,7 +720,7 @@
                 <ConversationMessageActions {entry} {agent} {agentName} />
               </span>
             </header>
-            <ConversationMessage role={entry.role} viewState={messageStates.get(entry.id)} text={entry.text} tools={entry.tools} highlight={query.trim()} awaiting={entry.id === waitingQuestionEntryId ? (questionFormShown ? 'below' : 'elsewhere') : null} />
+            <ConversationMessage role={entry.role} viewState={messageStates.get(entry.id)} text={entry.text} tools={entry.tools} {showDiffs} highlight={query.trim()} awaiting={entry.id === waitingQuestionEntryId ? (questionFormShown ? 'below' : 'elsewhere') : null} />
             {#if entry.id.startsWith('live:')}<small>Live · not saved yet</small>{/if}
             {#if entry.truncated}<small>Long turn truncated by the relay.</small>{/if}
           </article>

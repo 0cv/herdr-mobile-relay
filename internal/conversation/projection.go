@@ -13,6 +13,21 @@ type projectedEntry struct {
 	Entry  Entry
 }
 
+type storedProjection struct {
+	Entry               Entry `json:"entry"`
+	AmbiguousEditInputs []int `json:"ambiguous_edit_inputs,omitempty"`
+}
+
+func storeProjection(entry Entry) storedProjection {
+	stored := storedProjection{Entry: entry}
+	for index, tool := range entry.Tools {
+		if tool.ambiguousEditInput {
+			stored.AmbiguousEditInputs = append(stored.AmbiguousEditInputs, index)
+		}
+	}
+	return stored
+}
+
 type projectionDiagnostics struct {
 	OversizedRecords int
 	CorruptRecords   int
@@ -67,7 +82,7 @@ func projectJSONLRecord(agent, revision string, record JSONLRecord) (projectionR
 		result.Diagnostics.PlanCorrupt = true
 	}
 
-	calls, results := parseToolActivity(agentkind.Of(agent), raw)
+	calls, results := parseToolActivity(agentkind.Of(agent), raw, record.Raw)
 	toolEntry := Entry{Tools: calls}
 	omittedTools, omittedPayloads := normalizeEntryTools(&toolEntry)
 	calls = toolEntry.Tools
@@ -81,6 +96,33 @@ func projectJSONLRecord(agent, revision string, record JSONLRecord) (projectionR
 	entry.Truncated = entry.Truncated || omittedTools > 0 || omittedPayloads > 0
 	result.Entry = &projectedEntry{Offset: record.Start, Entry: *entry}
 	return result, results
+}
+
+type rawJSONFields map[string]json.RawMessage
+
+func decodeRawJSONFields(raw []byte) rawJSONFields {
+	var fields rawJSONFields
+	_ = json.Unmarshal(raw, &fields)
+	return fields
+}
+
+func (fields rawJSONFields) firstValue(keys ...string) json.RawMessage {
+	for _, key := range keys {
+		if value := fields[key]; len(value) > 0 && string(value) != "null" {
+			return value
+		}
+	}
+	return nil
+}
+
+func (fields rawJSONFields) firstString(keys ...string) string {
+	for _, key := range keys {
+		var text string
+		if value := fields[key]; len(value) > 0 && json.Unmarshal(value, &text) == nil && text != "" {
+			return text
+		}
+	}
+	return ""
 }
 
 func prepareJSONLEntry(agent string, record map[string]any, calls []ToolActivity) *Entry {

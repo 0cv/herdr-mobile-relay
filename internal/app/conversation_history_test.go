@@ -172,11 +172,20 @@ func TestConversationHistoryCommandFollowsClaudeContinuation(t *testing.T) {
 	child := "123e4567-e89b-12d3-a456-426614174001"
 	root := filepath.Join(home, ".claude", "projects", "-work-foreground")
 	writeInvariantRows(t, filepath.Join(root, anchor+".jsonl"),
-		map[string]any{"type": "assistant", "uuid": "a1", "message": map[string]any{"content": "parent response"}},
+		map[string]any{"type": "assistant", "uuid": "a1", "message": map[string]any{"content": []any{
+			map[string]any{"type": "text", "text": "parent response"},
+			map[string]any{"type": "tool_use", "id": "parent-edit", "name": "Write", "input": map[string]any{"file_path": "parent.go", "content": "parent"}},
+		}}},
 		map[string]any{"type": "continued-in", "sessionId": anchor, "continuedInSessionId": child},
 	)
 	writeInvariantRows(t, filepath.Join(root, child+".jsonl"),
-		map[string]any{"type": "assistant", "uuid": "b1", "message": map[string]any{"content": "new child response"}},
+		map[string]any{"type": "assistant", "uuid": "b1", "message": map[string]any{"content": []any{
+			map[string]any{"type": "text", "text": "new child response"},
+			map[string]any{"type": "tool_use", "id": "edit-1", "name": "Edit", "input": map[string]any{"file_path": "a.go", "old_string": "old", "new_string": "new"}},
+		}}},
+		map[string]any{"type": "user", "uuid": "result", "message": map[string]any{"content": []any{
+			map[string]any{"type": "tool_result", "tool_use_id": "edit-1", "content": "failed to save", "is_error": true, "details": "private-result-marker"},
+		}}},
 	)
 	server := testServer()
 	if server.conversationB != nil {
@@ -209,19 +218,23 @@ func TestConversationHistoryCommandFollowsClaudeContinuation(t *testing.T) {
 		t.Fatal(err)
 	}
 	var response struct {
-		OK   bool `json:"ok"`
-		Data struct {
-			Entries []struct {
-				Text string `json:"text"`
-			} `json:"entries"`
-			NextCursor string `json:"next_cursor"`
-		} `json:"data"`
+		OK   bool                    `json:"ok"`
+		Data conversation.BrowsePage `json:"data"`
 	}
 	if err := json.Unmarshal(data, &response); err != nil {
 		t.Fatal(err)
 	}
 	if !response.OK || len(response.Data.Entries) != 1 || response.Data.Entries[0].Text != "new child response" || response.Data.NextCursor == "" {
 		t.Fatalf("history command response = %s", data)
+	}
+
+	tool := response.Data.Entries[0].Tools[0]
+	if tool.ID != "edit-1" || tool.Diff == nil || tool.Diff.Text != "-old\n+new" || !tool.Error || tool.Output != "failed to save" || strings.Contains(string(data), "private-result-marker") {
+		t.Fatalf("recorded edit response = %s", data)
+	}
+	source, err := browser.ReadPage(ctx, conversation.BrowseRequest{Scope: conversation.BrowseScope{Provider: "claude", CWD: "/work/pane", ForegroundCWD: "/work/foreground", SessionID: anchor}, Limit: 1})
+	if err != nil || len(source.Entries) != 1 || source.Entries[0].Tools[0].Diff != nil {
+		t.Fatalf("source page = %+v, error = %v", source, err)
 	}
 
 	olderPayload, err := json.Marshal(map[string]any{
@@ -238,18 +251,18 @@ func TestConversationHistoryCommandFollowsClaudeContinuation(t *testing.T) {
 		t.Fatal(err)
 	}
 	var older struct {
-		OK   bool `json:"ok"`
-		Data struct {
-			Entries []struct {
-				Text string `json:"text"`
-			} `json:"entries"`
-		} `json:"data"`
+		OK   bool                    `json:"ok"`
+		Data conversation.BrowsePage `json:"data"`
 	}
 	if err := json.Unmarshal(data, &older); err != nil {
 		t.Fatal(err)
 	}
-	if !older.OK || len(older.Data.Entries) != 1 || older.Data.Entries[0].Text != "parent response" {
+	if !older.OK || len(older.Data.Entries) != 1 || older.Data.Entries[0].Text != "parent response" || len(older.Data.Entries[0].Tools) != 1 {
 		t.Fatalf("older history command response = %s", data)
+	}
+	tool = older.Data.Entries[0].Tools[0]
+	if tool.ID != "parent-edit" || tool.Diff == nil || tool.Diff.Path != "parent.go" || tool.Diff.Text != "+parent" {
+		t.Fatalf("older edit response = %s", data)
 	}
 }
 

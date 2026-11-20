@@ -1,36 +1,38 @@
 package conversation
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"math"
+	"slices"
 	"time"
 )
 
 func (b *Browser) memoryPage(
-	scope BrowseScope,
+	request BrowseRequest,
 	source fileSource,
 	projection recentProjection,
 	captured capturedRange,
 	initial bool,
-	limit int,
 ) BrowsePage {
+	scope := request.Scope
 	eligible := make([]projectedEntry, 0, len(projection.Entries))
 	for _, entry := range projection.Entries {
 		if entry.Offset < captured.boundary {
 			eligible = append(eligible, entry)
 		}
 	}
-	start := len(eligible) - limit
+	start := len(eligible) - request.Limit
 	if start < 0 {
 		start = 0
 	}
 	selected := append([]projectedEntry(nil), eligible[start:]...)
 	potentialOlder := start > 0 || captured.start > 0
-	base := BrowsePage{
+	base := request.withObservation(BrowsePage{
 		Available: true, State: BrowseReady, Mode: BrowseRecent,
 		SourceRevision: source.revision, Entries: []Entry{}, Diagnostics: projection.Diagnostics, OMOPlan: boundTodoPlan(projection.Plan, browseResponseBytes/4),
-	}
+	})
 	if captured.start == 0 {
 		total := len(projection.Entries)
 		base.Total = &total
@@ -54,7 +56,14 @@ func (b *Browser) memoryPage(
 			return b.rangeCursor("prepare", scope, source, captured.withBoundary(prepareBoundary))
 		}
 	}
-	fitted, omitted := b.fitProjected(selected, cursorCandidatePage(base, next))
+	fitted, omitted := b.fitProjected(selected, func(candidate []projectedEntry, omitted int) (BrowsePage, error) {
+		if omitted == 0 {
+			return cursorCandidatePage(base, next)(candidate, omitted)
+		}
+		return cursorCandidatePage(base, func(boundary int64) (string, error) {
+			return b.rangeCursor("recent", scope, source, captured.withBoundary(boundary))
+		})(candidate, omitted)
+	})
 	if omitted > 0 {
 		base.HasMore = true
 		cursor, err := b.rangeCursor("recent", scope, source, captured.withBoundary(fitted[0].Offset))
@@ -109,8 +118,44 @@ func browseOmissions(original, fitted []projectedEntry) (int, int) {
 	return tools, payloads
 }
 
+func (page BrowsePage) FitsReply() bool {
+	return pageSize(page) <= browseResponseBytes
+}
+
+// BoundActivityPayloads shortens an oversized bridge page without dropping entries or changing its cursor.
+func (page BrowsePage) BoundActivityPayloads() BrowsePage {
+	page.Entries = slices.Clone(page.Entries)
+	page.Provisional = slices.Clone(page.Provisional)
+	type payload struct {
+		entry *Entry
+		bytes int
+	}
+	var payloads []payload
+	for _, entries := range [][]Entry{page.Provisional, page.Entries} {
+		for i := range entries {
+			data, _ := json.Marshal(entries[i])
+			payloads = append(payloads, payload{entry: &entries[i], bytes: len(data)})
+		}
+	}
+	slices.SortStableFunc(payloads, func(a, b payload) int { return cmp.Compare(b.bytes, a.bytes) })
+	for _, payload := range payloads {
+		size := pageSize(page)
+		if size <= browseResponseBytes {
+			break
+		}
+		entry := boundBrowseEntry(*payload.entry, browseResponseBytes-size+payload.bytes-64)
+		if len(entry.Tools) == 0 && entry.Text == "" {
+			entry.Text = "Message content omitted by relay limits."
+		}
+		page.Diagnostics.OmittedTools += len(payload.entry.Tools) - len(entry.Tools)
+		page.Diagnostics.OmittedPayloads++
+		*payload.entry = entry
+	}
+	return page
+}
+
 func (b *Browser) enforcePageBudget(page BrowsePage) BrowsePage {
-	for b.pageSize(page) > browseResponseBytes && len(page.Entries) > 0 {
+	for !page.FitsReply() && len(page.Entries) > 0 {
 		index := len(page.Entries) - 1
 		entry := page.Entries[index]
 		if len(entry.Tools) > 0 {
@@ -127,7 +172,7 @@ func (b *Browser) enforcePageBudget(page BrowsePage) BrowsePage {
 		}
 		page.Entries[index] = entry
 	}
-	if b.pageSize(page) > browseResponseBytes {
+	if !page.FitsReply() {
 		if page.OMOPlan != nil {
 			page.Diagnostics.OmittedPayloads++
 		}
@@ -171,12 +216,13 @@ func (b *Browser) fitProjected(entries []projectedEntry, candidatePage func(cand
 		if err != nil {
 			continue
 		}
-		if b.pageSize(page) <= browseResponseBytes {
+		if page.FitsReply() {
 			return candidate, omitted
 		}
 	}
 	last := entries[len(entries)-1]
-	last.Entry = boundBrowseEntry(last.Entry, browseResponseBytes)
+	page, _ := candidatePage(entries[len(entries)-1:], len(entries)-1)
+	last.Entry = boundBrowseEntry(last.Entry, pageEntryBudget(page))
 	return []projectedEntry{last}, len(entries) - 1
 }
 
@@ -198,31 +244,29 @@ func boundBrowseEntry(entry Entry, budget int) Entry {
 		}
 		entry.Tools = candidate.Tools
 	}
-	if len(entry.Text) > 4096 {
-		entry.Text = entry.Text[:4096]
-	}
+	entry.Text, _ = clampText(entry.Text, 4096)
 	for len(entry.Text) > 0 {
 		if data, _ := json.Marshal(entry); len(data) <= budget {
 			return entry
 		}
-		entry.Text = entry.Text[:len(entry.Text)/2]
+		entry.Text, _ = clampText(entry.Text, len(entry.Text)/2)
 	}
 	return entry
 }
 
 func boundBrowseTool(tool ToolActivity) ToolActivity {
 	tool.Truncated = true
-	tool.ID, _ = clampText(tool.ID, 128)
-	tool.Name, _ = clampText(tool.Name, 64)
 	tool.Input, _ = clampText(tool.Input, 1024)
 	tool.Output, _ = clampText(tool.Output, 1024)
-	if tool.Name == "" {
-		tool.Name = "Tool"
-	}
 	return tool
 }
 
-func (b *Browser) pageSize(page BrowsePage) int {
+func pageEntryBudget(page BrowsePage) int {
+	page.Entries = []Entry{}
+	return browseResponseBytes - pageSize(page) - 64
+}
+
+func pageSize(page BrowsePage) int {
 	data, err := json.Marshal(page)
 	if err != nil {
 		return math.MaxInt
@@ -283,15 +327,19 @@ func nativeFailure(code, reason string) BrowsePage {
 	return failPage(code, reason, code == "output_limit" || code == "query_failed")
 }
 
-func (b *Browser) nativePage(scope BrowseScope, entries []Entry, hasMore bool, corrupt bool, total int, rawBefore, revision string, cursor browseCursor) BrowsePage {
-	diagnostics := normalizeEntriesForResponse(entries)
+func (b *Browser) nativePage(request BrowseRequest, entries []Entry, hasMore bool, corrupt bool, diagnostics BrowseDiagnostics, total int, rawBefore, revision string, cursor browseCursor) BrowsePage {
 	if corrupt {
-		diagnostics.CorruptRecords = 1
+		diagnostics.CorruptRecords = max(1, diagnostics.CorruptRecords)
 	}
+	diagnostics = mergeBrowseDiagnostics(diagnostics, normalizeEntriesForResponse(entries))
 	base := BrowsePage{
 		Available: true, State: BrowseReady, Mode: BrowseNative, Entries: []Entry{},
 		HasMore: hasMore, SourceRevision: revision, Diagnostics: diagnostics,
 	}
+	if IsKimi(request.Scope.Provider) {
+		base.Capabilities = &SourceCapabilities{Source: "recorded_history", ActiveBranch: true}
+	}
+	base = request.withObservation(base)
 	if total != UnknownTotal {
 		baseTotal := total
 		base.Total = &baseTotal
@@ -313,7 +361,7 @@ func (b *Browser) nativePage(scope BrowseScope, entries []Entry, hasMore bool, c
 			return "", errors.New("native conversation cursor is empty")
 		}
 		return encodeBrowseCursor(b.key, browseCursor{
-			Mode: "native", Scope: browseScopeID(scope), Revision: revision, NativeBefore: before,
+			Mode: "native", Scope: browseScopeID(request.Scope), Revision: revision, NativeBefore: before,
 			RangeEnd: cursor.RangeEnd, RangeDigest: cursor.RangeDigest,
 			ExpiresAt: time.Now().Add(b.options.CursorTTL).Unix(),
 		})

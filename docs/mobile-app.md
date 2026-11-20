@@ -408,6 +408,16 @@ preference that shows every recorded message with collapsible tool activity
 the app remembers either mode on this device. Both use an escaped Markdown subset, search filters the
 currently displayed view, each fenced code block has its own copy control, and
 each message can copy its original Markdown.
+
+In **Full history**, open an edit's tool card to see the recorded path and the
+requested added and removed lines. A write shows **Written content**: all
+supplied lines count as additions, even when the tool overwrites a file. The
+result or error remains below the preview, so the diff is not proof of success.
+**Diff truncated** means only the beginning of the change is shown; the counts
+still cover the whole recorded change. Unsupported or shortened inputs, and
+relays without edit previews, show the ordinary tool payload instead. Readers
+see the same cards as controllers on either relay; the cards do not apply edits.
+
 Conversation and Full history share the Terminal composer: multiline prompts,
 locally shared drafts, slash-command suggestions, photos/files and pasted images.
 Slash suggestions fill the draft without sending it; Ctrl/Meta+Enter sends it.
