@@ -5,6 +5,16 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- An approval or question alert can reach a previously unreachable phone for
+  up to 24 hours, depending on the push provider. An answered or replaced
+  request can be withdrawn before the phone reconnects. With an updated app
+  and relay, the newer alert for an agent also replaces one already on screen.
+- Tap an approval or question notification for up to 48 hours, as long as the
+  original request is still current. The tap opens the agent without approving
+  or replying.
+
 ## [0.26.1] - 2026-11-19
 
 ### Added
@@ -16,13 +26,6 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- An approval or question alert can reach a previously unreachable phone for
-  up to 24 hours, depending on the push provider. An answered or replaced
-  request can be withdrawn before the phone reconnects. With an updated app
-  and relay, the newer alert for an agent also replaces one already on screen.
-- Tap an approval or question notification for up to 48 hours, as long as the
-  original request is still current. The tap opens the agent without approving
-  or replying.
 - The relay now starts even if old push keys or subscriptions cannot be parsed.
   If push notifications stop after updating, turning Push Notifications off and
   on in Settings restores them.

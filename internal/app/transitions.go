@@ -109,7 +109,7 @@ func (s *Server) transitionBlocked(
 	revision, transitionAt int64,
 ) {
 	agentState, agentExists := s.state.Agent(paneID)
-	if !agentExists || agentState.Status != "blocked" {
+	if !agentExists {
 		return
 	}
 	session := agentState.Session
