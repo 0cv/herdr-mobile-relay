@@ -130,17 +130,15 @@ func (s *State) probePaneLocked(target protocol.TargetRef) *paneRecord {
 
 func (s *State) CommitProbe(token ProbeToken, classification question.Classification, reliable, leased bool, now time.Time) bool {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	rec := s.probePaneLocked(token.target)
 	if rec == nil || !rec.agent.ProbeGoverned() {
-		s.mu.Unlock()
 		return false
 	}
 	previous := rec.agent.ScreenAttention
 	defer func() {
-		marker, status := rec.agent.ScreenAttention, rec.agent.Status
-		s.mu.Unlock()
-		if marker != previous && s.logger != nil {
-			s.logger.Info("idle question probe changed attention", "pane_id", token.target.PaneID, "screen_attention", marker, "status", status)
+		if marker := rec.agent.ScreenAttention; marker != previous && s.logger != nil {
+			s.logger.Info("idle question probe changed attention", "pane_id", token.target.PaneID, "screen_attention", marker, "status", rec.agent.Status)
 		}
 	}()
 	current := token.stop == rec.probe.stop && token.content == rec.contentRev && token.event == rec.agent.BlockedEventID && probeEligible(rec, leased)
