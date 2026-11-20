@@ -97,28 +97,31 @@ func (d *Dispatcher) handleApproval(ctx context.Context, req commandRequest) *Co
 		PayloadHash: payloadHash,
 	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
 		current, ok := d.state.Agent(req.paneID)
-		if !ok || current.Status != "blocked" ||
-			current.BlockedEventID == "" || current.BlockedEventID != payload.EventID ||
-			current.AttentionKind != question.AttentionApproval ||
-			len(current.Options) != payload.Total ||
-			current.ApprovalFingerprint != payload.Fingerprint ||
-			current.Options[payload.Index] != payload.Choice {
+		if !ok || !approvalCurrent(current, payload) || (agent != nil && agent.StrictAttention && !current.StrictAttention) {
 			return EffectResult{Result: d.fail(req.requestID, "approval", req.paneID, "This approval request is no longer current")}
 		}
-		read, err := d.herdr.ReadPane(effectCtx, req.paneID, 80, "ansi")
+		classification, err := d.readApproval(effectCtx, current)
 		if err != nil {
 			return EffectResult{Result: d.failErr(req.requestID, "approval", req.paneID, err)}
 		}
-		classification := question.Classify(string(read.Content), current.Agent)
+		fingerprint := payload.Fingerprint
+		if current.StrictAttention {
+			fingerprint = current.LiveIdentity
+		}
 		if classification.Kind != question.AttentionApproval ||
 			len(classification.Options) != payload.Total ||
 			payload.Index >= len(classification.Options) ||
 			classification.Options[payload.Index] != payload.Choice ||
-			question.ApprovalFingerprint(classification) != payload.Fingerprint {
+			question.ApprovalFingerprint(classification) != fingerprint {
 			return EffectResult{Result: d.fail(req.requestID, "approval", req.paneID, "Approval choices are no longer available")}
 		}
 		if stale := d.paneSessionCurrent(token, req.requestID, "approval"); stale != nil {
 			return EffectResult{Result: stale}
+		}
+		after, ok := d.state.Agent(req.paneID)
+		if !ok || after.Generation != current.Generation || !approvalCurrent(after, payload) ||
+			after.StrictAttention != current.StrictAttention || after.LiveIdentity != current.LiveIdentity {
+			return EffectResult{Result: d.fail(req.requestID, "approval", req.paneID, "This approval request is no longer current")}
 		}
 		if err := d.herdr.SendKeys(
 			effectCtx,
@@ -143,6 +146,37 @@ func (d *Dispatcher) handleApproval(ctx context.Context, req commandRequest) *Co
 		d.watchApproval(ctx, req.requestID, req.paneID, payload.EventID, generation)
 	})
 	return result
+}
+
+func approvalCurrent(agent *AgentState, payload approvalPayload) bool {
+	return agent.Status == "blocked" && !agent.ProbePending && agent.BlockedEventID == payload.EventID &&
+		agent.AttentionKind == question.AttentionApproval && len(agent.Options) == payload.Total &&
+		agent.ApprovalFingerprint == payload.Fingerprint && agent.Options[payload.Index] == payload.Choice
+}
+
+func (d *Dispatcher) readLive(ctx context.Context, agent *AgentState) (question.Classification, error) {
+	readCtx, cancel := context.WithTimeout(ctx, ProbeTimeout)
+	defer cancel()
+	read, err := d.herdr.ReadPaneVisible(readCtx, agent.PaneID, question.VisibleRows, "ansi")
+	if err != nil {
+		return question.Classification{}, err
+	}
+	classification, reliable := question.ClassifyLive(string(read.Content), agent.Agent)
+	if !reliable {
+		return question.Classification{}, errors.New("The visible screen could not be verified")
+	}
+	return classification, nil
+}
+
+func (d *Dispatcher) readApproval(ctx context.Context, agent *AgentState) (question.Classification, error) {
+	if agent.StrictAttention {
+		return d.readLive(ctx, agent)
+	}
+	read, err := d.herdr.ReadPane(ctx, agent.PaneID, 80, "ansi")
+	if err != nil {
+		return question.Classification{}, err
+	}
+	return question.Classify(string(read.Content), agent.Agent), nil
 }
 
 func approvalKeys(target, current int) []string {
@@ -293,13 +327,14 @@ func (d *Dispatcher) submitQuestion(ctx context.Context, req commandRequest, pay
 	ledgerKey := questionOperationLedgerKey(action, req.paneID, payload.InteractionID, req.requestID)
 	payloadHash := hashPayload(payload)
 	var submittedInteraction *question.Interaction
+	var submittedAgent *AgentState
 	replay, found, replayErr := d.scheduler.ReplayLedger(ledgerKey, payloadHash)
 	if errors.Is(replayErr, ErrConflict) {
 		return d.fail(req.requestID, action, req.paneID, "A different response was already submitted")
 	}
 
 	agent, ok := d.state.Agent(req.paneID)
-	if !ok || (agent.Status != "blocked" && agent.Status != "done") {
+	if !ok || !questionCurrent(agent, payload.InteractionID) {
 		switch {
 		case replayErr == nil && replay != nil:
 			replay.RequestID = req.requestID
@@ -319,16 +354,13 @@ func (d *Dispatcher) submitQuestion(ctx context.Context, req commandRequest, pay
 		PayloadHash: payloadHash,
 	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
 		current, ok := d.state.Agent(req.paneID)
-		if !ok || (current.Status != "blocked" && current.Status != "done") {
+		if !ok || !questionCurrent(current, payload.InteractionID) ||
+			(agent != nil && strictQuestion(agent) && (!strictQuestion(current) || agent.BlockedEventID != current.BlockedEventID)) {
 			return EffectResult{Result: d.fail(req.requestID, action, req.paneID, "The question changed before the answer was applied")}
 		}
-		read, err := d.herdr.ReadPane(effectCtx, req.paneID, 80, "ansi")
+		interaction, err := d.readQuestion(effectCtx, current, strictQuestion(current))
 		if err != nil {
 			return EffectResult{Result: d.failErr(req.requestID, action, req.paneID, err)}
-		}
-		interaction := question.Parse(string(read.Content), current.Agent)
-		if payload.OtherSelected && interaction != nil {
-			d.state.RecordCustomAnswer(req.paneID, interaction.Question, payload.OtherText)
 		}
 		if interaction == nil || interaction.ID != payload.InteractionID {
 			return EffectResult{Result: d.fail(req.requestID, action, req.paneID, "The question changed before the answer was applied")}
@@ -336,11 +368,20 @@ func (d *Dispatcher) submitQuestion(ctx context.Context, req commandRequest, pay
 		if err := validateQuestionPayload(payload, interaction); err != nil {
 			return EffectResult{Result: d.fail(req.requestID, action, req.paneID, err.Error())}
 		}
-		copy := *interaction
-		submittedInteraction = &copy
 		if stale := d.paneSessionCurrent(token, req.requestID, action); stale != nil {
 			return EffectResult{Result: stale}
 		}
+		after, ok := d.state.Agent(req.paneID)
+		if !ok || after.Generation != current.Generation || !questionCurrent(after, payload.InteractionID) ||
+			(strictQuestion(current) || strictQuestion(after)) &&
+				(strictQuestion(after) != strictQuestion(current) || after.BlockedEventID != current.BlockedEventID) {
+			return EffectResult{Result: d.fail(req.requestID, action, req.paneID, "The question changed before the answer was applied")}
+		}
+		if payload.OtherSelected {
+			d.state.RecordCustomAnswer(req.paneID, interaction.Question, payload.OtherText)
+		}
+		submittedInteraction = interaction
+		submittedAgent = current
 		if err := d.executeQuestion(effectCtx, token, req.paneID, payload, interaction); err != nil {
 			if errors.Is(err, errQuestionTextUnsupported) {
 				result := d.fail(req.requestID, action, req.paneID, err.Error())
@@ -367,11 +408,34 @@ func (d *Dispatcher) submitQuestion(ctx context.Context, req commandRequest, pay
 				req.paneID,
 				interactionSnapshot(payload.InteractionID, submittedInteraction),
 				payload.Navigation,
-				d.state.Generation(req.paneID),
+				submittedAgent,
 			)
 		})
 	}
 	return result
+}
+
+func strictQuestion(agent *AgentState) bool {
+	return agent.StrictAttention || agent.ProbeEnabled && doneStatuses[agent.RawStatus]
+}
+
+func questionCurrent(agent *AgentState, interactionID string) bool {
+	if agent.ProbePending || agent.ScreenAttention == ScreenCleared || (agent.Status != "blocked" && agent.Status != "done") {
+		return false
+	}
+	return !agent.StrictAttention || agent.Status == "blocked" && agent.AttentionKind == question.AttentionQuestion && agent.InteractionID == interactionID
+}
+
+func (d *Dispatcher) readQuestion(ctx context.Context, agent *AgentState, strict bool) (*question.Interaction, error) {
+	if strict {
+		classification, err := d.readLive(ctx, agent)
+		return classification.Interaction, err
+	}
+	read, err := d.herdr.ReadPane(ctx, agent.PaneID, 80, "ansi")
+	if err != nil {
+		return nil, err
+	}
+	return question.Parse(string(read.Content), agent.Agent), nil
 }
 
 func validateQuestionPayload(payload questionPayload, interaction *question.Interaction) error {
@@ -514,8 +578,10 @@ func (d *Dispatcher) watchQuestion(
 	ledgerKey, requestID, action, paneID string,
 	original *question.Interaction,
 	navigation string,
-	generation int64,
+	submitted *AgentState,
 ) {
+	generation := submitted.Generation
+	strict := strictQuestion(submitted)
 	ctx, cancel := context.WithTimeout(parent, approvalPollTimeout)
 	defer cancel()
 	ticker := time.NewTicker(approvalPollInterval)
@@ -541,11 +607,27 @@ func (d *Dispatcher) watchQuestion(
 				d.finishQuestionWatch(ledgerKey, generation, requestID, action, paneID, original, navigation, nil)
 				return
 			}
-			read, err := d.herdr.ReadPane(ctx, paneID, 80, "ansi")
+			if strict && (agent.ScreenAttention == ScreenCleared || agent.Status == "working" || agent.BlockedEventID != submitted.BlockedEventID) {
+				d.finishQuestionWatch(ledgerKey, generation, requestID, action, paneID, original, navigation, nil)
+				return
+			}
+			if agent.ProbePending {
+				continue
+			}
+			strictRead := strict || strictQuestion(agent)
+			current, err := d.readQuestion(ctx, agent, strictRead)
 			if err != nil {
 				continue
 			}
-			current := question.Parse(string(read.Content), agent.Agent)
+			after, ok := d.state.Agent(paneID)
+			if !ok || after.Generation != generation {
+				return
+			}
+			if (strictRead || strictQuestion(after)) && (!strictRead || after.ProbePending || after.Status != agent.Status ||
+				after.ScreenAttention == ScreenCleared || after.BlockedEventID != agent.BlockedEventID ||
+				after.InteractionID != agent.InteractionID && (current == nil || after.InteractionID != current.ID)) {
+				continue
+			}
 			if current != nil {
 				if text := strings.TrimSpace(current.Other.Text); text != "" {
 					d.state.RecordCustomAnswer(paneID, current.Question, text)
