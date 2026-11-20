@@ -9,38 +9,12 @@ func terminalSubscriptionKey(subscription Subscription) string {
 	return subscription.DeviceID + "\x00" + subscription.Endpoint
 }
 
-func (m *Manager) RunOnce(ctx context.Context, now time.Time) ([]DeliveryResult, error) {
-	m.mu.Lock()
-	reconciled := m.reconciled
-	m.mu.Unlock()
-	if !reconciled {
-		return nil, nil
-	}
-	results, err := m.processDue(ctx, now)
-	if err != nil {
-		return results, err
-	}
-	return results, m.retireFinishedKeys(results)
-}
-
 func (m *Manager) retireFinishedKeys(results []DeliveryResult) error {
 	seen := make(map[PushEventKey]bool)
 	for _, result := range results {
 		seen[result.Key] = true
 	}
 	for key := range seen {
-		m.mu.Lock()
-		retracting := m.retracting[key]
-		m.mu.Unlock()
-		if retracting && !m.queue.hasEntriesFor(key) {
-			if err := m.queue.forgetDelivered(key); err != nil {
-				return err
-			}
-			m.mu.Lock()
-			delete(m.retracting, key)
-			m.mu.Unlock()
-			continue
-		}
 		if m.queue.hasEntriesFor(key) {
 			continue
 		}
@@ -58,32 +32,45 @@ func (m *Manager) retireFinishedKeys(results []DeliveryResult) error {
 	return nil
 }
 
-func (m *Manager) processDue(ctx context.Context, now time.Time) ([]DeliveryResult, error) {
+func (m *Manager) RunOnce(ctx context.Context) ([]DeliveryResult, error) {
 	m.queue.process.Lock()
 	defer m.queue.process.Unlock()
-	entries := m.queue.dueEntries(now)
+	m.mu.Lock()
+	reconciled := m.reconciled
+	m.mu.Unlock()
+	if !reconciled {
+		return nil, nil
+	}
+	entries := m.queue.dueEntries(m.now())
 	results := make([]DeliveryResult, 0, len(entries))
 	terminalSubscriptions := make(map[string]bool)
 	dirty := false
 	for _, entry := range entries {
 		if ctx.Err() != nil {
-			return m.finishPass(results, dirty, now, ctx.Err())
+			return m.finishPass(results, dirty, m.now(), ctx.Err())
 		}
-		result, err := m.deliverOne(ctx, now, entry, terminalSubscriptions)
+		result, completedAt, err := m.deliverOne(ctx, entry, terminalSubscriptions)
 		if err != nil {
-			return m.finishPass(results, dirty, now, err)
+			return m.finishPass(results, dirty, m.now(), err)
+		}
+		if result.Disposition == "" {
+			continue
 		}
 		if result.Disposition == DeliveryPruned {
 			terminalSubscriptions[terminalSubscriptionKey(entry.Subscription)] = true
 		}
-		changed, err := m.applyResult(entry, result, now)
+		changed, err := m.applyResult(entry, result, completedAt)
 		dirty = changed || dirty
 		if err != nil {
-			return m.finishPass(results, dirty, now, err)
+			return m.finishPass(results, dirty, m.now(), err)
 		}
 		results = append(results, result)
 	}
-	return m.finishPass(results, dirty, now, nil)
+	results, err := m.finishPass(results, dirty, m.now(), nil)
+	if err != nil {
+		return results, err
+	}
+	return results, m.retireFinishedKeys(results)
 }
 
 func (m *Manager) applyResult(entry queueEntry, result DeliveryResult, now time.Time) (bool, error) {
@@ -91,10 +78,10 @@ func (m *Manager) applyResult(entry queueEntry, result DeliveryResult, now time.
 		return m.queue.rescheduleInMemory(entry.ID, entry, result.Attempts, result.NextAttempt), nil
 	}
 	changed := m.queue.finishInMemory(entry.ID, entry, result.Disposition, now)
-	if result.Disposition != DeliveryAccepted {
+	if result.Disposition != DeliveryAccepted || entry.Event.Retract {
 		return changed, nil
 	}
-	return changed, m.markAccepted(entry.Event.Key, now)
+	return changed, m.policy.MarkAccepted(entry.Event.Key, now)
 }
 
 func (m *Manager) finishPass(results []DeliveryResult, dirty bool, now time.Time, cause error) ([]DeliveryResult, error) {
@@ -123,54 +110,65 @@ func (m *Manager) flush(dirty bool) error {
 func (m *Manager) deliverable(key PushEventKey, now time.Time) bool {
 	m.mu.Lock()
 	active := m.active[key]
-	retracting := m.retracting[key]
 	m.mu.Unlock()
-	return retracting || active && m.policy.Allows(key, "en", now)
-}
-
-func (m *Manager) markAccepted(key PushEventKey, acceptedAt time.Time) error {
-	m.mu.Lock()
-	retracting := m.retracting[key]
-	m.mu.Unlock()
-	if retracting {
-		return nil
-	}
-	return m.policy.MarkAccepted(key, acceptedAt)
+	return active && m.policy.Allows(key, "en", now)
 }
 
 func (m *Manager) deliverOne(
 	ctx context.Context,
-	now time.Time,
 	entry queueEntry,
 	terminalSubscriptions map[string]bool,
-) (result DeliveryResult, err error) {
+) (DeliveryResult, time.Time, error) {
+	event := entry.Event
+	waiting := event.Key.Category.Waiting()
+	var retractDeadline time.Time
+	deliverable := event.Retract || m.deliverable(event.Key, m.now())
+	if waiting && !event.Retract && deliverable {
+		retractDeadline = m.queue.waitingRetractDeadline(entry)
+	}
+	options := sendOptions{TTL: 300}
+	if waiting {
+		options.Topic = m.signer.waitingTopic(event.Key)
+	}
+	startedAt := m.now()
+	if !startedAt.Before(event.ExpiresAt) {
+		return newDeliveryResult(entry, DeliveryExpired, entry.Attempts), startedAt, nil
+	}
 	if terminalSubscriptions[terminalSubscriptionKey(entry.Subscription)] {
-		return newDeliveryResult(entry, DeliveryPruned, entry.Attempts), nil
+		return newDeliveryResult(entry, DeliveryPruned, entry.Attempts), startedAt, nil
 	}
-	if !now.Before(entry.Event.ExpiresAt) {
-		return newDeliveryResult(entry, DeliveryExpired, entry.Attempts), nil
+	if !deliverable {
+		return newDeliveryResult(entry, DeliveryStale, entry.Attempts), startedAt, nil
 	}
-	if !m.deliverable(entry.Event.Key, now) {
-		return newDeliveryResult(entry, DeliveryStale, entry.Attempts), nil
+	if startedAt.Before(retractDeadline) {
+		return DeliveryResult{}, startedAt, nil
 	}
-	sendErr := m.sendPush(ctx, entry.Subscription, entry.Event.Payload)
+	if waiting && !event.Retract {
+		options.TTL = int(event.CreatedAt.Add(24*time.Hour).Sub(startedAt) / time.Second)
+	}
+	sendErr := m.sendPush(ctx, entry.Subscription, event.Payload, options)
+	completedAt := m.now()
 	if sendErr != nil && ctx.Err() != nil {
-		return result, ctx.Err()
+		return DeliveryResult{}, completedAt, ctx.Err()
 	}
+	return deliveryOutcome(entry, sendErr, completedAt), completedAt, nil
+}
+
+func deliveryOutcome(entry queueEntry, sendErr error, completedAt time.Time) DeliveryResult {
 	attempts := entry.Attempts + 1
 	if sendErr == nil {
-		return newDeliveryResult(entry, DeliveryAccepted, attempts), nil
+		return newDeliveryResult(entry, DeliveryAccepted, attempts)
 	}
 	if isTerminalError(sendErr) {
-		return newDeliveryResult(entry, DeliveryPruned, attempts), nil
+		return newDeliveryResult(entry, DeliveryPruned, attempts)
 	}
 	if retryablePushError(sendErr) && attempts < maxDeliveryAttempts {
-		next := now.Add(retryDelay(attempts))
+		next := completedAt.Add(retryDelay(attempts))
 		if next.Before(entry.Event.ExpiresAt) {
-			result = newDeliveryResult(entry, DeliveryRetrying, attempts)
+			result := newDeliveryResult(entry, DeliveryRetrying, attempts)
 			result.NextAttempt = next
-			return result, nil
+			return result
 		}
 	}
-	return newDeliveryResult(entry, DeliveryDropped, attempts), nil
+	return newDeliveryResult(entry, DeliveryDropped, attempts)
 }

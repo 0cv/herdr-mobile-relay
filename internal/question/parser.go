@@ -126,7 +126,8 @@ func layoutHint(p *pane) bool {
 			continue
 		}
 		// A named Claude session ends its input rule with the name, and its task panel follows.
-		if claudeSessionRulePattern.MatchString(line) || claudeTaskPanelPattern.MatchString(line) {
+		if claudeSessionRulePattern.MatchString(line) || claudeTaskCount.MatchString(line) ||
+			claudeTaskItem.MatchString(line) || claudeTaskSummary.MatchString(line) {
 			continue
 		}
 		if line != "" && strings.Trim(line, "─━═_—│| ") != "" {

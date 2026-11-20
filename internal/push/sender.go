@@ -9,7 +9,12 @@ import (
 	webpush "github.com/SherClockHolmes/webpush-go"
 )
 
-func (m *Manager) sendOne(ctx context.Context, sub Subscription, payload []byte) error {
+type sendOptions struct {
+	TTL   int
+	Topic string
+}
+
+func (m *Manager) sendOne(ctx context.Context, sub Subscription, payload []byte, options sendOptions) error {
 	wpSub := &webpush.Subscription{
 		Endpoint: sub.Endpoint,
 		Keys: webpush.Keys{
@@ -23,7 +28,8 @@ func (m *Manager) sendOne(ctx context.Context, sub Subscription, payload []byte)
 		Subscriber:      "https://github.com/0cv/herdr-mobile-relay",
 		VAPIDPublicKey:  m.vapidPublic,
 		VAPIDPrivateKey: m.vapidPrivate,
-		TTL:             300,
+		TTL:             options.TTL,
+		Topic:           options.Topic,
 	})
 	if err != nil {
 		return err

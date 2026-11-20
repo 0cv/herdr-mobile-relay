@@ -30,6 +30,8 @@ type Poller struct {
 	wakeup             chan struct{}
 	eventReconnectWait func(context.Context) bool
 	onInventoryChange  func() error
+	onReconcile        func(bool)
+	onTopologyCommit   func()
 	enrich             func(context.Context, []*AgentState)
 	hostname           string
 	topologyRetries    int
@@ -63,6 +65,11 @@ func NewPoller(client backend.Backend, state *State, interval time.Duration, log
 // after the operation that caused the signal has completed.
 func (p *Poller) SetOnInventoryChange(fn func() error) {
 	p.onInventoryChange = fn
+}
+
+func (p *Poller) SetPostCommit(onReconcile func(bool), onTopology func()) {
+	p.onReconcile = onReconcile
+	p.onTopologyCommit = onTopology
 }
 
 func (p *Poller) SetHostname(hostname string) {
@@ -144,6 +151,9 @@ func (p *Poller) poll(ctx context.Context) {
 		}
 		p.recordPollFailure()
 		p.state.MarkInventoryFailure(err)
+		if p.onReconcile != nil {
+			p.onReconcile(false)
+		}
 		p.notifyInventoryChange()
 		p.logger.Warn("inventory poll failed", "error", err)
 		return
@@ -156,6 +166,9 @@ func (p *Poller) poll(ctx context.Context) {
 		}
 		p.recordPollFailure()
 		p.state.MarkInventoryFailure(err)
+		if p.onReconcile != nil {
+			p.onReconcile(false)
+		}
 		p.notifyInventoryChange()
 		p.logger.Warn("workspace inventory poll failed", "error", err)
 		return
@@ -185,6 +198,9 @@ func (p *Poller) poll(ctx context.Context) {
 		return
 	}
 	p.topologyRetries = 0
+	if p.onReconcile != nil {
+		p.onReconcile(true)
+	}
 	p.notifyInventoryChange()
 	p.logger.Debug("inventory committed", "agents", len(agents), "topology", p.state.TopologyGeneration())
 }
@@ -339,6 +355,9 @@ func (p *Poller) commitEventTopology(ctx context.Context, topology herdr.Topolog
 	// streak while required polling fetches are failing.
 	p.consecutiveFailures.Store(0)
 	p.state.CommitTopology(agents, topology.Workspaces, baseRevision)
+	if p.onTopologyCommit != nil {
+		p.onTopologyCommit()
+	}
 	p.notifyInventoryChange()
 	p.logger.Debug("event inventory committed", "agents", len(agents), "workspaces", len(topology.Workspaces), "topology", p.state.TopologyGeneration())
 }

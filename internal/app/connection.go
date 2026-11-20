@@ -15,6 +15,9 @@ func (s *Server) effectiveCapabilitiesFor(herdrStatus herdr.ServerStatus) []stri
 		capabilities = slices.DeleteFunc(capabilities, func(capability string) bool { return capability == "self_update" })
 	}
 	capabilities = append(capabilities, "pi_prompt_unconfirmed")
+	if s.cfg.IdleQuestionProbe {
+		capabilities = append(capabilities, protocol.IdleQuestionProbeCapability)
+	}
 	// Never the legacy pane_size_lease names: apps up to 0.22.7 lease
 	// automatically when they see them.
 	if s.paneSizeM.Available() {

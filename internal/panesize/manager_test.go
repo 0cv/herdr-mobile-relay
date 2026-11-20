@@ -1195,6 +1195,30 @@ func TestReleaseGraceVersusImmediate(t *testing.T) {
 	}
 }
 
+func TestLeasedRequiresCurrentTerminalAndUnexpiredOwner(t *testing.T) {
+	f := newFixture(t)
+	f.addPane("pane-1", 321, "/dev/pts/7", 1)
+	const terminal = "terminal-pane-1"
+	f.acquire("client-a", "pane-1", 80, 0)
+	if !f.m.Leased("pane-1", terminal) || f.m.Leased("pane-1", "replacement") {
+		t.Fatal("lease was not bound to its terminal")
+	}
+	if err := f.m.Release(t.Context(), "client-a", "pane-1", false); err != nil {
+		t.Fatal(err)
+	}
+	if f.m.Leased("pane-1", terminal) || f.tracked() != 1 {
+		t.Fatal("resize grace should not hold a lease")
+	}
+	f.acquire("client-a", "pane-1", 80, 0)
+	if !f.m.Leased("pane-1", terminal) {
+		t.Fatal("lease was not renewed")
+	}
+	f.sweepFor(LeaseTTL, LeaseTTL)
+	if f.m.Leased("pane-1", terminal) {
+		t.Fatal("expired lease is still active")
+	}
+}
+
 func TestLeaseExpiryRestoresWithoutRelease(t *testing.T) {
 	f := newFixture(t)
 	device := f.addPane("pane-1", 321, "/dev/pts/7", 1)

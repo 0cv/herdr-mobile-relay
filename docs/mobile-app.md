@@ -145,6 +145,29 @@ mobile browsers often provide no useful console. Copy or photograph its text
 for a bug report, then tap the banner to dismiss it; a later independent error
 will display a new banner.
 
+## Push notifications
+
+When an agent's approval or question changes, the relay cancels any unsent
+alert for the old request, including retries. It withdraws an old alert only
+if the push service already accepted it.
+
+The relay has five minutes to send a waiting alert. After accepting it, the
+push provider can hold it for an unreachable phone for up to 24 hours from
+the alert's creation. The relay does not retry for a day. The provider can
+replace an undelivered alert with its withdrawal or a newer alert for that
+pane. This is best effort: providers can limit retention and storage, and
+a withdrawal lasts only five minutes. If it doesn't arrive, an old alert
+already on screen can remain, but tapping it won't open an answered or
+replaced request.
+
+The provider can only replace messages it hasn't delivered. With an updated
+app and relay, a newer waiting alert also replaces an older waiting alert
+already on screen for that pane, without another push. Alerts shown before
+the update aren't grouped with new ones. An older app can still receive
+an alert after being offline, but may leave both alerts on screen if it
+missed the withdrawal. Connections to older relays keep their original
+delivery and display behavior.
+
 ## Opening links from other apps on iOS
 
 External links open in Safari, not the installed Home Screen app. To use those
@@ -259,6 +282,32 @@ files, individual unified diffs to 1 MiB, and Git commands to eight seconds.
 On narrow screens, swipe the file or changed-file sidebar left to collapse it;
 the adjacent sidebar button restores it. Pinch the diff or use its zoom
 controls to resize it without changing the rest of the app.
+
+### Live questions when an agent looks idle
+
+With the idle question probe on, the TUI and core relays check supported agents
+that just stopped working or waiting for input. They also check idle or done
+agents that have an active **Resize Session** lease, and recheck agents already
+pinned by the probe. The relay does not scan other idle panes. These checks
+share four visible-screen reads per reconcile cycle, one at a time; waiting
+panes take turns.
+
+The screen must show a complete, recognised dialog, not an old question or a
+printed menu. Recognised layouts include Claude Code questions (including
+review screens and known hints wrapped across two or three rows) and file
+approvals, Oh My Pi and Pi Ask boxes and tool approvals, Codex questions and
+plan approvals, Qoder and OpenCode questions, and the recognised Hermes and
+Antigravity permission dialogs. Cropped dialogs and unknown status rows are
+ignored. Reader devices can see the pin; a controller is required to answer,
+and the relay checks the live dialog again before sending input.
+
+A pin ends as soon as Herdr reports the agent working. Otherwise it takes two
+successful checks without the dialog, at least two seconds apart. A busy queue
+or failed reads can make dismissal take longer. Updated phones clear the pin
+on the relay's first confirmed update; older phones can show the choices but
+keep their usual dismissal delay. Updating only the phone does not enable the
+probe on an older relay. To disable it, set `HERDR_RELAY_IDLE_QUESTION_PROBE=0`
+in the relay's environment and restart it.
 
 ## Mobile terminal
 

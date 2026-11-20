@@ -1103,7 +1103,7 @@ func TestCommittedStateViewTracksSnapshotsAndDeltas(t *testing.T) {
 	publishInventoryForTest(t, s)
 	current, _ := s.state.Agent("pane-1")
 	current.Project = "renamed"
-	s.commitAgent(current, map[string]any{"type": "agent_update", "pane_id": "pane-1"})
+	s.commitAgent(current, "agent_update")
 	agents := s.committedAgents()
 	if len(agents) != 1 || agents[0].Status != "blocked" || agents[0].Project != "renamed" ||
 		agents[0].BlockedEventID != "event-1" ||
@@ -1133,11 +1133,11 @@ func TestCommittedStateViewRejectsStalePerPaneUpdates(t *testing.T) {
 	revision := s.state.Revision("pane-1") + 2
 	s.commitAgent(
 		&coordinator.AgentState{PaneID: "pane-1", Status: "working", StateRevision: revision},
-		map[string]any{"type": "agent_update", "pane_id": "pane-1"},
+		"agent_update",
 	)
 	s.commitAgent(
 		&coordinator.AgentState{PaneID: "pane-1", Status: "blocked", BlockedEventID: "stale-event", StateRevision: revision - 1},
-		map[string]any{"type": "agent_update", "pane_id": "pane-1"},
+		"agent_update",
 	)
 	publishInventoryForTest(t, s)
 
