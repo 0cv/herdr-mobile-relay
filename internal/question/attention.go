@@ -30,7 +30,6 @@ type Classification struct {
 	ApprovalFocus    int
 	Interaction      *Interaction
 	ApprovalIdentity string
-	LiveIdentity     string
 	approvalSource   string
 }
 

@@ -260,35 +260,59 @@ func (s *Server) commitAgent(agent *coordinator.AgentState, message map[string]a
 		s.recordSafeError("agent update broadcast was malformed", nil)
 		return
 	}
-	message["server_session_id"] = protocol.PrimaryServerSessionID
-	message["generation"] = s.state.Generation(paneID)
-	if current, exists := s.state.Agent(paneID); exists {
-		message["terminal_id"] = current.TerminalID
-		message["agent_session_id"] = current.SessionID
-	}
-	s.hub.BroadcastPrepared(message, func() {
-		s.stateViewMu.Lock()
+	err := s.hub.BroadcastBatchPrepared(func() ([]any, func(), error) {
+		current, exists := s.state.Agent(paneID)
+		if !exists || current.ProbeTarget() != agent.ProbeTarget() || current.StateRevision > agent.StateRevision {
+			return nil, nil, nil
+		}
+		s.stateViewMu.RLock()
 		agents := cloneAgents(s.agentView)
+		s.stateViewMu.RUnlock()
 		found := false
 		for _, view := range agents {
 			if view.PaneID != paneID {
 				continue
 			}
-			if agent.StateRevision >= view.StateRevision {
-				applyCommittedAgent(view, agent)
+			if view.StateRevision > agent.StateRevision {
+				return nil, nil, nil
 			}
+			applyCommittedAgent(view, agent)
 			found = true
 			break
 		}
 		if !found {
-			if current, ok := s.state.Agent(paneID); ok {
-				applyCommittedAgent(current, agent)
-				agents = append(agents, current)
-			}
+			applyCommittedAgent(current, agent)
+			agents = append(agents, current)
 		}
-		s.agentView = agents
-		s.stateViewMu.Unlock()
+
+		message["server_session_id"] = protocol.PrimaryServerSessionID
+		message["generation"] = agent.Generation
+		message["terminal_id"] = agent.TerminalID
+		message["agent_session_id"] = agent.SessionID
+		setAgentAttentionFields(message, agent)
+		return []any{message}, func() {
+			s.stateViewMu.Lock()
+			s.agentView = agents
+			s.stateViewMu.Unlock()
+		}, nil
 	})
+	if err != nil {
+		s.recordSafeError("agent update broadcast failed", err)
+	}
+}
+
+func setAgentAttentionFields(message map[string]any, agent *coordinator.AgentState) {
+	message["event_id"] = agent.BlockedEventID
+	message["attention_kind"] = agent.AttentionKind
+	message["prompt"] = agent.Prompt
+	message["command"] = agent.Command
+	message["options"] = agent.Options
+	message["approval_fingerprint"] = agent.ApprovalFingerprint
+	message["interaction"] = agent.Interaction
+	message["interaction_id"] = agent.InteractionID
+	if agent.ScreenAttention != "" {
+		message["screen_attention"] = agent.ScreenAttention
+	}
 }
 
 func (s *Server) broadcastCommitted(message any) {
@@ -380,6 +404,16 @@ func cloneStringMap(values map[string]any) map[string]any {
 func applyCommittedAgent(view, committed *coordinator.AgentState) {
 	view.RawPaneID = committed.RawPaneID
 	view.Status = committed.Status
+	view.ScreenAttention = committed.ScreenAttention
+	view.RawStatus = committed.RawStatus
+	view.ProbeEnabled = committed.ProbeEnabled
+	view.ProbePending = committed.ProbePending
+	view.StrictAttention = committed.StrictAttention
+	view.LiveIdentity = committed.LiveIdentity
+	view.Generation = committed.Generation
+	view.TerminalID = committed.TerminalID
+	view.SessionID = committed.SessionID
+	view.AgentSessionID = committed.SessionID
 	view.Agent = committed.Agent
 	view.TabID = committed.TabID
 	view.TabLabel = committed.TabLabel
@@ -398,6 +432,7 @@ func applyCommittedAgent(view, committed *coordinator.AgentState) {
 	view.Options = append([]string(nil), committed.Options...)
 	view.ApprovalFingerprint = committed.ApprovalFingerprint
 	view.Interaction = committed.Clone().Interaction
+	view.InteractionID = committed.InteractionID
 	view.StateRevision = committed.StateRevision
 	if view.Status != "blocked" {
 		view.AttentionKind = ""

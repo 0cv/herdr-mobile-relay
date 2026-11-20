@@ -480,6 +480,8 @@ type PushConfig struct {
 	Hybrid map[string]any `json:"hybrid,omitempty"`
 }
 
+const IdleQuestionProbeCapability = "idle_question_probe"
+
 const AgentResponseCopyCapability = "agent_response_copy"
 
 const SpeechSynthesisCapability = "speech_synthesis"

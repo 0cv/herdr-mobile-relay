@@ -896,6 +896,7 @@ func (s *State) CommitAttentionClassification(
 	generation int64,
 	contentRevision int64,
 	classification question.Classification,
+	liveIdentity string,
 ) (*AgentState, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -911,7 +912,7 @@ func (s *State) CommitAttentionClassification(
 		classification.Kind = question.AttentionUnknown
 	}
 	previous := agent.AttentionKind
-	agent.LiveIdentity = classification.LiveIdentity
+	agent.LiveIdentity = liveIdentity
 	changed := applyAttentionClassification(agent, classification)
 	if changed {
 		s.revCounter++

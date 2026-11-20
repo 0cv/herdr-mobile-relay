@@ -260,6 +260,32 @@ On narrow screens, swipe the file or changed-file sidebar left to collapse it;
 the adjacent sidebar button restores it. Pinch the diff or use its zoom
 controls to resize it without changing the rest of the app.
 
+### Live questions when an agent looks idle
+
+With the idle question probe on, the TUI and core relays check supported agents
+that just stopped working or waiting for input. They also check idle or done
+agents that have an active **Resize Session** lease, and recheck agents already
+pinned by the probe. The relay does not scan other idle panes. These checks
+share four visible-screen reads per reconcile cycle, one at a time; waiting
+panes take turns.
+
+The screen must show a complete, recognised dialog, not an old question or a
+printed menu. Recognised layouts include Claude Code questions (including
+review screens and known hints wrapped across two or three rows) and file
+approvals, Oh My Pi and Pi Ask boxes and tool approvals, Codex questions and
+plan approvals, Qoder and OpenCode questions, and the recognised Hermes and
+Antigravity permission dialogs. Cropped dialogs and unknown status rows are
+ignored. Reader devices can see the pin; a controller is required to answer,
+and the relay checks the live dialog again before sending input.
+
+A pin ends as soon as Herdr reports the agent working. Otherwise it takes two
+successful checks without the dialog, at least two seconds apart. A busy queue
+or failed reads can make dismissal take longer. Updated phones clear the pin
+on the relay's first confirmed update; older phones can show the choices but
+keep their usual dismissal delay. Updating only the phone does not enable the
+probe on an older relay. To disable it, set `HERDR_RELAY_IDLE_QUESTION_PROBE=0`
+in the relay's environment and restart it.
+
 ## Mobile terminal
 
 By default the phone shows each pane at the size Herdr gives it. Controller

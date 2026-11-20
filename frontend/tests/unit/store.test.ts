@@ -1212,6 +1212,82 @@ describe('relay command store', () => {
     expect(socket.sent.map((payload) => JSON.parse(payload)).filter((message) => message.type === 'read_pane')).toHaveLength(2);
   });
 
+  it.each([
+    ['question', 'agent_update', 'done'],
+    ['approval', 'agents', 'idle'],
+    ['question', 'agents', 'working'],
+  ])('clears a promoted %s on one authoritative %s to %s', (kind, type, status) => {
+    const socket = connectRelay({ capabilities: ['attention_classification', 'idle_question_probe'] });
+    const target = { pane_id: 'w1:p1', ...exactAgentFields() };
+    const interaction = {
+      id: 'question-1', kind: 'single_select', question: 'Which fruit?',
+      options: [{ index: 0, label: 'Apple' }, { index: 1, label: 'Pear' }],
+    };
+    socket.message({
+      type: 'blocked', ...target, pane_revision: 12, event_id: 'wait-1', screen_attention: 'waiting',
+      attention_kind: kind,
+      ...(kind === 'question' ? { interaction } : { options: ['Allow', 'Deny'], approval_fingerprint: 'fp' }),
+    });
+    const agent = get(relayStore.agents)[0];
+    relayStore.markResponding(agent.pane_id);
+    relayStore.readPane(agent);
+    const request = socket.messages().findLast(message => message.type === 'read_pane')!;
+    expect(agent).toMatchObject({ status: 'blocked', screen_attention: 'waiting' });
+    expect(get(relayStore.responding).has(agent.pane_id)).toBe(true);
+    socket.message({ type: 'agent_update', ...target, pane_revision: 11, status, screen_attention: 'cleared' });
+    expect(get(relayStore.agents)[0]).toBe(agent);
+    const clear = { ...target, pane_revision: 13, status, screen_attention: 'cleared' };
+    socket.message(type === 'agents' ? { type, agents: [clear] } : { type, ...clear });
+    expect(get(relayStore.agents)[0]).toMatchObject({ status, interaction: null, screen_attention: 'cleared' });
+    expect(get(relayStore.agents)[0].options).toBeUndefined();
+    expect(get(relayStore.agents)[0].approval_fingerprint).toBeUndefined();
+    expect(get(relayStore.agents)[0].event_id).toBeUndefined();
+    expect(get(relayStore.responding).has(agent.pane_id)).toBe(false);
+    socket.message({
+      type: 'pane_content', request_id: request.request_id, pane_id: 'w1:p1',
+      target: request.target, format: 'ansi', content: 'old question', attention_kind: 'question', interaction,
+    });
+    expect(get(relayStore.agents)[0]).toMatchObject({ status, interaction: null });
+  });
+
+  it('drops the promoted controls and pending answer on a replacement generation', () => {
+    const socket = connectRelay({ capabilities: ['attention_classification', 'idle_question_probe'] });
+    const target = { pane_id: 'w1:p1', ...exactAgentFields() };
+    socket.message({
+      type: 'blocked', ...target, pane_revision: 18, event_id: 'wait-1', screen_attention: 'waiting',
+      attention_kind: 'question', interaction: { id: 'old-question', kind: 'single_select', question: 'Which?', options: [] },
+    });
+    relayStore.markResponding(get(relayStore.agents)[0].pane_id);
+    socket.message({ type: 'agents', agents: [{ ...target, status: 'idle', pane_revision: 19, generation: 2 }] });
+    const current = get(relayStore.agents)[0];
+    expect(current).toMatchObject({ status: 'idle', interaction: null, generation: 2 });
+    expect(current.screen_attention).toBeUndefined();
+    expect(current.event_id).toBeUndefined();
+    expect(get(relayStore.responding).has(current.pane_id)).toBe(false);
+  });
+
+  it.each([true, false])('stabilizes ordinary native waits (probe capability: %s)', (capable) => {
+    const capabilities = capable ? ['attention_classification', 'idle_question_probe'] : ['attention_classification'];
+    const socket = connectRelay({ capabilities });
+    const target = { pane_id: 'w1:p1', ...exactAgentFields() };
+    socket.message({ type: 'blocked', ...target, pane_revision: 1, attention_kind: 'approval', options: ['Allow', 'Deny'] });
+    const idle = { ...target, status: 'idle', pane_revision: 2, ...(capable ? {} : { screen_attention: 'cleared' }) };
+    socket.message({ type: 'agents', agents: [idle] });
+    expect(get(relayStore.agents)[0]).toMatchObject({ status: 'blocked', options: ['Allow', 'Deny'] });
+    socket.message({ type: 'agents', agents: [{ ...idle, pane_revision: 3 }] });
+    const agent = get(relayStore.agents)[0];
+    expect(agent).toMatchObject({ status: 'idle', interaction: null });
+    expect(agent.screen_attention).toBeUndefined();
+    relayStore.readPane(agent);
+    const request = socket.messages().findLast(message => message.type === 'read_pane')!;
+    socket.message({
+      type: 'pane_content', request_id: request.request_id, pane_id: 'w1:p1', target: request.target,
+      format: 'ansi', content: 'question frame', attention_kind: 'question',
+      interaction: { id: 'local-question', kind: 'single_select', question: 'Which?', options: [{ index: 0, label: 'Yes' }] },
+    });
+    expect(get(relayStore.agents)[0].status).toBe(capable ? 'idle' : 'blocked');
+  });
+
   it('does not let an old pane generation suppress a replacement read', () => {
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();

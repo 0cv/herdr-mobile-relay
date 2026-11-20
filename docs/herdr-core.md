@@ -40,6 +40,18 @@ tab creation and close; creating and closing workspaces, and worktrees; the Pi
 integration switch; phone-driven relay updates and app deploys. Core upgrades
 are manual.
 
+## Live questions on idle panes
+
+The core relay uses the [same live-dialog checks as the TUI relay](mobile-app.md#live-questions-when-an-agent-looks-idle),
+reading the current terminal screen, not scrollback. A stop, a Resize Session
+lease on an idle or done agent, or an existing pin from the probe can trigger
+a check. Each relay shares four reads per reconcile cycle across those reasons;
+with several eligible panes, dismissal may take more than one rotation. Only
+controllers can answer. A current phone clears a confirmed end on the first
+update; an older phone still sees the pinned choices. Set
+`HERDR_RELAY_IDLE_QUESTION_PROBE=0` for the core relay and restart it to disable
+its checks without affecting the TUI relay.
+
 ## Conversation on core
 
 | Agent | How its session is found | What the user does |

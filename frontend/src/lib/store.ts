@@ -49,6 +49,7 @@ import {
 } from './device-auth';
 import {
   agentStatusGroup,
+  agentTargetReplaced,
   approvalOptions,
   clientPaneId,
   mergeAgentDetails,
@@ -1105,7 +1106,9 @@ class RelayStore {
     this.adoptHybridDescriptor(connection, message.hybrid);
     const attentionCapable = connection.capabilities.includes('attention_classification');
     this.agentsValue = this.agentsValue.map((agent) =>
-      agent.relay_id === relayId ? normalizeAgentAttention(agent, attentionCapable) : agent,
+      agent.relay_id === relayId
+        ? normalizeAgentAttention(agent, attentionCapable, connection.capabilities.includes('idle_question_probe'))
+        : agent,
     );
     this.publishAgents('push_config');
     connection.agentProfiles = Array.isArray(message.agent_profiles)
@@ -1271,7 +1274,9 @@ class RelayStore {
         label,
         normalizeAgentTargetFields(agent),
         attentionCapable,
+        connection?.capabilities.includes('idle_question_probe'),
       ));
+    const previous = this.agentsValue;
     this.agentsValue = mergeAgentList(
       this.agentsValue,
       relayId,
@@ -1279,7 +1284,7 @@ class RelayStore {
       this.blockedSnapshotMisses,
       this.respondingValue,
     );
-    this.reconcileResponding();
+    this.reconcileResponding(previous);
     this.publishAgents('agents snapshot');
   }
 
@@ -1292,6 +1297,7 @@ class RelayStore {
       label,
       normalizeAgentTargetFields({ ...message, status: 'blocked' }),
       attentionCapable,
+      connection?.capabilities.includes('idle_question_probe'),
     );
     const index = this.agentsValue.findIndex((agent) => agent.pane_id === next.pane_id);
     const before = index >= 0 ? this.agentsValue[index] : undefined;
@@ -1302,8 +1308,7 @@ class RelayStore {
       copy[index] = mergeAgentDetails(before, next);
       this.agentsValue = copy;
     } else this.agentsValue = [...this.agentsValue, next];
-    this.respondingValue.delete(next.pane_id);
-    this.responding.set(new Set(this.respondingValue));
+    this.clearResponding(next.pane_id);
     this.publishAgents('blocked event');
   }
 
@@ -1315,19 +1320,21 @@ class RelayStore {
     const paneId = clientPaneId(relayId, message.pane_id);
     const index = this.agentsValue.findIndex((agent) => agent.pane_id === paneId);
     const before = index >= 0 ? this.agentsValue[index] : undefined;
-    const source = before && rawBlocked(message)
+    const idleProbeCapable = connection?.capabilities.includes('idle_question_probe');
+    const source = !idleProbeCapable && before && rawBlocked(message)
       && !Object.prototype.hasOwnProperty.call(message, 'attention_kind')
       ? { ...before, ...message }
       : message;
-    const next = normalizeAgent(relayId, label, normalizeAgentTargetFields(source), attentionCapable);
+    const next = normalizeAgent(relayId, label, normalizeAgentTargetFields(source), attentionCapable, idleProbeCapable);
     if (staleAgentRevision(before, next)) return;
+    const previous = this.agentsValue;
     const stabilized = stabilizeBlockedSnapshot(before, next, this.blockedSnapshotMisses, this.respondingValue);
     if (index >= 0) {
       const copy = [...this.agentsValue];
       copy[index] = mergeAgentDetails(before, stabilized);
       this.agentsValue = copy;
     } else this.agentsValue = [...this.agentsValue, stabilized];
-    this.reconcileResponding();
+    this.reconcileResponding(previous);
     this.publishAgents('agent update');
   }
 
@@ -1355,6 +1362,8 @@ class RelayStore {
     if (index < 0) return;
     const agent = this.agentsValue[index];
     if (!agent.attention_capable || message.attention_kind !== 'question' || !message.interaction) return;
+    if (this.connectionsValue.get(agent.relay_id)?.capabilities.includes('idle_question_probe')
+      && (!rawBlocked(agent) || agent.screen_attention === 'waiting')) return;
     this.agentsValue[index] = {
       ...agent,
       status: 'blocked',
@@ -1389,11 +1398,14 @@ class RelayStore {
     }
   }
 
-  private reconcileResponding(): void {
-    const blocked = new Set(this.agentsValue.filter((agent) => agentStatusGroup(agent) === 'blocked').map((agent) => agent.pane_id));
+  private reconcileResponding(previous: Agent[]): void {
+    if (this.respondingValue.size === 0) return;
+    const blocked = new Map(this.agentsValue.filter((agent) => agentStatusGroup(agent) === 'blocked').map((agent) => [agent.pane_id, agent]));
+    const byPane = new Map(previous.map((agent) => [agent.pane_id, agent]));
     let changed = false;
     for (const paneId of this.respondingValue) {
-      if (!blocked.has(paneId)) {
+      const current = blocked.get(paneId);
+      if (!current || agentTargetReplaced(byPane.get(paneId), current)) {
         const timer = this.respondingTimers.get(paneId);
         if (timer) clearTimeout(timer);
         this.respondingTimers.delete(paneId);
@@ -2285,7 +2297,11 @@ class RelayStore {
   }
 
   applyQuestionInteraction(agent: Agent, interaction: QuestionInteraction | null): void {
+    const current = this.agentsValue.find((item) => item.pane_id === agent.pane_id);
+    if (!current || agentTargetReplaced(agent, current)) return;
     this.clearResponding(agent.pane_id);
+    if (this.connectionsValue.get(agent.relay_id)?.capabilities.includes('idle_question_probe')
+      && (!rawBlocked(current) || current.screen_attention === 'waiting')) return;
     this.blockedSnapshotMisses.delete(agent.pane_id);
     this.agentsValue = this.agentsValue.map((item) => item.pane_id === agent.pane_id
       ? {

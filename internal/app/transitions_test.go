@@ -261,7 +261,7 @@ func TestApprovalPushSuppressedWhenAttentionIsReclassified(t *testing.T) {
 		question.Classification{
 			Kind:   question.AttentionChat,
 			Prompt: "What would you like to work on next?",
-		},
+		}, "",
 	)
 	if !committed {
 		t.Fatal("chat reclassification was not committed")

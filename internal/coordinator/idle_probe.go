@@ -86,7 +86,7 @@ func (s *State) applyRawStatusLocked(rec *paneRecord, next, previous *AgentState
 				next.BlockedEventID = s.newBlockedEventIDLocked()
 			}
 		}
-	} else if previous.ScreenAttention == ScreenWaiting || rec.probe.stop != 0 && previous.Status == "blocked" {
+	} else if previous.StrictAttention || rec.probe.stop != 0 && previous.Status == "blocked" {
 		next.ScreenAttention = ScreenCleared
 	}
 	next.ProbePending = false

@@ -22,6 +22,9 @@ func TestClassifyLive(t *testing.T) {
 		{"codex-first-question.ansi", "codex"},
 		{"codex-final-approval.ansi", "codex"},
 		{"qodercli-second-question-single.ansi", "qoder"},
+		{"qodercli-submit-answers.ansi", "qoder"},
+		{"opencode-single-question.ansi", "opencode"},
+		{"opencode-many-questions-confirm.ansi", "opencode"},
 	} {
 		t.Run(tc.fixture, func(t *testing.T) {
 			frame := attentionFixture(t, tc.fixture)
@@ -36,6 +39,25 @@ func TestClassifyLive(t *testing.T) {
 				}
 			} else if ApprovalFingerprint(got) == "" || !reflect.DeepEqual(got.Options, want.Options) || got.ApprovalFocus != want.ApprovalFocus {
 				t.Fatalf("got %+v, want options %v with focus %d", got, want.Options, want.ApprovalFocus)
+			}
+		})
+	}
+}
+
+func TestClassifyLiveBoundedApprovals(t *testing.T) {
+	for _, tc := range []struct{ agent, frame string }{
+		{"hermes", hermesApprovalView},
+		{"agy", agyApprovalView},
+	} {
+		t.Run(tc.agent, func(t *testing.T) {
+			want := Classify(tc.frame, tc.agent)
+			got, ok := ClassifyLive(tc.frame, tc.agent)
+			if !ok || got.Kind != AttentionApproval || ApprovalFingerprint(got) == "" ||
+				!reflect.DeepEqual(got.Options, want.Options) || got.ApprovalFocus != want.ApprovalFocus {
+				t.Fatalf("got %+v, want options %v with focus %d", got, want.Options, want.ApprovalFocus)
+			}
+			if stale, ok := ClassifyLive(tc.frame+"\nDone", tc.agent); !ok || stale.Kind != "" {
+				t.Fatalf("accepted historical approval: %+v", stale)
 			}
 		})
 	}

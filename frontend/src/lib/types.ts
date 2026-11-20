@@ -269,6 +269,7 @@ export interface Agent {
   interaction?: QuestionInteraction | null;
   event_id?: string;
   attention_kind?: AttentionKind;
+  screen_attention?: 'waiting' | 'cleared';
   attention_capable?: boolean;
   server_session_id?: string;
   terminal_id?: string;

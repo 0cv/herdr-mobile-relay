@@ -105,6 +105,17 @@ func (s *Server) classifyPaneResponse(request coordinator.PaneReadRequest, respo
 		agentName = agent.Agent
 	}
 	classification := question.Classify(content, agentName)
+	liveDialog := false
+	if agent != nil && (agent.ProbeGoverned() || agent.StrictAttention) {
+		live, _ := question.ClassifyLive(content, agentName)
+		identity := coordinator.LiveIdentity(live)
+		liveDialog = identity != ""
+		if agent.StrictAttention && !agent.ProbePending && liveDialog && identity == agent.LiveIdentity && live.Kind == agent.AttentionKind {
+			classification = classificationFromAgent(agent)
+		} else if liveDialog || classification.Kind == question.AttentionQuestion || classification.Kind == question.AttentionApproval {
+			classification = unknownPaneClassification()
+		}
+	}
 	response["attention_kind"] = classification.Kind
 	response["prompt"] = classification.Prompt
 	response["command"] = classification.Command
@@ -123,7 +134,7 @@ func (s *Server) classifyPaneResponse(request coordinator.PaneReadRequest, respo
 		// not commit rows from frames read inside this window as history.
 		response["resize_settling"] = true
 	}
-	if classification.Interaction != nil || !isClaudeLike(agentName) ||
+	if liveDialog || classification.Interaction != nil || !isClaudeLike(agentName) ||
 		agent != nil && (agent.ProbePending || agent.ScreenAttention == coordinator.ScreenWaiting) {
 		return response
 	}
