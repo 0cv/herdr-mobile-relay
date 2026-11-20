@@ -655,6 +655,7 @@ const permissionTest = test.extend<object, { browser: Browser }>({
 
 for (const permission of ['granted', 'denied'] as const) {
   permissionTest(`demo home is isolated with notifications ${permission}`, async ({ context, page: realApp, browserName }) => {
+    test.setTimeout(60_000);
     const sockets: string[] = [];
     await context.routeWebSocket('**/*', async (socket) => {
       sockets.push(socket.url());

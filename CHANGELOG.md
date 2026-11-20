@@ -16,6 +16,8 @@ project follows [Semantic Versioning](https://semver.org/).
   show the requested additions and removals alongside the tool's result.
 - Scan a computer’s setup QR code from inside the app to pair without going
   through Safari on iPhone and iPad (#54).
+- Tap printed workspace file paths in Conversation or Terminal to open a
+  read-only preview at the referenced line. No relay update is needed.
 
 ### Changed
 

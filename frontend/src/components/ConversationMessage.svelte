@@ -2,6 +2,7 @@
   import ToolPayload from '$components/ToolPayload.svelte';
   import ConversationToolCard from '$components/ConversationToolCard.svelte';
   import { isChosenOption, parseAskUserQuestion } from '$lib/conversation';
+  import type { FileLinkContext } from '$lib/file-links';
   import { safeMarkdownHtml } from '$lib/markdown';
   import type { ConversationTool } from '$lib/types';
   import type { ConversationMessageViewState } from '$lib/conversation-message-state';
@@ -44,6 +45,7 @@
     tools = [],
     showDiffs = true,
     highlight = '',
+    fileLinks,
     awaiting = null,
   }: {
     text: string;
@@ -52,10 +54,11 @@
     tools?: ConversationTool[];
     showDiffs?: boolean;
     highlight?: string;
+    fileLinks?: FileLinkContext | null;
     awaiting?: 'below' | 'elsewhere' | null;
   } = $props();
 
-  const markdown = $derived(safeMarkdownHtml(text, highlight, role));
+  const markdown = $derived(safeMarkdownHtml(text, highlight, fileLinks, role));
 </script>
 
 {#if text}

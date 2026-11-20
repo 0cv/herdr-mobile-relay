@@ -191,7 +191,8 @@ export async function boot(page: Page, relays: RelayFixture[] = [], path = '/', 
           return;
         }
         if (String(message.type).startsWith('workspace_')) {
-          let data: Record<string, unknown>;
+          let data: Record<string, unknown> | undefined;
+          let error = '';
           switch (message.type) {
             case 'workspace_tree':
               data = {
@@ -203,15 +204,23 @@ export async function boot(page: Page, relays: RelayFixture[] = [], path = '/', 
                 ],
               };
               break;
-            case 'workspace_file':
-              data = {
-                path: message.path,
-                media_type: 'text/markdown',
-                kind: 'text',
-                text: '# Workspace preview\n\nRead-only file contents.',
-                size: 46,
-              };
+            case 'workspace_file': {
+              const path = String(message.path);
+              if (path.startsWith('missing/')) {
+                error = 'Workspace file was not found';
+              } else if (path.endsWith('.png')) {
+                data = {
+                  path, kind: 'image', media_type: 'image/png', size: 68,
+                  data_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVQImWNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=',
+                };
+              } else {
+                const text = path === 'src/long.ts'
+                  ? Array.from({ length: 300 }, (_, index) => `// Line ${index + 1}`).join('\r\n')
+                  : '# Workspace preview\n\nRead-only file contents.';
+                data = { path, kind: 'text', media_type: 'text/plain', text, size: text.length };
+              }
               break;
+            }
             case 'workspace_git_status':
               data = {
                 available: true,
@@ -236,8 +245,9 @@ export async function boot(page: Page, relays: RelayFixture[] = [], path = '/', 
             type: 'command_result',
             action: message.type,
             request_id: message.request_id,
-            ok: true,
-            phase: 'completed',
+            ok: !error,
+            phase: error ? 'failed' : 'completed',
+            error: error || undefined,
             data,
           }));
           return;

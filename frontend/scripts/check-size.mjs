@@ -87,7 +87,8 @@ import { appScriptPattern, appStylePattern, releaseEntryPath } from './release-r
 // this ceiling is not permission for future increases.
 // Raised from 170 to 171 KiB by owner authorization for recorded edit diffs
 // in Full history (474 B gzip) and the in-app QR scanner (754 B gzip).
-const limitKiB = 171;
+// Raised from 171 to 174 KiB by owner authorization for file path links (2,250 B gzip).
+const limitKiB = 174;
 const limit = limitKiB * 1024;
 const root = resolve(process.argv[2] || 'dist');
 const assetNames = await readdir(join(root, 'assets'));
