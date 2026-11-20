@@ -3,9 +3,9 @@ package push
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 )
@@ -105,27 +105,29 @@ func TestWaitingAlertWaitsForRetract(t *testing.T) {
 			applyWaiting(t, manager, a, deliveryNow)
 			ref := queuedEventRef(t, dir, a.EventID)
 			runPass(t, manager, deliveryNow)
-			if err := manager.Resolve(t.Context(), a); err != nil {
-				t.Fatal(err)
+			retirePane(t, manager, a.PaneID)
+
+			type send struct {
+				key     PushEventKey
+				retract bool
 			}
-			id := deliveryID(a, endpointOne)
-			first := manager.queue.state.Entries[id]
-			log := &sendLog{}
+			var sent []send
 			fail := true
-			sender := func(_ context.Context, sub Subscription, payload []byte, _ sendOptions) error {
-				if err := log.record(sub, payload); err != nil {
+			sender := func(_ context.Context, _ Subscription, payload []byte, _ sendOptions) error {
+				var alert Payload
+				if err := json.Unmarshal(payload, &alert); err != nil {
 					return err
 				}
-				if fail && log.sent[len(log.sent)-1].Payload.Retract {
+				sent = append(sent, send{alert.Key, alert.Retract})
+				if fail && alert.Retract {
 					return &pushError{statusCode: http.StatusServiceUnavailable}
 				}
 				return nil
 			}
 			manager.sendPush = sender
-			runPass(t, manager, first.DueAt)
-			pending := manager.queue.state.Entries[id]
-			if pending.Attempts != 1 || pending.Event.ExpiresAt != first.Event.ExpiresAt {
-				t.Fatalf("pending retract = %#v", pending)
+			first := runPass(t, manager, deliveryNow)
+			if len(first) != 1 || first[0].Disposition != DeliveryRetrying {
+				t.Fatalf("first withdrawal = %#v, want retry", first)
 			}
 			if name == "restart" {
 				var err error
@@ -137,52 +139,51 @@ func TestWaitingAlertWaitsForRetract(t *testing.T) {
 				if err := manager.Reconcile(t.Context(), func(PushEventKey) bool { return true }); err != nil {
 					t.Fatal(err)
 				}
-				got := manager.queue.state.Entries[id]
-				if !sameQueueEntry(pending, got) {
-					t.Fatalf("reconciliation changed pending retract: %#v, want %#v", got, pending)
-				}
-				if _, err := manager.VerifyEventReference(ref, deliveryNow); !errors.Is(err, ErrStaleReference) {
-					t.Fatalf("withdrawn reference = %v, want stale", err)
-				}
+				requireReferenceStale(t, manager, ref)
 			}
 			b := a
 			b.InteractionRevision++
-			request := PublishRequest{Key: b, Preview: PreviewHidden, CreatedAt: first.DueAt}
+			request := PublishRequest{Key: b, Preview: PreviewHidden, CreatedAt: deliveryNow}
 			if name == "alert expires" {
-				request.ExpiresAt = first.DueAt.Add(500 * time.Millisecond)
+				request.ExpiresAt = deliveryNow.Add(500 * time.Millisecond)
 			}
 			if result, err := manager.ApplyPaneTransition(t.Context(), b.PaneID, &request, func() bool { return true }); err != nil || result.Queued != 1 {
 				t.Fatalf("replacement = %#v, %v", result, err)
 			}
-			runPass(t, manager, first.DueAt)
-			if len(log.sent) != 1 || !log.sent[0].Payload.Retract {
-				t.Fatalf("replacement sent before retract retry: %#v", log.sent)
+			runPass(t, manager, first[0].NextAttempt.Add(-time.Nanosecond))
+			if !slices.Equal(sent, []send{{a, true}}) {
+				t.Fatalf("sent before withdrawal retry: %#v", sent)
 			}
+
 			fail = name == "retries exhausted"
-			at := pending.DueAt
+			at := first[0].NextAttempt
 			for {
-				runPass(t, manager, at)
-				retract, queued := manager.queue.state.Entries[id]
-				if !queued {
+				results := runPass(t, manager, at)
+				index := slices.IndexFunc(results, func(result DeliveryResult) bool { return result.Event.Retract })
+				if index < 0 {
+					t.Fatalf("withdrawal not attempted at %v: %#v", at, results)
+				}
+				retract := results[index]
+				if name == "restart" && (retract.Attempts != 2 || !retract.Event.ExpiresAt.Equal(first[0].Event.ExpiresAt)) {
+					t.Fatalf("restart changed withdrawal attempt or deadline: %#v", retract)
+				}
+				if retract.Disposition != DeliveryRetrying {
 					break
 				}
-				if !retract.DueAt.After(at) || len(log.sent) != retract.Attempts {
-					t.Fatalf("wrong retry order: %#v", log.sent)
-				}
-				at = retract.DueAt
+				at = retract.NextAttempt
 			}
 			runPass(t, manager, at)
-			alerts := 0
-			for i, sent := range log.sent {
-				if !sent.Payload.Retract {
-					alerts++
-					if sent.Payload.Key != b || i != len(log.sent)-1 {
-						t.Fatalf("replacement sent out of order: %#v", log.sent)
-					}
+			want := []send{{a, true}, {a, true}}
+			if fail {
+				for len(want) < maxDeliveryAttempts {
+					want = append(want, send{a, true})
 				}
 			}
-			if name == "alert expires" && alerts != 0 || name != "alert expires" && alerts != 1 {
-				t.Fatalf("unexpected replacement count: %#v", log.sent)
+			if name != "alert expires" {
+				want = append(want, send{b, false})
+			}
+			if !slices.Equal(sent, want) {
+				t.Fatalf("POSTs = %#v, want %#v", sent, want)
 			}
 		})
 	}
@@ -190,20 +191,11 @@ func TestWaitingAlertWaitsForRetract(t *testing.T) {
 
 func TestWaitingSequenceSurvivesRetryRetractAndEmptyQueueRestart(t *testing.T) {
 	manager, dir := newDeliveringManager(t, endpointOne)
-	now := deliveryNow
-	manager.now = func() time.Time { return now }
-	sub := manager.Subscriptions()[0]
-	sub.OrderedWaitingPush = true
-	if err := manager.Subscribe(sub); err != nil {
-		t.Fatal(err)
-	}
-	if err := manager.Subscribe(typedTestSubscription("ordinary", endpointTwo)); err != nil {
-		t.Fatal(err)
-	}
 	a, b := exactKey("ordered-a"), exactKey("ordered-b")
+	a.Category = CategoryAttention
 	b.PaneID = "pane-2"
 	for _, key := range []PushEventKey{a, b} {
-		applyWaiting(t, manager, key, now)
+		applyWaiting(t, manager, key, deliveryNow)
 	}
 	log := &sendLog{}
 	manager.sendPush = func(_ context.Context, sub Subscription, payload []byte, _ sendOptions) error {
@@ -215,35 +207,29 @@ func TestWaitingSequenceSurvivesRetryRetractAndEmptyQueueRestart(t *testing.T) {
 		}
 		return nil
 	}
-	process := func() {
-		t.Helper()
-		if _, err := manager.RunOnce(t.Context()); err != nil {
-			t.Fatal(err)
-		}
-	}
-	process()
-	now = now.Add(time.Second)
-	process()
+	runPass(t, manager, deliveryNow)
+	now := deliveryNow.Add(time.Second)
+	runPass(t, manager, now)
 	for _, key := range []PushEventKey{a, b} {
-		if err := manager.Resolve(t.Context(), key); err != nil {
-			t.Fatal(err)
-		}
+		retirePane(t, manager, key.PaneID)
 	}
-	process()
-	count := map[PushEventKey]int{}
+	runPass(t, manager, now)
+
+	type display struct {
+		sequence uint64
+		retract  bool
+	}
+	displays := map[PushEventKey][]display{}
 	for _, sent := range log.sent {
-		payload := sent.Payload
-		want := uint64(1)
-		if payload.Key == b {
-			want = 2
-		}
-		if payload.WaitingSeq != want || payload.Retract != (count[payload.Key] == int(3-want)) {
-			t.Fatalf("sequence or retract mismatch: %#v", payload)
-		}
-		count[payload.Key]++
+		alert := sent.Payload
+		displays[alert.Key] = append(displays[alert.Key], display{alert.WaitingSeq, alert.Retract})
 	}
-	if count[a] != 3 || count[b] != 2 || len(manager.queue.state.Entries)+len(manager.queue.state.Delivered) != 0 {
-		t.Fatalf("wanted retry, retracts and empty queue: %#v, %#v", count, manager.queue.state)
+	if len(displays) != 2 || !slices.Equal(displays[a], []display{{1, false}, {1, false}, {1, true}}) ||
+		!slices.Equal(displays[b], []display{{2, false}, {2, true}}) {
+		t.Fatalf("expected ordered alerts, retry and withdrawals, got %#v", displays)
+	}
+	if queue := readQueueFile(t, dir); len(queue.Entries)+len(queue.Delivered) != 0 {
+		t.Fatalf("expected empty queue, got %#v", queue)
 	}
 
 	var err error
@@ -255,20 +241,16 @@ func TestWaitingSequenceSurvivesRetryRetractAndEmptyQueueRestart(t *testing.T) {
 	log = acceptingManager(manager)
 	c := exactKey("after-restart")
 	applyWaiting(t, manager, c, now)
-	update := PushEventKey{Category: CategoryUpdate, EventID: "update", DeviceID: sub.DeviceID}
-	ordinary := exactKey("ordinary")
-	ordinary.DeviceID = "ordinary"
-	for _, key := range []PushEventKey{update, ordinary} {
-		if result, err := manager.Publish(t.Context(), PublishRequest{Key: key, Preview: PreviewHidden}); err != nil || result.Queued != 1 {
-			t.Fatalf("Publish = %#v, %v", result, err)
-		}
-		entry := manager.queue.state.Entries[deliveryID(key, map[string]string{sub.DeviceID: endpointOne, "ordinary": endpointTwo}[key.DeviceID])]
-		var wire map[string]json.RawMessage
-		if err := json.Unmarshal(entry.Event.Payload, &wire); err != nil || wire["waiting_seq"] != nil {
-			t.Fatalf("ordinary alert contains waiting sequence: %s, %v", entry.Event.Payload, err)
-		}
+	update := PushEventKey{Category: CategoryUpdate, EventID: "update", DeviceID: c.DeviceID}
+	if result, err := manager.Publish(t.Context(), PublishRequest{Key: update, Preview: PreviewHidden}); err != nil || result.Queued != 1 {
+		t.Fatalf("Publish = %#v, %v", result, err)
 	}
-	process()
+	entry := readQueueFile(t, dir).Entries[deliveryID(update, endpointOne)]
+	var wire map[string]json.RawMessage
+	if err := json.Unmarshal(entry.Event.Payload, &wire); err != nil || wire["waiting_seq"] != nil {
+		t.Fatalf("update contains waiting sequence: %s, %v", entry.Event.Payload, err)
+	}
+	runPass(t, manager, now)
 	if len(log.sent) != 2 {
 		t.Fatalf("expected new alert and update, got %#v", log.sent)
 	}
@@ -299,10 +281,8 @@ func TestWaitingRetractDoesNotHoldOtherDeliveries(t *testing.T) {
 	acceptingManager(manager)
 	applyWaiting(t, manager, a, deliveryNow)
 	runPass(t, manager, deliveryNow)
-	if err := manager.Resolve(t.Context(), a); err != nil {
-		t.Fatal(err)
-	}
-	at := manager.queue.state.Entries[deliveryID(a, endpointTwo)].DueAt
+	retirePane(t, manager, a.PaneID)
+	at := deliveryNow
 	log := &sendLog{}
 	manager.sendPush = func(_ context.Context, sub Subscription, payload []byte, _ sendOptions) error {
 		if err := log.record(sub, payload); err != nil {
@@ -335,7 +315,7 @@ func TestWaitingRetractDoesNotHoldOtherDeliveries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := manager.queue.enqueue(PushEvent{
+	if err := enqueueFixture(manager.queue, PushEvent{
 		Key: endpoint, Payload: payload, CreatedAt: at, ExpiresAt: at.Add(time.Minute),
 	}, typedTestSubscription("device-1", "https://fcm.googleapis.com/alternate"), at); err != nil {
 		t.Fatal(err)

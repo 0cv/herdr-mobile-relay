@@ -63,8 +63,12 @@ func loadOrCreateReferenceSigner(path string) (*ReferenceSigner, error) {
 	return &ReferenceSigner{key: key}, nil
 }
 
+func (key PushEventKey) waitingTopicScope() [3]string {
+	return [3]string{key.DeviceID, key.ServerSessionID, key.PaneID}
+}
+
 func (s *ReferenceSigner) waitingTopic(key PushEventKey) string {
-	scope, _ := json.Marshal([3]string{key.DeviceID, key.ServerSessionID, key.PaneID})
+	scope, _ := json.Marshal(key.waitingTopicScope())
 	mac := hmac.New(sha256.New, s.key)
 	_, _ = mac.Write([]byte("push-topic-v1\x00"))
 	_, _ = mac.Write(scope)
@@ -141,7 +145,7 @@ type Payload struct {
 	ActionRefs map[string]string    `json:"action_refs"`
 	EventRef   string               `json:"event_ref"`
 	Retract    bool                 `json:"retract,omitempty"`
-	WaitingSeq uint64               `json:"waiting_seq,omitempty,string"`
+	WaitingSeq uint64               `json:"waiting_seq,omitempty"`
 }
 
 func BuildPayload(request PayloadRequest, signer *ReferenceSigner) ([]byte, error) {

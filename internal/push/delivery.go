@@ -9,10 +9,6 @@ func terminalSubscriptionKey(subscription Subscription) string {
 	return subscription.DeviceID + "\x00" + subscription.Endpoint
 }
 
-func (m *Manager) RunOnce(ctx context.Context) ([]DeliveryResult, error) {
-	return m.processDue(ctx, m.now)
-}
-
 func (m *Manager) retireFinishedKeys(results []DeliveryResult) error {
 	seen := make(map[PushEventKey]bool)
 	for _, result := range results {
@@ -36,7 +32,7 @@ func (m *Manager) retireFinishedKeys(results []DeliveryResult) error {
 	return nil
 }
 
-func (m *Manager) processDue(ctx context.Context, now func() time.Time) ([]DeliveryResult, error) {
+func (m *Manager) RunOnce(ctx context.Context) ([]DeliveryResult, error) {
 	m.queue.process.Lock()
 	defer m.queue.process.Unlock()
 	m.mu.Lock()
@@ -45,17 +41,17 @@ func (m *Manager) processDue(ctx context.Context, now func() time.Time) ([]Deliv
 	if !reconciled {
 		return nil, nil
 	}
-	entries := m.queue.dueEntries(now())
+	entries := m.queue.dueEntries(m.now())
 	results := make([]DeliveryResult, 0, len(entries))
 	terminalSubscriptions := make(map[string]bool)
 	dirty := false
 	for _, entry := range entries {
 		if ctx.Err() != nil {
-			return m.finishPass(results, dirty, now(), ctx.Err())
+			return m.finishPass(results, dirty, m.now(), ctx.Err())
 		}
-		result, completedAt, err := m.deliverOne(ctx, now, entry, terminalSubscriptions)
+		result, completedAt, err := m.deliverOne(ctx, entry, terminalSubscriptions)
 		if err != nil {
-			return m.finishPass(results, dirty, now(), err)
+			return m.finishPass(results, dirty, m.now(), err)
 		}
 		if result.Disposition == "" {
 			continue
@@ -66,11 +62,11 @@ func (m *Manager) processDue(ctx context.Context, now func() time.Time) ([]Deliv
 		changed, err := m.applyResult(entry, result, completedAt)
 		dirty = changed || dirty
 		if err != nil {
-			return m.finishPass(results, dirty, now(), err)
+			return m.finishPass(results, dirty, m.now(), err)
 		}
 		results = append(results, result)
 	}
-	results, err := m.finishPass(results, dirty, now(), nil)
+	results, err := m.finishPass(results, dirty, m.now(), nil)
 	if err != nil {
 		return results, err
 	}
@@ -120,14 +116,13 @@ func (m *Manager) deliverable(key PushEventKey, now time.Time) bool {
 
 func (m *Manager) deliverOne(
 	ctx context.Context,
-	now func() time.Time,
 	entry queueEntry,
 	terminalSubscriptions map[string]bool,
 ) (DeliveryResult, time.Time, error) {
 	event := entry.Event
 	waiting := event.Key.Category.Waiting()
 	var retractDeadline time.Time
-	deliverable := event.Retract || m.deliverable(event.Key, now())
+	deliverable := event.Retract || m.deliverable(event.Key, m.now())
 	if waiting && !event.Retract && deliverable {
 		retractDeadline = m.queue.waitingRetractDeadline(entry)
 	}
@@ -135,7 +130,7 @@ func (m *Manager) deliverOne(
 	if waiting {
 		options.Topic = m.signer.waitingTopic(event.Key)
 	}
-	startedAt := now()
+	startedAt := m.now()
 	if !startedAt.Before(event.ExpiresAt) {
 		return newDeliveryResult(entry, DeliveryExpired, entry.Attempts), startedAt, nil
 	}
@@ -152,7 +147,7 @@ func (m *Manager) deliverOne(
 		options.TTL = int(event.CreatedAt.Add(24*time.Hour).Sub(startedAt) / time.Second)
 	}
 	sendErr := m.sendPush(ctx, entry.Subscription, event.Payload, options)
-	completedAt := now()
+	completedAt := m.now()
 	if sendErr != nil && ctx.Err() != nil {
 		return DeliveryResult{}, completedAt, ctx.Err()
 	}

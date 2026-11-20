@@ -96,10 +96,10 @@ describe('service worker notifications', () => {
 
   it('displays only the newest waiting alert and preserves its click after late pushes', async () => {
     const phone = worker();
-    const old = { key, title: 'Approval A', body: 'Review A', event_ref: 'signed-a', waiting_seq: '9007199254740992' };
+    const old = { key, title: 'Approval A', body: 'Review A', event_ref: 'signed-a', waiting_seq: 1 };
     const current = {
       key: { ...key, event_id: 'new-event', interaction_revision: 0, category: 'question' },
-      title: 'Question B', body: 'Review B', event_ref: 'signed-b', waiting_seq: '9007199254740993',
+      title: 'Question B', body: 'Review B', event_ref: 'signed-b', waiting_seq: 2,
     };
     const visible = () => [...phone.visible.values()];
     await phone.push(old);
@@ -133,20 +133,18 @@ describe('service worker notifications', () => {
   it('serializes push handling without touching other panes, relays or finished notices', async () => {
     const phone = worker();
     const otherRelay = worker('https://app.example/push/relay-b/');
-    const old = { key, title: 'Old', waiting_seq: '1' };
-    const current = { key: { ...key, event_id: 'event-2' }, title: 'Current', waiting_seq: '2' };
+    const old = { key, title: 'Old', waiting_seq: 1 };
+    const current = { key: { ...key, event_id: 'event-2' }, title: 'Current', waiting_seq: 2 };
     await otherRelay.push({ ...old, title: 'Other relay' });
     await phone.push({ ...old, key: { ...key, pane_id: 'pane-2' }, title: 'Other pane' });
     await phone.push({ key: { ...key, category: 'finished' }, title: 'Finished' });
-    await phone.push({ ...old, title: 'Exact-key alert', waiting_seq: undefined });
     phone.getNotifications.mockClear();
 
     let release!: () => void;
     const waiting = new Promise<void>(resolve => { release = resolve; });
-    const [prior] = [...phone.visible.values()].filter(({title}) => title === 'Exact-key alert');
     phone.getNotifications.mockImplementationOnce(async () => {
       await waiting;
-      return [prior];
+      return [];
     });
     const pending = phone.push(old);
     const replacement = phone.push(current);
@@ -160,6 +158,7 @@ describe('service worker notifications', () => {
     expect([...otherRelay.visible.values()].map(({title}) => title)).toEqual(['Other relay']);
     const displayed = [...phone.visible.values()].find(({title}) => title === 'Current')!;
     expect(otherRelay.visible.has(displayed.tag)).toBe(false);
+    expect(phone.getNotifications.mock.calls).toEqual([[{tag: displayed.tag}], [{tag: displayed.tag}], [{tag: displayed.tag}]]);
     await phone.push({ ...current, retract: true });
     expect([...phone.visible.values()].map(({title}) => title)).toEqual(['Other pane', 'Finished']);
     expect(phone.fetch).not.toHaveBeenCalled();
@@ -169,7 +168,7 @@ describe('service worker notifications', () => {
     const phone = worker();
     const second = { ...key, interaction_revision: key.interaction_revision + 1 };
     phone.showNotification.mockRejectedValueOnce(new Error('display failed'));
-    await expect(phone.push({ key, title: 'Failed', waiting_seq: '1' })).rejects.toThrow('display failed');
+    await expect(phone.push({ key, title: 'Failed', waiting_seq: 1 })).rejects.toThrow('display failed');
     await phone.push({ key, title: 'Exact A' });
     await phone.push({ key: second, title: 'Exact B' });
     await phone.push({ key, retract: true });

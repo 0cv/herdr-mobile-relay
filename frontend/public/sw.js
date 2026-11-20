@@ -86,7 +86,7 @@ function waitingTag(key) {
 }
 
 function waitingSequence(value) {
-  return typeof value === 'string' && /^[1-9]\d{0,19}$/.test(value) ? BigInt(value) : 0n;
+  return Number.isSafeInteger(value) && value > 0 ? value : 0;
 }
 
 function notificationOptions(payload, tag) {
@@ -107,11 +107,11 @@ function notificationOptions(payload, tag) {
 }
 
 async function displayPush(payload) {
-  const exactTag = notificationTag(payload.key);
   const sequence = waitingSequence(payload.waiting_seq);
   const tag = sequence && waitingTag(payload.key);
   const title = typeof payload.title === 'string' && payload.title ? payload.title : 'Herdr';
   if (!tag) {
+    const exactTag = notificationTag(payload.key);
     await closeExactNotification(exactTag);
     if (payload.retract !== true) {
       await self.registration.showNotification(title, notificationOptions(payload, exactTag));
@@ -119,35 +119,23 @@ async function displayPush(payload) {
     return;
   }
 
-  const notifications = await self.registration.getNotifications();
-  const group = notifications.filter(({data}) => validPushEventKey(data?.key) && waitingTag(data.key) === tag);
-  let newer;
-  let newestSequence = sequence;
-  for (const notification of group) {
-    const displayed = waitingSequence(notification.data.waitingSeq);
-    if (payload.retract === true) {
-      if (displayed <= sequence && (displayed || notificationTag(notification.data.key) === exactTag)) {
-        notification.close();
-      }
-    } else if (displayed > newestSequence) {
-      newestSequence = displayed;
-      newer = notification;
-    }
+  const [displayed] = await self.registration.getNotifications({tag});
+  const displayedSequence = waitingSequence(displayed?.data?.waitingSeq);
+  if (payload.retract === true) {
+    if (displayed && displayedSequence <= sequence) displayed.close();
+    return;
   }
-  if (payload.retract === true) return;
 
-  if (newer) {
+  if (displayedSequence > sequence) {
     // A push must show a notification or the browser may show its own or penalize the subscription.
-    const {body, icon, badge, actions, data} = newer;
-    await self.registration.showNotification(newer.title, {body, icon, badge, actions, data, tag: newer.tag, renotify: false});
-  } else {
-    const options = notificationOptions(payload, tag);
-    options.data.waitingSeq = payload.waiting_seq;
-    await self.registration.showNotification(title, options);
+    const {body, icon, badge, actions, data} = displayed;
+    await self.registration.showNotification(displayed.title, {body, icon, badge, actions, data, tag, renotify: false});
+    return;
   }
-  for (const notification of group) {
-    if (notification.tag !== (newer?.tag ?? tag)) notification.close();
-  }
+
+  const options = notificationOptions(payload, tag);
+  options.data.waitingSeq = sequence;
+  await self.registration.showNotification(title, options);
 }
 
 let pushQueue = Promise.resolve();

@@ -397,15 +397,13 @@ func TestWaitingDeliveryHTTPHeaders(t *testing.T) {
 		t.Fatal(err)
 	}
 	entry := manager.queue.state.Entries[deliveryID(a, sub.Endpoint)]
-	if _, err := manager.queue.enqueue(entry.Event, second, entry.DueAt); err != nil {
+	if err := enqueueFixture(manager.queue, entry.Event, second, entry.DueAt); err != nil {
 		t.Fatal(err)
 	}
 	topic := manager.signer.waitingTopic(a)
 	check("86390", topic, sub.Endpoint, second.Endpoint)
 	for range 2 {
-		if err := manager.Resolve(t.Context(), a); err != nil {
-			t.Fatal(err)
-		}
+		retirePane(t, manager, a.PaneID)
 	}
 	check("300", topic, sub.Endpoint, second.Endpoint)
 	check("", "")
@@ -430,9 +428,7 @@ func TestWaitingDeliveryHTTPHeaders(t *testing.T) {
 	unsent := exactKey("unsent")
 	unsent.PaneID = "other-pane"
 	applyWaiting(t, manager, unsent, now)
-	if err := manager.Resolve(t.Context(), unsent); err != nil {
-		t.Fatal(err)
-	}
+	retirePane(t, manager, unsent.PaneID)
 	check("", "")
 
 	for _, category := range []Category{CategoryFinished, CategoryBrief, CategoryUpdate, CategoryTest} {
@@ -612,7 +608,7 @@ func TestManagerPublishRetriesGenerationZero(t *testing.T) {
 	}
 }
 
-func TestManagerResolveRetractsExactAcceptedEvent(t *testing.T) {
+func TestPaneRetirementRetractsExactAcceptedEvent(t *testing.T) {
 	manager, err := NewManager(t.TempDir(), testLogger())
 	if err != nil {
 		t.Fatal(err)
@@ -645,10 +641,8 @@ func TestManagerResolveRetractsExactAcceptedEvent(t *testing.T) {
 		t.Fatal(err)
 	}
 	exactKey := typedTestKey("device-1")
-	if err := manager.Resolve(t.Context(), exactKey); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := runAt(t.Context(), manager, time.Now().UTC()); err != nil {
+	retirePane(t, manager, exactKey.PaneID)
+	if _, err := runAt(t.Context(), manager, now); err != nil {
 		t.Fatal(err)
 	}
 	if len(sent) != 2 || sent[0].Key != exactKey || sent[1].Key != exactKey || !sent[1].Retract {
@@ -802,7 +796,7 @@ func TestQueueRejectsEntriesPastBound(t *testing.T) {
 	}
 	key := typedTestKey("device-1")
 	event := PushEvent{Key: key, Payload: []byte(`{"type":"question"}`), CreatedAt: now, ExpiresAt: now.Add(time.Minute)}
-	if _, err := queue.enqueue(event, typedTestSubscription("device-1", "https://fcm.googleapis.com/one"), now); err == nil || err.Error() != "push_queue_limit" {
+	if err := enqueueFixture(queue, event, typedTestSubscription("device-1", "https://fcm.googleapis.com/one"), now); err == nil || err.Error() != "push_queue_limit" {
 		t.Fatalf("enqueue error = %v", err)
 	}
 	if len(queue.state.Entries) != maxQueueEntries {
@@ -887,7 +881,7 @@ func TestFailedPersistLeavesPolicyAndQueueUnchanged(t *testing.T) {
 	}
 	event := PushEvent{Key: key, Payload: []byte(`{"type":"question"}`), CreatedAt: now, ExpiresAt: now.Add(time.Minute)}
 	subscription := typedTestSubscription("device-1", "https://fcm.googleapis.com/one")
-	if _, err := queue.enqueue(event, subscription, now); err != nil {
+	if err := enqueueFixture(queue, event, subscription, now); err != nil {
 		t.Fatal(err)
 	}
 	queue.state.Delivered["delivered"] = deliveredRecord{Key: key, Subscription: subscription}
@@ -897,7 +891,7 @@ func TestFailedPersistLeavesPolicyAndQueueUnchanged(t *testing.T) {
 	other.EventID = "other-event"
 	otherEvent := event
 	otherEvent.Key = other
-	if _, err := queue.enqueue(otherEvent, subscription, now); err == nil {
+	if err := enqueueFixture(queue, otherEvent, subscription, now); err == nil {
 		t.Fatal("enqueue() succeeded with a broken path")
 	}
 	next := queue.state.clone()

@@ -13,21 +13,15 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/question"
 )
 
-func (s *Server) publishAgentPush(
-	ctx context.Context,
+func agentPushRequest(
 	agent *coordinator.AgentState,
 	eventID string,
 	revision int64,
 	category push.Category,
 	preview push.PreviewMode,
-	current func() bool,
-) {
-	if s.pushM == nil || agent == nil {
-		return
-	}
-	if agent.TerminalID == "" || eventID == "" {
-		s.applyPanePush(ctx, agent.PaneID, nil, current)
-		return
+) *push.PublishRequest {
+	if agent == nil || agent.TerminalID == "" || eventID == "" {
+		return nil
 	}
 	key := push.PushEventKey{
 		ServerSessionID:     protocol.PrimaryServerSessionID,
@@ -39,10 +33,11 @@ func (s *Server) publishAgentPush(
 		InteractionRevision: revision,
 		Category:            category,
 	}
-	if category.Waiting() {
-		current = func() bool { return s.pushEventCurrent(key) }
-	}
-	s.applyPanePush(ctx, agent.PaneID, &push.PublishRequest{Key: key, Preview: preview}, current)
+	return &push.PublishRequest{Key: key, Preview: preview}
+}
+
+func (s *Server) applyWaitingPush(ctx context.Context, request *push.PublishRequest) {
+	s.applyPanePush(ctx, request.Key.PaneID, request, func() bool { return s.pushEventCurrent(request.Key) })
 }
 
 func (s *Server) applyPanePush(ctx context.Context, paneID string, request *push.PublishRequest, current func() bool) {
@@ -220,8 +215,10 @@ func (s *Server) transitionBlocked(
 		category = push.CategoryQuestion
 		preview = push.PreviewQuestion
 	}
-	if s.pushM != nil {
-		s.publishAgentPush(ctx, agentState, eventID, classifiedAttentionRevision, category, preview, classifiedCurrent)
+	if request := agentPushRequest(agentState, eventID, classifiedAttentionRevision, category, preview); request != nil {
+		s.applyWaitingPush(ctx, request)
+	} else {
+		s.applyPanePush(ctx, paneID, nil, classifiedCurrent)
 	}
 	if !classifiedCurrent() {
 		return
@@ -316,14 +313,8 @@ func (s *Server) publishFinished(ctx context.Context, notice finishedNotice, cur
 	if !current() {
 		return
 	}
-	if s.pushM == nil {
-		return
-	}
-	if notice.pushAgent != nil {
-		s.publishAgentPush(ctx, notice.pushAgent, eventID, notice.revision, push.CategoryFinished, push.PreviewBrief, current)
-		return
-	}
-	s.applyPanePush(ctx, notice.paneID, nil, current)
+	request := agentPushRequest(notice.pushAgent, eventID, notice.revision, push.CategoryFinished, push.PreviewBrief)
+	s.applyPanePush(ctx, notice.paneID, request, current)
 }
 
 const (

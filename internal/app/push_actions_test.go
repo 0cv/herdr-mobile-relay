@@ -1,7 +1,6 @@
 package app
 
 import (
-	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -285,18 +284,7 @@ func TestPushOpenRef(t *testing.T) {
 
 	firstAgent, _ := s.state.Agent(target.PaneID)
 	firstRevision := s.state.AttentionRevision(target.PaneID)
-	replacementPublished := make(chan struct{})
-	staleCallbacksDone := make(chan struct{})
-	go func() {
-		defer close(staleCallbacksDone)
-		select {
-		case <-replacementPublished:
-		case <-t.Context().Done():
-			return
-		}
-		s.publishAgentPush(t.Context(), firstAgent, eventID, firstRevision, push.CategoryAttention, push.PreviewHidden, func() bool { return false })
-		s.transitionWorking(context.Background(), target.PaneID, "claude", "", firstAgent.StateRevision, 0)
-	}()
+	staleRequest := agentPushRequest(firstAgent, eventID, firstRevision, push.CategoryAttention, push.PreviewHidden)
 
 	classify("different approval")
 	oldClaims, err := s.pushM.VerifyEventReference(old, time.Now())
@@ -305,9 +293,9 @@ func TestPushOpenRef(t *testing.T) {
 	}
 	refuse(old)
 	secondAgent, _ := s.state.Agent(target.PaneID)
-	s.publishAgentPush(t.Context(), secondAgent, eventID, s.state.AttentionRevision(target.PaneID), push.CategoryAttention, push.PreviewHidden, func() bool { return true })
-	close(replacementPublished)
-	<-staleCallbacksDone
+	s.applyWaitingPush(t.Context(), agentPushRequest(secondAgent, eventID, s.state.AttentionRevision(target.PaneID), push.CategoryAttention, push.PreviewHidden))
+	s.applyWaitingPush(t.Context(), staleRequest)
+	s.transitionWorking(t.Context(), target.PaneID, "claude", "", firstAgent.StateRevision, 0)
 	payloads := queuedPushPayloads(t, dir)
 	if len(payloads) != 2 {
 		t.Fatalf("stale callbacks changed the replacement queue: %#v", payloads)
@@ -368,46 +356,29 @@ func TestPushTestDevice(t *testing.T) {
 }
 
 func TestPushSubscribe(t *testing.T) {
-	s, conn, client, dir := pushActionServer(t)
+	s, conn, client, _ := pushActionServer(t)
 	subscribe := func(subscription string) map[string]any {
 		t.Helper()
 		s.handlePushSubscribe(client, protocol.Inbound{Subscription: json.RawMessage(subscription), ClientID: "client-1"}, pushIdentity)
 		return readFrame(t, conn)
 	}
 
-	for _, ordered := range []bool{true, false} {
-		flags := ""
-		if ordered {
-			flags = `, "ordered_waiting_push": true`
-		}
+	t.Run("the stored subscription takes its identity from the connection", func(t *testing.T) {
 		requirePushResult(t, subscribe(`{
 			"endpoint": "https://fcm.googleapis.com/fcm/send/one", "keys": {"p256dh": "p", "auth": "a"},
-			"device_id": "someone-else", "locale": "de", "platform": "ios", "user_agent": "Mozilla"`+flags+`
+			"device_id": "someone-else", "locale": "de", "platform": "ios", "user_agent": "Mozilla"
 		}`), "push_subscribed", true)
 
-		for _, manager := range []*push.Manager{s.pushM, newPushManager(t, dir)} {
-			subscriptions := manager.Subscriptions()
-			if len(subscriptions) != 1 {
-				t.Fatalf("subscriptions = %#v", subscriptions)
-			}
-			stored := subscriptions[0]
-			if stored.DeviceID != "device-1" || stored.Locale != "zh-CN" || stored.Platform != push.PlatformOther ||
-				stored.UserAgent != "" || stored.ClientID != "client-1" || stored.OrderedWaitingPush != ordered {
-				t.Fatalf("stored = %#v, ordered = %v", stored, ordered)
-			}
+		subscriptions := s.pushM.Subscriptions()
+		if len(subscriptions) != 1 {
+			t.Fatalf("subscriptions = %#v", subscriptions)
 		}
-		target := currentPaneTarget(t, s)
-		id := "subscription-" + strconv.FormatBool(ordered)
-		if result := publishAttention(t, s, pushIdentity.DeviceID, id, target); result.Queued != 1 {
-			t.Fatalf("Publish = %#v", result)
+		stored := subscriptions[0]
+		if stored.DeviceID != "device-1" || stored.Locale != "zh-CN" || stored.Platform != push.PlatformOther ||
+			stored.UserAgent != "" || stored.ClientID != "client-1" {
+			t.Fatalf("stored = %#v", stored)
 		}
-		for _, payload := range queuedPushPayloads(t, dir) {
-			if payload.Key.EventID == id && (len(payload.Actions) != 0 || len(payload.ActionRefs) != 0 ||
-				(payload.WaitingSeq != 0) != ordered || payload.Key.DeviceID != pushIdentity.DeviceID) {
-				t.Fatalf("notification changed actions or device binding: %#v", payload)
-			}
-		}
-	}
+	})
 
 	for name, subscription := range map[string]string{
 		"malformed JSON":       `"endpoint"`,

@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"math"
 	"net"
 	"net/http"
 	"os"
@@ -110,32 +109,9 @@ func newDurableQueue(path string) (*durableQueue, error) {
 	return q, nil
 }
 
-func (q *durableQueue) enqueue(event PushEvent, subscription Subscription, dueAt time.Time) (string, error) {
-	if subscription.DeviceID == "" || subscription.DeviceID != event.Key.DeviceID {
-		return "", errors.New("push_subscription_device_mismatch")
-	}
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	next := q.state.clone()
-	id := next.enqueue(event, subscription, dueAt)
-	if err := q.commitLocked(next); err != nil {
-		return "", err
-	}
-	return id, nil
-}
-
-func (f *queueFile) nextWaitingSeq() (uint64, error) {
-	if f.WaitingSeq == math.MaxUint64 {
-		return 0, errors.New("push_waiting_sequence_exhausted")
-	}
-	f.WaitingSeq++
-	return f.WaitingSeq, nil
-}
-
-func (f *queueFile) enqueue(event PushEvent, subscription Subscription, dueAt time.Time) string {
+func (f *queueFile) enqueue(event PushEvent, subscription Subscription, dueAt time.Time) {
 	id := deliveryID(event.Key, subscription.Endpoint)
 	f.Entries[id] = queueEntry{ID: id, Event: event, Subscription: subscription, DueAt: dueAt}
-	return id
 }
 
 func (f *queueFile) cancelAlerts(key PushEventKey) {
@@ -149,13 +125,13 @@ func (f *queueFile) cancelAlerts(key PushEventKey) {
 func (q *durableQueue) waitingRetractDeadline(entry queueEntry) time.Time {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	key := entry.Event.Key
+	scope := entry.Event.Key.waitingTopicScope()
 	var deadline time.Time
 	for _, pending := range q.state.Entries {
 		other := pending.Event.Key
 		if pending.Event.Retract && other.Category.Waiting() &&
 			pending.Subscription.Endpoint == entry.Subscription.Endpoint &&
-			other.DeviceID == key.DeviceID && other.ServerSessionID == key.ServerSessionID && other.PaneID == key.PaneID &&
+			other.waitingTopicScope() == scope &&
 			pending.Event.ExpiresAt.After(deadline) {
 			deadline = pending.Event.ExpiresAt
 		}
@@ -245,28 +221,17 @@ func (q *durableQueue) removeDevice(deviceID string) error {
 	return q.commitLocked(next)
 }
 
-func (q *durableQueue) activeKeys() []PushEventKey {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	seen := make(map[PushEventKey]struct{}, len(q.state.Entries)+len(q.state.Delivered))
-	for _, entry := range q.state.Entries {
+func (f queueFile) activeKeys() map[PushEventKey]bool {
+	active := make(map[PushEventKey]bool, len(f.Entries)+len(f.Delivered))
+	for _, entry := range f.Entries {
 		if !entry.Event.Retract {
-			seen[entry.Event.Key] = struct{}{}
+			active[entry.Event.Key] = true
 		}
 	}
-	for id, record := range q.state.Delivered {
-		if !q.state.Entries[id].Event.Retract {
-			seen[record.Key] = struct{}{}
-		}
+	for _, record := range f.Delivered {
+		active[record.Key] = true
 	}
-	keys := make([]PushEventKey, 0, len(seen))
-	for key := range seen {
-		keys = append(keys, key)
-	}
-	sort.Slice(keys, func(i, j int) bool {
-		return notificationTag(keys[i]) < notificationTag(keys[j])
-	})
-	return keys
+	return active
 }
 
 func (q *durableQueue) deliveredFor(key PushEventKey) []deliveredRecord {
@@ -462,9 +427,7 @@ func (q *durableQueue) finishInMemory(id string, snapshot queueEntry, dispositio
 		return false
 	}
 	delete(q.state.Entries, id)
-	if snapshot.Event.Retract {
-		delete(q.state.Delivered, id)
-	} else if disposition == DeliveryAccepted {
+	if !snapshot.Event.Retract && disposition == DeliveryAccepted {
 		q.state.Delivered[id] = deliveredRecord{
 			Key: snapshot.Event.Key, Subscription: snapshot.Subscription,
 			Tag: notificationTag(snapshot.Event.Key), AcceptedAt: now, WaitingSeq: snapshot.Event.WaitingSeq,
