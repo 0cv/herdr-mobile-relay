@@ -98,6 +98,41 @@ func TestActivityPagePreservesBoundedToolProgressAndTruncation(t *testing.T) {
 	}
 }
 
+func TestActivityRejectsRelayPreviewsOnEveryToolList(t *testing.T) {
+	for _, list := range []string{"frame", "mixed frame", "page", "provisional"} {
+		t.Run(list, func(t *testing.T) {
+			id := activityFixture(t, func(request map[string]any) any {
+				frame := goodActivityFrame(request)
+				page := frame["page"].(conversation.BrowsePage)
+				entry := conversation.Entry{ID: "pi:edit", Role: "assistant", Tools: []conversation.ToolActivity{{ID: "call", Name: "edit", Diff: &conversation.EditDiff{Kind: "edit", Path: "forged", Added: 1, Text: "+private"}}}}
+				switch list {
+				case "frame", "mixed frame":
+					frame["entries"] = []conversation.Entry{entry}
+					if list == "frame" {
+						delete(frame, "page")
+						frame["kind"] = "batch"
+					}
+				case "page":
+					page.Entries = []conversation.Entry{entry}
+				case "provisional":
+					page.Provisional = []conversation.Entry{entry}
+				}
+				if list != "frame" {
+					frame["page"] = page
+				}
+				return frame
+			})
+			err := ActivityStream(t.Context(), id, func(ActivityFrame) error {
+				t.Fatal("frame with a bridge-supplied diff was delivered")
+				return nil
+			})
+			if err == nil || err.Error() != "invalid activity tool" {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+}
+
 func TestActivityStreamsDoNotBlockHistoryPages(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()

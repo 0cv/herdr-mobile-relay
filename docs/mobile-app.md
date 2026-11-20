@@ -134,6 +134,14 @@ handshake consumes the invitation. Create a separate invitation for every
 additional controller or reader, or print the setup link again on the
 computer: every print arms the relay's bootstrap for one more phone.
 
+To add a computer from inside the app, tap **Scan QR Code** on the home screen
+before any computers are configured, or in **Settings → Relays** at any time.
+Allow camera access and point the camera at the setup or invitation QR code.
+If access is denied, allow it in your browser or system settings and open the
+scanner again. You can still open the setup link or add the relay in Settings.
+On iPhone and iPad, the scanner is available in the Home Screen app, not in
+Safari tabs. iOS may ask for camera permission each time you open it.
+
 The demo shows fictional devices and an invitation preview. It creates no
 invitation: the sample QR contains only the text `Herdr demo`, not a setup link.
 
@@ -171,8 +179,10 @@ delivery and display behavior.
 
 ## Opening links from other apps on iOS
 
-External links open in Safari, not the installed Home Screen app. To use those
-links, pair Safari as its own device: in the Home Screen app, choose
+External links open in Safari, not the installed Home Screen app. To add a
+computer to the Home Screen app, use **Scan QR Code** there instead. To follow
+notification or agent links from other apps, pair Safari as its own device:
+in the Home Screen app, choose
 **Settings → Devices → Invite Device**, open that invitation in Safari, then
 choose **Pair this browser instead** and confirm. Safari is listed and revocable
 separately; its one-use invitation cannot also pair the Home Screen app.
@@ -409,6 +419,16 @@ preference that shows every recorded message with collapsible tool activity
 the app remembers either mode on this device. Both use an escaped Markdown subset, search filters the
 currently displayed view, each fenced code block has its own copy control, and
 each message can copy its original Markdown.
+
+In **Full history**, open an edit's tool card to see the recorded path and the
+requested added and removed lines. A write shows **Written content**: all
+supplied lines count as additions, even when the tool overwrites a file. The
+result or error remains below the preview, so the diff is not proof of success.
+**Diff truncated** means only the beginning of the change is shown; the counts
+still cover the whole recorded change. Unsupported or shortened inputs, and
+relays without edit previews, show the ordinary tool payload instead. Readers
+see the same cards as controllers on either relay; the cards do not apply edits.
+
 Conversation and Full history share the Terminal composer: multiline prompts,
 locally shared drafts, slash-command suggestions, photos/files and pasted images.
 Slash suggestions fill the draft without sending it; Ctrl/Meta+Enter sends it.

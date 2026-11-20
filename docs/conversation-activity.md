@@ -33,6 +33,48 @@ OpenCode stores are not supported by this reader. Hermes retains its workspace
 check. Oh My OpenCode retains its JSONL identity and plan validation; plan changes
 request a fresh snapshot rather than sending a new plan protocol.
 
+## Recorded edit previews
+
+Full history previews these tools when the visible input describes a complete,
+single-file change. This is a list of accepted inputs, not an agent version guarantee.
+
+| Agent | Accepted inputs |
+| --- | --- |
+| Claude Code | `Edit` with `file_path`, `old_string`, `new_string`; `MultiEdit` with `file_path` and those pairs in `edits`; `Write` with `file_path` and `content` |
+| Pi | `edit` with `path`, `oldText`, `newText` or those pairs in `edits`; `write` with `path` and `content` |
+| Oh My Pi | `write` with `path` and `content`; line-reference edits stay raw |
+| Codex | `apply_patch` with literal patch text |
+| OpenCode (both database layouts) | `edit` with `oldString` and `newString`; `write` with `content` (both use `path` or `filePath`); `patch` or `apply_patch` with `patchText` |
+| Hermes | `write_file` with `path` and `content`; `patch` in replace mode (the default) with `path`, `old_string`, `new_string`, or in `patch` mode with patch text in `patch` |
+| Grok | `search_replace` with `file_path`, `old_string` and `new_string`; a path-only call with the change in the result stays raw |
+
+Patches must add or update one file in a complete `*** Begin Patch` / `*** End Patch`
+block. Only signed rows are shown and counted; hunk headings become separators
+between changed groups, and context is omitted. Moves, path-only deletes,
+multi-file patches, shell commands, replace-all requests and incomplete or
+ambiguous inputs stay raw. So do other tools and unqualified formats, including
+Qoder, Cursor, Oh My OpenCode, Antigravity and Kimi.
+
+TUI and core relays advertise `conversation_edit_diffs`. Existing encrypted
+history and update replies may add this optional `diff` to a tool:
+
+```json
+{"kind":"edit","path":"src/main.go","added":1,"removed":2,"text":"-old\n+new\n@@\n-gone","truncated":false}
+```
+
+`kind` is `edit` or `write`. Paths are limited to 1,024 UTF-8 bytes. Previews
+keep at most 200 rows and 8 KiB of text; counts cover the whole recorded change.
+Previews are shortened or omitted to keep replies within 2 MiB and history pages
+within 200 entries, without taking space from already fitted input or output.
+Replacement alignment is capped at 250,000 table cells per tool and 2 million
+per reply; over-budget tools stay raw.
+
+Only input still visible in that reply can contribute to a preview. The relay
+never uses private output details or opens the named file. It leaves shortened
+tools raw and does not accept previews supplied by the Pi bridge. Readers and
+controllers see the same history: no extra command, permission, or Pi bridge
+install is needed.
+
 ## Native history opening cost
 
 OpenCode 2.x selects recent visible turns with one lookahead turn and no eager

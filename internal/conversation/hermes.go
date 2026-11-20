@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/agentkind"
 	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
 	"github.com/0cv/herdr-mobile-relay/internal/sqliteexec"
 )
@@ -263,12 +264,13 @@ func attachHermesToolRows(entries []Entry, rows []hermesToolRow) bool {
 				}
 				tool.State = "completed"
 				if tool.Output != "" && tool.Output != output {
-					tool.Output += "\n" + output
-					tool.Output, tool.Truncated = clampText(tool.Output, maxEntryBytes)
+					var combinedTruncated bool
+					tool.Output, combinedTruncated = clampText(tool.Output+"\n"+output, maxEntryBytes)
+					tool.Truncated = tool.Truncated || combinedTruncated
 				} else if tool.Output == "" {
 					tool.Output = output
-					tool.Truncated = truncated
 				}
+				tool.Truncated = tool.Truncated || truncated
 			}
 		}
 	}
@@ -335,19 +337,21 @@ func parseHermesToolCalls(raw string) ([]ToolActivity, bool) {
 	if raw == "" || raw == "null" {
 		return nil, false
 	}
-	var decoded any
-	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
-		return nil, true
-	}
-	var calls []any
-	switch value := decoded.(type) {
-	case []any:
-		calls = value
-	case map[string]any:
-		if nested, ok := value["tool_calls"].([]any); ok {
-			calls = nested
+	var calls []json.RawMessage
+	switch raw[0] {
+	case '[':
+		if json.Unmarshal([]byte(raw), &calls) != nil {
+			return nil, true
+		}
+	case '{':
+		call := decodeRawJSONFields([]byte(raw))
+		if call == nil {
+			return nil, true
+		}
+		if nested := call["tool_calls"]; len(nested) > 0 && nested[0] == '[' {
+			_ = json.Unmarshal(nested, &calls)
 		} else {
-			calls = []any{value}
+			calls = []json.RawMessage{json.RawMessage(raw)}
 		}
 	default:
 		return nil, true
@@ -355,27 +359,33 @@ func parseHermesToolCalls(raw string) ([]ToolActivity, bool) {
 	activities := make([]ToolActivity, 0, len(calls))
 	corrupt := false
 	for _, rawCall := range calls {
-		call, ok := rawCall.(map[string]any)
-		if !ok {
+		call := decodeRawJSONFields(rawCall)
+		if call == nil {
 			corrupt = true
 			continue
 		}
-		function, _ := call["function"].(map[string]any)
-		id := firstString(call, "id", "call_id", "tool_call_id")
-		name := firstString(call, "name", "tool_name")
-		input := firstValue(call, "arguments", "input")
-		if function != nil {
-			if id == "" {
-				id = firstString(function, "id", "call_id", "tool_call_id")
-			}
-			if name == "" {
-				name = firstString(function, "name", "tool_name")
-			}
-			if input == nil {
-				input = firstValue(function, "arguments", "input")
-			}
+		function := decodeRawJSONFields(call["function"])
+		id := call.firstString("id", "call_id", "tool_call_id")
+		name := call.firstString("name", "tool_name")
+		args := call.firstValue("arguments", "input")
+		if id == "" {
+			id = function.firstString("id", "call_id", "tool_call_id")
+		}
+		if name == "" {
+			name = function.firstString("name", "tool_name")
+		}
+		if args == nil {
+			args = function.firstValue("arguments", "input")
+		}
+		var input any
+		if args != nil && json.Unmarshal(args, &input) != nil {
+			corrupt = true
+			continue
 		}
 		activity := newToolActivity(id, name, input)
+		if !activity.Truncated && editInputFor(agentkind.Hermes, activity.Name) != (editInput{}) {
+			activity.ambiguousEditInput = !validEditToolJSON(rawCall)
+		}
 		activity.State = "running"
 		activities = append(activities, activity)
 	}

@@ -21,6 +21,7 @@
     "slash_commands",
     "conversation_history",
     "conversation_activity",
+    "conversation_edit_diffs",
     "pane_size_opt_in",
     "pane_size_opt_in_rows",
     "workspace_inspection",

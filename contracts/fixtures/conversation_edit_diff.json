@@ -1,0 +1,13 @@
+{
+  "id": "call-edit",
+  "name": "apply_patch",
+  "input": "*** Begin Patch\n*** Update File: src/main.go\n@@ context hint @@\n before\n-old\n+new\n@@ later\n another\n-gone\n*** End of File\n*** End Patch",
+  "diff": {
+    "kind": "edit",
+    "path": "src/main.go",
+    "added": 1,
+    "removed": 2,
+    "text": "-old\n+new\n@@\n-gone",
+    "truncated": false
+  }
+}

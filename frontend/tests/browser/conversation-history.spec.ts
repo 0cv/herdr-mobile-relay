@@ -1,7 +1,8 @@
 import { expect, test, type Page } from '@playwright/test';
 import { scrollConversationToBottom, showOlderConversationEntry } from '../support/journey-conversation';
-import { captureClipboard, copiedText, distanceFromBottom } from '../support/journey-device';
-import { closeSocket, commands, composerTarget, connectFedora, lastCommand, reply, server, setAutoCommands, setConversationFixture, type ConversationFixture } from '../support/journey-relay';
+import { captureClipboard, copiedText, distanceFromBottom, saveDeviceCredential } from '../support/journey-device';
+import { boot, closeSocket, commands, composerTarget, connectFedora, fedora, handshake, lastCommand, reply, server, setAutoCommands, setConversationFixture, socketCount, type ConversationFixture } from '../support/journey-relay';
+import editFixture from '../../../contracts/fixtures/conversation_edit_diff.json' with { type: 'json' };
 
 test('reads and replies from native conversation history', async ({ page }) => {
   await page.addInitScript(() => {
@@ -250,6 +251,85 @@ test('shows tool-only agent turns only in full history and decodes their argumen
   await expect(panels.nth(1)).toContainText('line-199');
   await card.getByRole('button', { name: 'Show less' }).click();
   await expect(panels.nth(1)).not.toContainText('line-199');
+});
+
+test('a reader reviews edit previews by keyboard only on the advertising relay', async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem('herdr_default_agent_view', 'conversation');
+    localStorage.setItem('herdr-conversation-view', 'activity');
+  });
+  const older = { id: 'older', label: 'Older relay', url: 'ws://127.0.0.1:8872', token: '' };
+  await boot(page, [fedora, older]);
+  await expect.poll(() => socketCount(page)).toBe(2);
+  await saveDeviceCredential(page, { id: 'credential-reader', deviceId: 'device-reader', secret: 'R'.repeat(43), role: 'reader' });
+  await page.evaluate(() => {
+    const auth = JSON.parse(localStorage.getItem('herdr_device_auth_v1')!);
+    auth.relays.older = { ...auth.relays.fedora, id: 'older-reader', deviceId: 'older-device' };
+    localStorage.setItem('herdr_device_auth_v1', JSON.stringify(auth));
+  });
+  await handshake(page, 0, { capabilities: ['conversation_history', 'conversation_activity', 'conversation_edit_diffs'] });
+  await handshake(page, 1, { capabilities: ['conversation_history'] });
+  const agent = { status: 'working', agent: 'codex', conversation_history_available: true };
+  await server(page, 0, { type: 'agents', agents: [{ ...agent, project: 'Edit history', pane_id: 'w1:p1', agent_session_id: 'edit-session' }] });
+  await server(page, 1, { type: 'agents', agents: [{ ...agent, project: 'Raw history', pane_id: 'w1:p2', agent_session_id: 'raw-session' }] });
+  const edit = { id: 'edit', timestamp: '', role: 'assistant', tools: [{ ...editFixture, state: 'running' }] };
+  const written = { id: 'write', timestamp: '', role: 'user', text: 'Record this write', tools: [{ name: 'write', input: '{"path":"src/log.txt","content":"first"}', diff: { kind: 'write', path: 'src/log.txt', added: 300, removed: 0, text: '+first', truncated: true } }] };
+  const read = { id: 'read', timestamp: '', role: 'assistant', tools: [{ name: 'Read', output: Array.from({ length: 80 }, (_, index) => `ordinary output ${index}`).join('\n') }] };
+  const question = { id: 'question', timestamp: '', role: 'assistant', tools: [{ name: 'AskUserQuestion', input: JSON.stringify({ questions: [{ question: 'Use this change?', options: [{ label: 'Yes' }, { label: 'No' }] }] }), output: 'The user answered: "Use this change?"="Yes". Read the answers carefully.' }] };
+  const capabilities = { source: 'recorded_history', active_branch: false };
+  await setConversationFixture(page, { entries: [edit, written, read, question], total: 4, sourceRevision: 'edit:1', capabilities, sequence: 1 });
+  await page.getByRole('button', { name: 'Open Edit history on Fedora' }).click();
+  const card = page.locator('details').filter({ has: page.getByText('apply_patch', { exact: true }) });
+  const summary = card.locator('summary');
+  await expect(summary).toHaveAccessibleName(/apply_patch main\.go 1 line added, 2 lines removed running/);
+  await expect(card.locator('.workspace-diff-line')).toHaveCount(0);
+  await summary.focus();
+  await summary.press('Enter');
+  await expect(card.getByText('src/main.go', { exact: true })).toBeVisible();
+  await expect(card.locator('.diff-hunk')).toHaveText('@@');
+  await expect(card.locator('.diff-deletion')).toHaveText(['-old', '-gone']);
+  await expect(card.getByText('Input', { exact: true })).toHaveCount(0);
+  await expect(page.getByRole('combobox', { name: 'Prompt', exact: true })).toBeDisabled();
+
+  const update = await lastCommand(page, 'get_conversation_updates', 0);
+  await reply(page, update, { subscription_id: 'fixture-subscription', kind: 'batch', source_revision: 'edit:1', sequence: 2,
+    entries: [{ ...edit, tools: [{ ...editFixture, state: 'failed', error: true, output: 'Could not save this edit' }] }], remove: [], state: 'recorded', capabilities });
+  await expect(card.getByText('Could not save this edit', { exact: true })).toBeVisible();
+  await expect(card.locator('.diff-addition')).toHaveText('+new');
+
+  const search = page.getByRole('searchbox', { name: 'Search loaded conversation' });
+  await search.fill('context hint');
+  await expect(card).toBeVisible();
+  await expect(page.getByText('Use this change?', { exact: true })).toBeHidden();
+  await search.clear();
+  const writeCard = page.locator('[data-conversation-entry-id="write"] details');
+  await writeCard.locator('summary').click();
+  await expect(writeCard.getByLabel('Written content')).toBeVisible();
+  await expect(page.getByText('Diff truncated', { exact: true })).toBeVisible();
+  const rawRead = page.locator('details').filter({ has: page.getByText('Read', { exact: true }) });
+  await rawRead.locator('summary').click();
+  await rawRead.getByRole('button', { name: 'Show all 80 lines' }).click();
+  await expect(rawRead.locator('pre')).toContainText('ordinary output 79');
+
+  await page.getByRole('button', { name: 'Conversation', exact: true }).click();
+  await expect(card).toBeHidden();
+  await expect(page.getByText('Use this change?', { exact: true })).toBeVisible();
+  await expect(writeCard.locator('summary')).toHaveAccessibleName('write called');
+  await expect(writeCard.getByText('Input', { exact: true })).toBeVisible();
+  await expect(writeCard.locator('pre')).toContainText('path: src/log.txt');
+  await expect(writeCard.locator('.workspace-diff-line')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Full history', exact: true }).click();
+  await expect(card.getByText('Could not save this edit', { exact: true })).toBeVisible();
+  await expect(writeCard.getByLabel('Written content')).toBeVisible();
+  await page.getByRole('button', { name: 'Back', exact: true }).click();
+  await page.getByRole('button', { name: 'Open Raw history on Older relay' }).click();
+  await expect(summary).toHaveAccessibleName('apply_patch running');
+  await summary.click();
+  await expect(card.getByText('Input', { exact: true })).toBeVisible();
+  await expect(card.locator('pre')).toContainText('context hint');
+  await expect(card.locator('.workspace-diff-line')).toHaveCount(0);
+  const readCommands = new Set(['refresh_agents', 'get_conversation_history', 'get_conversation_updates', 'unwatch_conversation', 'read_pane', 'push_viewed_pane']);
+  expect((await commands(page)).filter(command => !readCommands.has(String(command.type)))).toEqual([]);
 });
 
 test('opens a long conversation at its newest turn and holds the pin', async ({ page }) => {

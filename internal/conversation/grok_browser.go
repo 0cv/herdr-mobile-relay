@@ -34,10 +34,6 @@ func (b *Browser) readGrokNative(ctx context.Context, request BrowseRequest, cur
 		return nativeFailure("invalid_cursor", "This history cursor is invalid for the requested conversation."), nil
 	}
 	cursor.RangeEnd, cursor.RangeDigest = strconv.FormatInt(end, 10), digest
-	page := b.nativePage(request.Scope, entries, hasMore, projection.Corrupt > 0, total, "", revision, cursor)
-	if page.Available {
-		page.Diagnostics.CorruptRecords = max(page.Diagnostics.CorruptRecords, projection.Corrupt)
-		page.Diagnostics.OversizedRecords += projection.Oversized
-	}
-	return page, nil
+	diagnostics := BrowseDiagnostics{CorruptRecords: projection.Corrupt, OversizedRecords: projection.Oversized}
+	return b.nativePage(request, entries, hasMore, false, diagnostics, total, "", revision, cursor), nil
 }

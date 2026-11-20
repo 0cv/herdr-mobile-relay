@@ -1,4 +1,4 @@
-import { cloneDiagnostics, cloneEntries, clonePlan, estimateEntriesBytes } from './conversation-values';
+import { cloneDiagnostics, cloneEntries, clonePlan, estimateDiffBytes, estimateEntriesBytes } from './conversation-values';
 import { CONVERSATION_PREVIEW_PAGE_SIZE, conversationPreviewEntries, type ConversationPreview } from './conversation-cache';
 import { agentKind } from './agents';
 import { targetRefForAgent, targetStoreKey } from './resource-id';
@@ -252,13 +252,16 @@ export class ConversationHistoryController {
     this.liveSourceRevision = sourceRevision;
     if (!entries.length) return true;
     const merged = mergeFreshEntries(this.rawEntries, cloneEntries(entries));
-    if (merged.length > HISTORY_MAX_RAW_ENTRIES || estimateEntriesBytes(merged) > this.maxContentBytes) {
+    const fitted = fitHistoryEntries(this.maxContentBytes, [merged]);
+    if (!fitted) {
       this.pauseWithError('History and live output reached this device’s memory limit. Loaded messages remain readable.', false, 'memory_limit');
       return false;
     }
-    this.rawEntries = merged;
-    this.networkEntries = merged;
-    this.stateValue.entries = merged;
+    const [retained] = fitted;
+    this.rawEntries = retained;
+    this.networkEntries = retained;
+    this.stateValue.entries = retained;
+    this.stateValue.pendingPrefix = leadingFragment(retained, this.stateValue.hasMore, this.stateValue.beginningReached);
     this.savePreview();
     this.emit();
     return true;
@@ -629,11 +632,16 @@ export class ConversationHistoryController {
     const carriesContent = page.available && !page.error && pageState === 'ready' && !(page.hasMore && !page.nextCursor);
     const lanes = carriesContent ? nextLanes(this.currentLanes(), page, demand, incoming, incomingPlan, context) : null;
     if (lanes) {
-      const retained = previewWasVisible && lanes.network.length ? [lanes.network] : [lanes.raw, lanes.network, lanes.bridge];
-      if (retainedEntryCount(...retained) > HISTORY_MAX_RAW_ENTRIES || retainedEntryBytes(...retained) > this.maxContentBytes) {
+      const keepPreview = previewWasVisible && lanes.network.length > 0;
+      const fitted = fitHistoryEntries(this.maxContentBytes, [keepPreview ? [] : lanes.raw, lanes.network, lanes.bridge]);
+      if (!fitted) {
         this.pauseWithError('History is too large to load further on this device. Loaded messages are still available.', false, 'memory_limit');
         return false;
       }
+      const [raw, network, bridge] = fitted;
+      if (!keepPreview) lanes.raw = raw;
+      lanes.network = network;
+      lanes.bridge = bridge;
     }
     this.applyPageHeader(page, context, incomingPlan);
 
@@ -1041,25 +1049,22 @@ function sameEntryIDs(first: ConversationEntry[], second: ConversationEntry[]): 
   return first.every((entry, index) => entry.id === second[index]?.id);
 }
 
-function retainedEntries(...groups: ConversationEntry[][]): ConversationEntry[] {
-  const seen = new Set<ConversationEntry>();
-  const retained: ConversationEntry[] = [];
-  for (const group of groups) {
-    for (const entry of group) {
-      if (seen.has(entry)) continue;
-      seen.add(entry);
-      retained.push(entry);
-    }
+function fitHistoryEntries(maxBytes: number, groups: ConversationEntry[][]): ConversationEntry[][] | null {
+  const retained = new Set(groups.flat());
+  if (retained.size > HISTORY_MAX_RAW_ENTRIES) return null;
+  let excess = estimateEntriesBytes([...retained]) - maxBytes;
+  if (excess <= 0) return groups;
+  const fitted = new Map<ConversationEntry, ConversationEntry>();
+  for (const entry of retained) {
+    const tools = entry.tools?.map((tool) => {
+      if (excess <= 0 || !tool.diff) return tool;
+      excess -= estimateDiffBytes(tool.diff);
+      return { ...tool, diff: undefined };
+    });
+    if (tools?.some((tool, index) => tool !== entry.tools![index])) fitted.set(entry, { ...entry, tools });
+    if (excess <= 0) return groups.map(group => group.map(entry => fitted.get(entry) || entry));
   }
-  return retained;
-}
-
-function retainedEntryCount(...groups: ConversationEntry[][]): number {
-  return retainedEntries(...groups).length;
-}
-
-function retainedEntryBytes(...groups: ConversationEntry[][]): number {
-  return estimateEntriesBytes(retainedEntries(...groups));
+  return null;
 }
 
 function mergeOlderEntries(existing: ConversationEntry[], older: ConversationEntry[]): ConversationEntry[] {

@@ -6,6 +6,7 @@ import { securityState } from '$lib/security';
 import ManualTerminalInput from '$components/ManualTerminalInput.svelte';
 import { TerminalInputDelivery } from '$lib/terminal-input-delivery.svelte';
 import unavailablePage from '../../../contracts/fixtures/conversation_unavailable.json';
+import editFixture from '../../../contracts/fixtures/conversation_edit_diff.json';
 import piCatalogFixture from '../../../contracts/fixtures/pi_command_catalog.json';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { makeRelayId } from '$lib/config';
@@ -132,6 +133,35 @@ describe('relay command store', () => {
     vi.useRealTimers();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  it('accepts edit previews in pages and batches only from the advertising target relay', async () => {
+    relayStore.addRelay({ label: 'Other', url: 'ws://127.0.0.1:8872', token: '' });
+    const [firstSocket, secondSocket] = MockWebSocket.instances.slice(-2);
+    const enabled = connectRelay({ capabilities: ['conversation_history', 'conversation_activity', 'conversation_edit_diffs'] }, firstSocket);
+    const other = connectRelay({ capabilities: ['conversation_history', 'conversation_activity'] }, secondSocket);
+    const [firstConfig, secondConfig] = get(relayStore.relayConfigs);
+    const entry = { id: 'edit', role: 'assistant', tools: [editFixture] };
+    for (const [config, socket, expected] of [[firstConfig, enabled, editFixture.diff], [secondConfig, other, undefined]] as const) {
+      const agent = preferenceAgent(config.id, 'w1:p1', 'terminal');
+      const awaitRequest = (type: string) => vi.waitFor(() => {
+        const sent = socket.messages().find(message => message.type === type);
+        expect(sent?.request_id).toBeTruthy();
+        return sent!.request_id;
+      });
+      const page = relayStore.getConversationHistory(agent);
+      socket.message({ type: 'command_result', request_id: await awaitRequest('get_conversation_history'), ok: true, phase: 'completed', data: {
+        available: true, has_more: false, state: 'ready', mode: 'recent', entries: [entry], provisional: [{ ...entry, id: 'live:edit' }],
+      } });
+      const normalized = await page;
+      expect(normalized.entries[0].tools![0].diff).toEqual(expected);
+      expect(normalized.provisional![0].tools![0].diff).toEqual(expected);
+      const updates = relayStore.getConversationUpdates(agent, 'r', 0, new AbortController().signal, 'sub');
+      socket.message({ type: 'command_result', request_id: await awaitRequest('get_conversation_updates'), ok: true, phase: 'completed', data: {
+        kind: 'batch', subscription_id: 'sub', source_revision: 'r', sequence: 1, entries: [entry], remove: [], state: 'ready',
+      } });
+      expect((await updates).entries[0].tools![0].diff).toEqual(expected);
+    }
   });
 
   it('retains authoritative unknown-kind agents without profiles, sessions or workspace records', () => {
@@ -936,6 +966,80 @@ describe('relay command store', () => {
     expect(store.get(relayId)).toMatchObject({ kind: 'invitation', id: 'invitation-cold01', version: 1 });
     expect(MockWebSocket.instances).toHaveLength(1);
     expect(MockWebSocket.instances[0].protocols).toBe('herdr-e2ee-v2');
+  });
+
+  it.each([false, true])('imports a scanned link without touching the address (invitation: %s)', (invitation) => {
+    relayStore.destroy();
+    relayStore.relayConfigs.set([]);
+    MockWebSocket.instances = [];
+    const href = location.href;
+    const state = history.state;
+    history.replaceState({ view: 'settings' }, '', '/?view=all#settings');
+    const scannedFrom = location.href;
+    const replaceState = vi.spyOn(history, 'replaceState');
+    const relayUrl = 'wss://scanner.example';
+    const relayId = makeRelayId('Scanner', relayUrl);
+    const credentials = new BrowserDeviceCredentialStore(localStorage);
+    const link = {
+      hash: `#setup=${'D'.repeat(invitation ? 43 : 32)}&label=Scanner&relay=${encodeURIComponent(relayUrl)}`
+        + (invitation ? '&invite=invitation-scan01&invite_version=1&invite_expires=4102444800000' : ''),
+      protocol: 'https:',
+      host: 'phone.example',
+    };
+    try {
+      expect(relayStore.importSetupLink(link, true, false)).toBe(true);
+      expect(JSON.parse(localStorage.getItem('herdr_relays')!)).toMatchObject([{ id: relayId, url: relayUrl }]);
+      expect(MockWebSocket.instances).toHaveLength(1);
+      expect(MockWebSocket.instances[0].url).toContain(relayUrl);
+      if (invitation) expect(credentials.get(relayId)).toMatchObject({ kind: 'invitation', id: 'invitation-scan01' });
+      expect(location.href).toBe(scannedFrom);
+      expect(history.state).toEqual({ view: 'settings' });
+      expect(replaceState).not.toHaveBeenCalled();
+    } finally {
+      history.replaceState(state, '', href);
+    }
+  });
+
+  it('keeps the live connection when rescanning its redeemed invitation', async () => {
+    relayStore.destroy();
+    relayStore.relayConfigs.set([]);
+    const connect = vi.fn();
+    const close = vi.fn();
+    const transport = vi.fn<TransportFactory>(() => ({ kind: 'websocket', connect, close, send: () => true }));
+    transportHijack.current = transport;
+    const relayUrl = 'wss://scanner.example';
+    const relayId = makeRelayId('Scanner', relayUrl);
+    const link = {
+      hash: `#setup=${'D'.repeat(43)}&label=Scanner&relay=${encodeURIComponent(relayUrl)}`
+        + '&invite=invitation-scan01&invite_version=1&invite_expires=4102444800000',
+      protocol: 'https:',
+      host: 'phone.example',
+    };
+    expect(relayStore.importSetupLink(link, true, false)).toBe(true);
+    const [, handlers, authentication] = transport.mock.calls[0];
+    const presented = authentication!.getAuthentication!()!;
+    expect(presented).toMatchObject({ kind: 'invitation', id: 'invitation-scan01' });
+    await authentication!.onAuthenticated!(presented, {
+      deviceId: 'device-live', credentialId: 'credential-live', credentialVersion: 1,
+      credentialSecret: 'E'.repeat(43), role: 'reader', locale: 'en',
+    });
+    handlers.onStatus('connected', { path: 'websocket' });
+    const connection = relayStore.connection(relayId);
+    expect(connection?.status).toBe('connected');
+    const credentials = new BrowserDeviceCredentialStore(localStorage);
+    const credential = credentials.get(relayId);
+    expect(credential).toMatchObject({ kind: 'credential', id: 'credential-live', invitationId: 'invitation-scan01' });
+    const relays = get(relayStore.relayConfigs);
+    relayStore.toast.set(null);
+
+    expect(relayStore.importSetupLink(link, true, false)).toBe(true);
+    expect(relayStore.connection(relayId)).toBe(connection);
+    expect(get(relayStore.connections).get(relayId)?.status).toBe('connected');
+    expect(close).not.toHaveBeenCalled();
+    expect(connect).toHaveBeenCalledTimes(1);
+    expect(credentials.get(relayId)).toEqual(credential);
+    expect(get(relayStore.relayConfigs)).toEqual(relays);
+    expect(get(relayStore.toast)).toBeNull();
   });
 
   it('replaces an enrolled credential only with an invitation minted after it', () => {
