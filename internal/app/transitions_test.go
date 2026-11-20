@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,10 +12,100 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/activity"
+	"github.com/0cv/herdr-mobile-relay/internal/config"
 	"github.com/0cv/herdr-mobile-relay/internal/coordinator"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 	"github.com/0cv/herdr-mobile-relay/internal/push"
 	"github.com/0cv/herdr-mobile-relay/internal/question"
 )
+
+func TestBothBackendsQueueCurrentWaitingAlerts(t *testing.T) {
+	const approval = `
+Do you want to proceed?
+Bash command
+$ true
+❯ 1. Yes
+  2. Yes, and remember this choice
+  3. No
+Esc to cancel · Enter to confirm
+`
+	for _, backend := range []string{"herdr", "hc"} {
+		t.Run(backend, func(t *testing.T) {
+			path := filepath.Join(testSocketDir(t), "test.sock")
+			listener, err := net.Listen("unix", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
+			replied := make(chan error, 1)
+			go func() {
+				replied <- serveWaitingPaneRead(listener, backend, approval)
+			}()
+
+			s := handlerTestServer(t)
+			s.herdrC = newBackend(&config.Config{Backend: backend, SocketPath: path, HerdrBin: filepath.Join(t.TempDir(), "unused")})
+			queued := transitionPushQueue(t, s)
+			if !s.state.CommitEvent("pane-1", "blocked", time.Now().UnixMilli()) {
+				t.Fatal("could not block pane")
+			}
+			agent, _ := s.state.Agent("pane-1")
+			s.handleTransition(t.Context(), agent.PaneID, agent.Agent, agent.Project, agent.Status, agent.StateRevision, time.Now().UnixMilli())
+			select {
+			case err := <-replied:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("backend did not read the fixture")
+			}
+			alerts := queued()
+			if len(alerts) != 1 || alerts[0].Key.Category != push.CategoryAttention ||
+				alerts[0].Key.EventID != agent.BlockedEventID || !s.pushEventCurrent(alerts[0].Key) {
+				t.Fatalf("expected one current approval alert, got %#v", alerts)
+			}
+			current, _ := s.state.Agent("pane-1")
+			if current.AttentionKind != question.AttentionApproval {
+				t.Fatalf("pane classified as %q", current.AttentionKind)
+			}
+			claims, err := s.pushM.VerifyEventReference(alerts[0].EventRef, time.Now().Add(47*time.Hour))
+			if err != nil || claims.Key.Target().ServerSessionID != protocol.PrimaryServerSessionID {
+				t.Fatalf("late reference = %#v, %v", claims, err)
+			}
+		})
+	}
+}
+
+func serveWaitingPaneRead(listener net.Listener, backend, content string) error {
+	conn, err := listener.Accept()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		return err
+	}
+	decoder, encoder := json.NewDecoder(conn), json.NewEncoder(conn)
+	reply := func(method string, result map[string]any) error {
+		var request struct {
+			ID     string `json:"id"`
+			Method string `json:"method"`
+		}
+		if err := decoder.Decode(&request); err != nil {
+			return err
+		}
+		if request.Method != method {
+			return fmt.Errorf("backend request = %q, want %q", request.Method, method)
+		}
+		return encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": request.ID, "result": result})
+	}
+	if backend == "hc" {
+		if err := reply("hello", map[string]any{"generation": 1}); err != nil {
+			return err
+		}
+		return reply("terminal.read", map[string]any{"complete": true, "text": content})
+	}
+	return reply("pane.read", map[string]any{"type": "pane_read", "read": map[string]string{"text": content}})
+}
 
 func TestClassifyBlockedTransitionRetriesPartialCodexQuestion(t *testing.T) {
 	partial := `
@@ -253,7 +344,7 @@ func TestApprovalPushSuppressedWhenAttentionIsReclassified(t *testing.T) {
 	if !active {
 		t.Fatal("blocked pane session disappeared")
 	}
-	reclassified, committed := s.state.CommitAttentionClassification(
+	reclassified, _, committed := s.state.CommitAttentionClassification(
 		"pane-1",
 		agent.BlockedEventID,
 		generation,

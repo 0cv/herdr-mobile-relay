@@ -12,6 +12,7 @@ import {
   TERMINAL_RESIZE_SESSION_KEY,
 } from '$lib/config';
 import { currentView, navigate } from '$lib/router';
+import { registerPushSubscription } from '$lib/push';
 import { relayStore } from '$lib/store';
 import type { RelayTransport, TransportHandlers, TransportStatus, TransportStatusDetail } from '$lib/transports';
 import type { RelayConfig } from '$lib/types';
@@ -157,6 +158,40 @@ describe('settings relay status', () => {
 
     socket.message({ type: 'push_subscribed', ok: true });
     await waitFor(() => expect(screen.getByText('Push: synced')).toBeInTheDocument());
+  });
+
+  it('requests ordered display only on the capable relay’s existing push subscription', async () => {
+    relayStore.addRelay({ label: 'Older relay', url: 'ws://127.0.0.1:8872', token: '' });
+    const configs = get(relayStore.relayConfigs);
+    const [capable, ordinary] = MockWebSocket.instances.slice(-2);
+    connectRelay({ vapid_public_key: 'AQID', capabilities: ['ordered_waiting_push'] }, capable);
+    connectRelay({ vapid_public_key: 'AQID' }, ordinary);
+    const subscribe = vi.fn();
+    const unsubscribe = vi.fn();
+    const register = vi.fn(async (_script: string, {scope}: RegistrationOptions) => ({
+      pushManager: {
+        subscribe,
+        getSubscription: async () => ({
+          options: { applicationServerKey: Uint8Array.of(1, 2, 3).buffer },
+          unsubscribe,
+          toJSON: () => ({ endpoint: `https://fcm.googleapis.com/${scope}`, keys: { auth: 'auth', p256dh: 'key' } }),
+        }),
+      },
+    }));
+    Object.defineProperty(navigator, 'serviceWorker', { configurable: true, value: { register } });
+
+    await expect(Promise.all(configs.map(({id}) => registerPushSubscription(id)))).resolves.toEqual([true, true]);
+    expect(register).toHaveBeenCalledTimes(2);
+    expect(subscribe).not.toHaveBeenCalled();
+    expect(unsubscribe).not.toHaveBeenCalled();
+    const getSubscription = (socket: MockWebSocket) =>
+      socket.messages().find(({type}) => type === 'push_subscribe');
+    const ordered = getSubscription(capable);
+    const basic = getSubscription(ordinary);
+    expect(ordered).toMatchObject({ replace_endpoints: [], subscription: { ordered_waiting_push: true, keys: { auth: 'auth', p256dh: 'key' } } });
+    expect(basic).toMatchObject({ replace_endpoints: [], subscription: { keys: { auth: 'auth', p256dh: 'key' } } });
+    expect(basic?.subscription).not.toHaveProperty('ordered_waiting_push');
+    expect(ordered?.subscription.endpoint).not.toBe(basic?.subscription.endpoint);
   });
 
   it('shows installed client and running server compatibility separately', async () => {

@@ -63,6 +63,14 @@ func loadOrCreateReferenceSigner(path string) (*ReferenceSigner, error) {
 	return &ReferenceSigner{key: key}, nil
 }
 
+func (s *ReferenceSigner) waitingTopic(key PushEventKey) string {
+	scope, _ := json.Marshal([3]string{key.DeviceID, key.ServerSessionID, key.PaneID})
+	mac := hmac.New(sha256.New, s.key)
+	_, _ = mac.Write([]byte("push-topic-v1\x00"))
+	_, _ = mac.Write(scope)
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil)[:24])
+}
+
 func (s *ReferenceSigner) Sign(claims ReferenceClaims) (string, error) {
 	if s == nil || len(s.key) == 0 {
 		return "", ErrInvalidReference
@@ -108,11 +116,12 @@ func (s *ReferenceSigner) Verify(token string, now time.Time) (ReferenceClaims, 
 }
 
 type PayloadRequest struct {
-	Key       PushEventKey
-	Locale    string
-	Preview   PreviewMode
-	ExpiresAt time.Time
-	Retract   bool
+	Key        PushEventKey
+	Locale     string
+	Preview    PreviewMode
+	ExpiresAt  time.Time
+	Retract    bool
+	WaitingSeq uint64
 }
 
 type notificationAction struct {
@@ -132,6 +141,7 @@ type Payload struct {
 	ActionRefs map[string]string    `json:"action_refs"`
 	EventRef   string               `json:"event_ref"`
 	Retract    bool                 `json:"retract,omitempty"`
+	WaitingSeq uint64               `json:"waiting_seq,omitempty,string"`
 }
 
 func BuildPayload(request PayloadRequest, signer *ReferenceSigner) ([]byte, error) {
@@ -161,6 +171,7 @@ func BuildPayload(request PayloadRequest, signer *ReferenceSigner) ([]byte, erro
 		ActionRefs: map[string]string{},
 		EventRef:   eventRef,
 		Retract:    request.Retract,
+		WaitingSeq: request.WaitingSeq,
 	}
 	if request.Key.Category == CategoryUpdate || request.Key.Category == CategoryTest {
 		payload.URL = "./#settings"

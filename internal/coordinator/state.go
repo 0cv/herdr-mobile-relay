@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 	"github.com/0cv/herdr-mobile-relay/internal/question"
 )
 
@@ -373,6 +374,22 @@ func (s *State) AttentionTransitionCurrent(
 		s.generation[paneID] == generation &&
 		string(rec.agent.AttentionKind) == attentionKind &&
 		rec.attentionRev == attentionRevision
+}
+
+func (s *State) WaitingRequestCurrent(target protocol.TargetRef, eventID string, revision int64, isQuestion bool) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rec := s.panes[target.PaneID]
+	return rec != nil &&
+		target.ServerSessionID == protocol.PrimaryServerSessionID &&
+		target.TerminalID != "" && target.TerminalID == rec.agent.TerminalID &&
+		target.AgentSessionID == rec.agent.SessionID &&
+		target.Generation == s.generation[target.PaneID] &&
+		rec.agent.Status == "blocked" &&
+		rec.agent.BlockedEventID == eventID &&
+		rec.attentionRev == revision &&
+		rec.agent.AttentionKind != question.AttentionChat &&
+		(rec.agent.AttentionKind == question.AttentionQuestion) == isQuestion
 }
 
 func (s *State) CompletionCurrent(paneID string, revision int64) bool {
@@ -897,7 +914,7 @@ func (s *State) CommitAttentionClassification(
 	contentRevision int64,
 	classification question.Classification,
 	liveIdentity string,
-) (*AgentState, bool) {
+) (*AgentState, int64, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rec := s.panes[paneID]
@@ -905,7 +922,7 @@ func (s *State) CommitAttentionClassification(
 		rec.agent.BlockedEventID != eventID ||
 		s.generation[paneID] != generation ||
 		rec.contentRev != contentRevision {
-		return nil, false
+		return nil, 0, false
 	}
 	agent := rec.agent
 	if classification.Kind == "" {
@@ -921,7 +938,7 @@ func (s *State) CommitAttentionClassification(
 		rec.attentionRev++
 		s.syncAttentionCompletionLocked(paneID, previous, agent.AttentionKind)
 	}
-	return s.cloneAgentLocked(rec), true
+	return s.cloneAgentLocked(rec), rec.attentionRev, true
 }
 
 func applyAttentionClassification(

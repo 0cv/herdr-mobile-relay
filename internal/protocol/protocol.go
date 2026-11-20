@@ -505,4 +505,5 @@ var Capabilities = []string{
 	"conversation_activity",
 	"workspace_inspection",
 	"invitation_qr",
+	"ordered_waiting_push",
 }

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -25,11 +26,12 @@ const (
 )
 
 type PushEvent struct {
-	Key       PushEventKey `json:"key"`
-	Payload   []byte       `json:"payload"`
-	CreatedAt time.Time    `json:"created_at"`
-	ExpiresAt time.Time    `json:"expires_at"`
-	Retract   bool         `json:"retract,omitempty"`
+	Key        PushEventKey `json:"key"`
+	Payload    []byte       `json:"payload"`
+	CreatedAt  time.Time    `json:"created_at"`
+	ExpiresAt  time.Time    `json:"expires_at"`
+	Retract    bool         `json:"retract,omitempty"`
+	WaitingSeq uint64       `json:"waiting_seq,omitempty"`
 }
 
 func (e PushEvent) Validate(now time.Time) error {
@@ -59,17 +61,20 @@ type deliveredRecord struct {
 	Subscription Subscription `json:"subscription"`
 	Tag          string       `json:"tag"`
 	AcceptedAt   time.Time    `json:"accepted_at"`
+	WaitingSeq   uint64       `json:"waiting_seq,omitempty"`
 }
 
 type queueFile struct {
-	Entries   map[string]queueEntry      `json:"entries"`
-	Delivered map[string]deliveredRecord `json:"delivered"`
+	WaitingSeq uint64                     `json:"waiting_seq,omitempty"`
+	Entries    map[string]queueEntry      `json:"entries"`
+	Delivered  map[string]deliveredRecord `json:"delivered"`
 }
 
 func (f queueFile) clone() queueFile {
 	return queueFile{
-		Entries:   maps.Clone(f.Entries),
-		Delivered: maps.Clone(f.Delivered),
+		WaitingSeq: f.WaitingSeq,
+		Entries:    maps.Clone(f.Entries),
+		Delivered:  maps.Clone(f.Delivered),
 	}
 }
 
@@ -109,33 +114,53 @@ func (q *durableQueue) enqueue(event PushEvent, subscription Subscription, dueAt
 	if subscription.DeviceID == "" || subscription.DeviceID != event.Key.DeviceID {
 		return "", errors.New("push_subscription_device_mismatch")
 	}
-	id := deliveryID(event.Key, subscription.Endpoint)
-	entry := queueEntry{ID: id, Event: event, Subscription: subscription, DueAt: dueAt}
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	next := q.state.clone()
-	next.Entries[id] = entry
+	id := next.enqueue(event, subscription, dueAt)
 	if err := q.commitLocked(next); err != nil {
 		return "", err
 	}
 	return id, nil
 }
 
-func (q *durableQueue) cancelKey(key PushEventKey) error {
-	q.process.Lock()
-	defer q.process.Unlock()
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	next := q.state.clone()
-	for id, entry := range next.Entries {
-		if entry.Event.Key == key {
-			delete(next.Entries, id)
+func (f *queueFile) nextWaitingSeq() (uint64, error) {
+	if f.WaitingSeq == math.MaxUint64 {
+		return 0, errors.New("push_waiting_sequence_exhausted")
+	}
+	f.WaitingSeq++
+	return f.WaitingSeq, nil
+}
+
+func (f *queueFile) enqueue(event PushEvent, subscription Subscription, dueAt time.Time) string {
+	id := deliveryID(event.Key, subscription.Endpoint)
+	f.Entries[id] = queueEntry{ID: id, Event: event, Subscription: subscription, DueAt: dueAt}
+	return id
+}
+
+func (f *queueFile) cancelAlerts(key PushEventKey) {
+	for id, entry := range f.Entries {
+		if entry.Event.Key == key && !entry.Event.Retract {
+			delete(f.Entries, id)
 		}
 	}
-	if len(next.Entries) == len(q.state.Entries) {
-		return nil
+}
+
+func (q *durableQueue) waitingRetractDeadline(entry queueEntry) time.Time {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	key := entry.Event.Key
+	var deadline time.Time
+	for _, pending := range q.state.Entries {
+		other := pending.Event.Key
+		if pending.Event.Retract && other.Category.Waiting() &&
+			pending.Subscription.Endpoint == entry.Subscription.Endpoint &&
+			other.DeviceID == key.DeviceID && other.ServerSessionID == key.ServerSessionID && other.PaneID == key.PaneID &&
+			pending.Event.ExpiresAt.After(deadline) {
+			deadline = pending.Event.ExpiresAt
+		}
 	}
-	return q.commitLocked(next)
+	return deadline
 }
 
 func (q *durableQueue) removeSubscriptions(deviceID string, endpoints []string) error {
@@ -180,6 +205,9 @@ func (q *durableQueue) replaceSubscriptionsWhileProcessing(deviceID string, endp
 			continue
 		}
 		delete(next.Entries, id)
+		if entry.Event.Retract && entry.Event.Key.Category.Waiting() && entry.Subscription.Endpoint != replacement.Endpoint {
+			continue
+		}
 		entry.Subscription = replacement
 		entry.ID = deliveryID(entry.Event.Key, replacement.Endpoint)
 		if _, exists := next.Entries[entry.ID]; !exists {
@@ -201,8 +229,6 @@ func (q *durableQueue) replaceSubscriptionsWhileProcessing(deviceID string, endp
 }
 
 func (q *durableQueue) removeDevice(deviceID string) error {
-	q.process.Lock()
-	defer q.process.Unlock()
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	next := q.state.clone()
@@ -224,10 +250,14 @@ func (q *durableQueue) activeKeys() []PushEventKey {
 	defer q.mu.Unlock()
 	seen := make(map[PushEventKey]struct{}, len(q.state.Entries)+len(q.state.Delivered))
 	for _, entry := range q.state.Entries {
-		seen[entry.Event.Key] = struct{}{}
+		if !entry.Event.Retract {
+			seen[entry.Event.Key] = struct{}{}
+		}
 	}
-	for _, record := range q.state.Delivered {
-		seen[record.Key] = struct{}{}
+	for id, record := range q.state.Delivered {
+		if !q.state.Entries[id].Event.Retract {
+			seen[record.Key] = struct{}{}
+		}
 	}
 	keys := make([]PushEventKey, 0, len(seen))
 	for key := range seen {
@@ -319,7 +349,7 @@ func (q *durableQueue) recoverPrunedWhileProcessing(recoveries []prunedRecovery,
 			}
 			delete(q.state.Entries, id)
 			dirty = true
-			if recovery.fallback == nil {
+			if recovery.fallback == nil || entry.Event.Retract && entry.Event.Key.Category.Waiting() {
 				continue
 			}
 			entry.Subscription = *recovery.fallback
@@ -338,6 +368,9 @@ func (q *durableQueue) recoverPrunedWhileProcessing(recoveries []prunedRecovery,
 			continue
 		}
 		for _, result := range recovery.results {
+			if result.Event.Retract && result.Key.Category.Waiting() {
+				continue
+			}
 			id := deliveryID(result.Event.Key, recovery.fallback.Endpoint)
 			if _, exists := q.state.Entries[id]; exists {
 				continue
@@ -429,10 +462,12 @@ func (q *durableQueue) finishInMemory(id string, snapshot queueEntry, dispositio
 		return false
 	}
 	delete(q.state.Entries, id)
-	if disposition == DeliveryAccepted && !snapshot.Event.Retract {
+	if snapshot.Event.Retract {
+		delete(q.state.Delivered, id)
+	} else if disposition == DeliveryAccepted {
 		q.state.Delivered[id] = deliveredRecord{
 			Key: snapshot.Event.Key, Subscription: snapshot.Subscription,
-			Tag: notificationTag(snapshot.Event.Key), AcceptedAt: now,
+			Tag: notificationTag(snapshot.Event.Key), AcceptedAt: now, WaitingSeq: snapshot.Event.WaitingSeq,
 		}
 	}
 	return true
@@ -444,6 +479,7 @@ func sameQueueEntry(left, right queueEntry) bool {
 		left.Event.CreatedAt.Equal(right.Event.CreatedAt) &&
 		left.Event.ExpiresAt.Equal(right.Event.ExpiresAt) &&
 		left.Event.Retract == right.Event.Retract &&
+		left.Event.WaitingSeq == right.Event.WaitingSeq &&
 		bytes.Equal(left.Event.Payload, right.Event.Payload) &&
 		left.Subscription == right.Subscription &&
 		left.DueAt.Equal(right.DueAt) &&

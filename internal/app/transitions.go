@@ -21,8 +21,13 @@ func (s *Server) publishAgentPush(
 	revision int64,
 	category push.Category,
 	preview push.PreviewMode,
+	current func() bool,
 ) {
-	if s.pushM == nil || agent == nil || agent.TerminalID == "" || eventID == "" {
+	if s.pushM == nil || agent == nil {
+		return
+	}
+	if agent.TerminalID == "" || eventID == "" {
+		s.applyPanePush(ctx, agent.PaneID, nil, current)
 		return
 	}
 	key := push.PushEventKey{
@@ -35,13 +40,18 @@ func (s *Server) publishAgentPush(
 		InteractionRevision: revision,
 		Category:            category,
 	}
-	if err := s.pushM.ResolvePaneID(ctx, agent.PaneID, eventID); err != nil {
-		s.logger.Warn("push notification retraction failed", "pane_id", agent.PaneID, "error", err)
+	if category.Waiting() {
+		current = func() bool { return s.pushEventCurrent(key) }
 	}
-	if _, err := s.pushM.Publish(ctx, push.PublishRequest{
-		Key: key, Preview: preview, ExpiresAt: time.Now().UTC().Add(5 * time.Minute),
-	}); err != nil {
-		s.logger.Warn("push notification queueing failed", "pane_id", agent.PaneID, "error", err)
+	s.applyPanePush(ctx, agent.PaneID, &push.PublishRequest{Key: key, Preview: preview}, current)
+}
+
+func (s *Server) applyPanePush(ctx context.Context, paneID string, request *push.PublishRequest, current func() bool) {
+	if s.pushM == nil {
+		return
+	}
+	if _, err := s.pushM.ApplyPaneTransition(ctx, paneID, request, current); err != nil {
+		s.logger.Warn("push notification queueing failed", "pane_id", paneID, "error", err)
 	}
 }
 
@@ -72,11 +82,7 @@ func (s *Server) transitionWorking(
 	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
 
-	if s.pushM != nil {
-		if err := s.pushM.ResolvePaneID(ctx, paneID, ""); err != nil {
-			s.logger.Warn("push notification retraction failed", "pane_id", paneID, "error", err)
-		}
-	}
+	s.applyPanePush(ctx, paneID, nil, func() bool { return s.state.TransitionCurrent(paneID, "working", revision) })
 	summary := agent + " started working"
 	if agent == "" {
 		summary = "Agent started working"
@@ -125,14 +131,17 @@ func (s *Server) transitionBlocked(
 		} else {
 			s.enrichBlockedTransition(ctx, agentState)
 		}
-		persisted, ok := s.state.CommitAttentionClassification(
+		if !transitionCurrent() {
+			return
+		}
+		persisted, attentionRevision, ok := s.state.CommitAttentionClassification(
 			paneID, blockedEventID, paneGeneration, blockedContentRevision, classificationFromAgent(agentState), agentState.LiveIdentity,
 		)
 		if !ok || !transitionCurrent() {
 			return
 		}
 		agentState = persisted
-		classifiedAttentionRevision = s.state.AttentionRevision(paneID)
+		classifiedAttentionRevision = attentionRevision
 	}
 	classifiedCurrent := func() bool {
 		return s.state.AttentionTransitionCurrent(
@@ -204,7 +213,7 @@ func (s *Server) transitionBlocked(
 		preview = push.PreviewQuestion
 	}
 	if s.pushM != nil {
-		s.publishAgentPush(ctx, agentState, eventID, classifiedAttentionRevision, category, preview)
+		s.publishAgentPush(ctx, agentState, eventID, classifiedAttentionRevision, category, preview, classifiedCurrent)
 	}
 	if !classifiedCurrent() {
 		return
@@ -303,12 +312,10 @@ func (s *Server) publishFinished(ctx context.Context, notice finishedNotice, cur
 		return
 	}
 	if notice.pushAgent != nil {
-		s.publishAgentPush(ctx, notice.pushAgent, eventID, notice.revision, push.CategoryFinished, push.PreviewBrief)
+		s.publishAgentPush(ctx, notice.pushAgent, eventID, notice.revision, push.CategoryFinished, push.PreviewBrief, current)
 		return
 	}
-	if err := s.pushM.ResolvePaneID(ctx, notice.paneID, ""); err != nil {
-		s.logger.Warn("push notification retraction failed", "pane_id", notice.paneID, "error", err)
-	}
+	s.applyPanePush(ctx, notice.paneID, nil, current)
 }
 
 const (
