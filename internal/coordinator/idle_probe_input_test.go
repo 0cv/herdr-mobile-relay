@@ -195,10 +195,9 @@ func TestSequentialPromotedApprovalsUseIndependentEvents(t *testing.T) {
 }
 
 func TestPromotedQuestionWatcherUsesStrictVisibleScreen(t *testing.T) {
-	first := narrowQuestion(t, "claude-plan-multi-question")
-	first = testfixture.ReplaceRow(t, first, "Enter to select · Tab/Arrow keys to navigate · Esc to cancel", "Enter to select · Tab/Arrow keys to\nnavigate · Esc to cancel")
+	first := testfixture.ReplaceRow(t, liveFixture(t, "claude-plan-multi-question"), "Enter to select · Tab/Arrow keys to navigate · Esc to cancel", "Enter to select · Tab/Arrow keys to\nnavigate · Esc to cancel")
 	first = strings.ReplaceAll(first, "☒ Database", "☐ Database")
-	frame := narrowQuestion(t, "claude-plan-submit-answers")
+	frame := liveFixture(t, "claude-plan-submit-answers")
 	d, client, a := newPromotedDispatcher(t, first, "claude")
 	results := make(chan map[string]any, 8)
 	d.SetBroadcast(func(message any) {
