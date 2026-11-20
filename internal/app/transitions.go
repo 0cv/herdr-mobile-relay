@@ -82,7 +82,7 @@ func (s *Server) transitionWorking(
 	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
 
-	s.applyPanePush(ctx, paneID, nil, func() bool { return s.state.TransitionCurrent(paneID, "working", revision) })
+	s.applyPanePush(ctx, paneID, nil, func() bool { return s.state.WorkingTransitionCurrent(paneID, revision) })
 	summary := agent + " started working"
 	if agent == "" {
 		summary = "Agent started working"

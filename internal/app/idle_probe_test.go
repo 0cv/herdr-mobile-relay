@@ -471,6 +471,141 @@ func TestIdleProbeTransitionPublishesCommittedEvent(t *testing.T) {
 	}
 }
 
+func TestIdleProbeWaitingAlertLifecycle(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		category push.Category
+		misses   bool
+		native   bool
+	}{
+		{name: "question dismissed", category: push.CategoryQuestion, misses: true},
+		{name: "question resumed", category: push.CategoryQuestion},
+		{name: "approval dismissed", category: push.CategoryAttention, misses: true},
+		{name: "approval resumed", category: push.CategoryAttention},
+		{name: "native approval resumed", category: push.CategoryAttention, native: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, backend, _, probe := newProbeServer(t, true)
+			queued := transitionPushQueue(t, s)
+			policy := s.pushM.Policy("device-a", "en")
+			policy.Categories[push.CategoryFinished] = false
+			if err := s.pushM.SetPolicy(policy); err != nil {
+				t.Fatal(err)
+			}
+			a := &coordinator.AgentState{PaneID: "pane-1", TerminalID: "terminal", Agent: "claude", Status: "working"}
+			s.state.CommitInventory([]*coordinator.AgentState{a}, 0)
+			type transition struct {
+				status   string
+				revision int64
+			}
+			var transitions []transition
+			s.state.SetOnTransition(func(_, _, _, status string, revision int64) {
+				transitions = append(transitions, transition{status, revision})
+			})
+			finishTransition := func(status string) {
+				t.Helper()
+				if len(transitions) != 1 || transitions[0].status != status {
+					t.Fatalf("transitions = %v, want one %s", transitions, status)
+				}
+				s.handleTransition(t.Context(), a.PaneID, a.Agent, "", status, transitions[0].revision, time.Now().UnixMilli())
+				transitions = nil
+			}
+			frame := probeApproval(t)
+			kind := question.AttentionApproval
+			if tc.native {
+				frame = strings.ReplaceAll(frame, "Tab to\namend", "Tab to amend")
+			}
+			if tc.category == push.CategoryQuestion {
+				frame = probeQuestion(t)
+				kind = question.AttentionQuestion
+			}
+			backend.setScreen(frame)
+			now := time.Now()
+			probe.now = func() time.Time { return now }
+			readProbe := func() {
+				t.Helper()
+				probe.reconcile(true)
+				if !probe.readNext(t.Context()) {
+					t.Fatal("missing visible read")
+				}
+			}
+			if tc.native {
+				s.state.CommitEvent(a.PaneID, "blocked", 1)
+			} else {
+				s.state.CommitEvent(a.PaneID, "idle", 1)
+				readProbe()
+			}
+			finishTransition("blocked")
+			alerts := queued()
+			if len(alerts) != 1 || alerts[0].Key.Category != tc.category || alerts[0].EventRef == "" {
+				t.Fatalf("expected one waiting alert with reference, got %+v", alerts)
+			}
+			alert := alerts[0]
+			waiting := func() bool {
+				return s.state.WaitingRequestCurrent(alert.Key.Target(), alert.Key.EventID, alert.Key.InteractionRevision, tc.category == push.CategoryQuestion)
+			}
+			current, _ := s.state.Agent(a.PaneID)
+			if alert.Key.InteractionRevision != s.state.AttentionRevision(a.PaneID) || !waiting() || current.AttentionKind != kind ||
+				(!tc.native && current.ScreenAttention != coordinator.ScreenWaiting) || (tc.native && current.ScreenAttention != "") {
+				t.Fatalf("alert does not match the live wait: key=%+v, agent=%+v", alert.Key, current)
+			}
+			if !tc.native {
+				s.state.CommitEvent(a.PaneID, "idle", 2)
+				readProbe()
+				if len(transitions) != 0 || !waiting() || len(queued()) != 1 {
+					t.Fatal("an unchanged wait invalidated its reference or queued another alert")
+				}
+			}
+
+			conn, client := connectedClient(t, s)
+			identity := pushIdentity
+			identity.DeviceID = alert.Key.DeviceID
+			open := func() map[string]any {
+				t.Helper()
+				s.handlePushOpenRef(client, protocol.Inbound{RequestID: "tap", EventRef: alert.EventRef}, "push_open_ref", identity)
+				for {
+					response := readFrame(t, conn)
+					if response["request_id"] == "tap" {
+						return response
+					}
+				}
+			}
+			response := open()
+			requireCompleted(t, response, "push_open_ref")
+			if data := commandData(t, response); data["event_id"] != alert.Key.EventID || data["category"] != string(tc.category) {
+				t.Fatalf("tap returned the wrong request: %v", data)
+			}
+
+			end := "working"
+			if tc.misses {
+				end = "idle"
+				backend.setScreen("The question was answered.\n")
+				readProbe()
+				if len(transitions) != 0 || !waiting() || len(queued()) != 1 {
+					t.Fatal("first miss ended the wait or withdrew the alert")
+				}
+				requireCompleted(t, open(), "push_open_ref")
+				now = now.Add(2 * time.Second)
+				readProbe()
+			} else {
+				s.state.CommitEvent(a.PaneID, end, 3)
+				s.state.CommitEvent(a.PaneID, end, 4)
+			}
+			if waiting() {
+				t.Fatal("ended wait still accepts its alert revision")
+			}
+			requireFailedResult(t, open(), "push_open_ref", "Notification target is no longer available")
+			finishTransition(end)
+			if alerts := queued(); len(alerts) != 0 {
+				t.Fatalf("waiting alert was not withdrawn: %+v", alerts)
+			}
+			if _, err := s.pushM.VerifyEventReference(alert.EventRef, time.Now()); !errors.Is(err, push.ErrStaleReference) {
+				t.Fatalf("withdrawn reference = %v, want stale", err)
+			}
+		})
+	}
+}
+
 func TestIdleProbeSkipsBackgroundAndPhoneHistory(t *testing.T) {
 	for _, agent := range []string{"claude", "qoder"} {
 		t.Run(agent, func(t *testing.T) {

@@ -75,6 +75,7 @@ type paneRecord struct {
 	rawRevision      int64
 	probe            idleProbeState
 	blockedRevision  int64
+	workingRevision  int64
 	revision         int64
 	contentRev       int64
 	attentionRev     int64
@@ -316,7 +317,11 @@ func (s *State) BumpGeneration(paneID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.generation[paneID]++
-	if rec := s.panes[paneID]; rec != nil && rec.agent.ProbeEnabled {
+	rec := s.panes[paneID]
+	if rec != nil {
+		rec.workingRevision = 0
+	}
+	if rec != nil && rec.agent.ProbeEnabled {
 		s.topologyGen++
 		s.revCounter++
 		rec.revision = s.revCounter
@@ -347,6 +352,13 @@ func (s *State) TransitionCurrent(paneID, status string, revision int64) bool {
 	defer s.mu.RUnlock()
 	rec := s.panes[paneID]
 	return rec != nil && rec.agent.Status == status && rec.revision == revision
+}
+
+func (s *State) WorkingTransitionCurrent(paneID string, revision int64) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rec := s.panes[paneID]
+	return rec != nil && rec.agent.Status == "working" && revision != 0 && rec.workingRevision == revision
 }
 
 func (s *State) BlockedTransitionCurrent(paneID, eventID string, generation int64) bool {
@@ -524,8 +536,10 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64, topol
 				}
 			}
 			s.generation[incoming.PaneID]++
+			rec.workingRevision = 0
 		}
 		if replaced {
+			rec.workingRevision = 0
 			rec.sessionDiscovery = nil
 			s.generation[incoming.PaneID]++
 		}
@@ -826,8 +840,11 @@ func copyBlockedDetails(destination, source *AgentState) {
 
 func (s *State) fireTransition(paneID, status string) {
 	rec := s.panes[paneID]
-	if status == "blocked" {
+	switch status {
+	case "blocked":
 		rec.blockedRevision = rec.revision
+	case "working":
+		rec.workingRevision = rec.revision
 	}
 	if s.onTransition == nil {
 		return
