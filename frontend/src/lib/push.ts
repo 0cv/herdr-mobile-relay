@@ -23,7 +23,7 @@ export interface PushPreferences {
 export interface PushSubscribePayload extends Record<string, unknown> {
   type: 'push_subscribe';
   protocol: number;
-  subscription: PushSubscriptionJSON & { ordered_waiting_push?: true };
+  subscription: PushSubscriptionJSON;
   client_id: string;
   replace_endpoints: string[];
   user_agent: string;
@@ -172,10 +172,7 @@ export async function registerPushSubscription(relayId: string): Promise<boolean
     const payload: PushSubscribePayload = {
       type: 'push_subscribe',
       protocol: APP_PROTOCOL_VERSION,
-      subscription: {
-        ...subscription.toJSON(),
-        ...(connection.capabilities.includes('ordered_waiting_push') ? { ordered_waiting_push: true } : {}),
-      },
+      subscription: subscription.toJSON(),
       client_id: `${pushClientId()}:${relayId}`,
       replace_endpoints: [...new Set(replaced)],
       user_agent: navigator.userAgent,

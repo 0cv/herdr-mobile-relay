@@ -6,6 +6,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/coordinator"
 	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 	"github.com/0cv/herdr-mobile-relay/internal/push"
 	"github.com/0cv/herdr-mobile-relay/internal/transport"
@@ -183,7 +184,7 @@ func (s *Server) pushEventCurrent(key push.PushEventKey) bool {
 
 func (s *Server) pushTargetCurrent(target protocol.TargetRef) bool {
 	agent, ok := s.state.Agent(target.PaneID)
-	return ok && targetMatchesAgent(target, agent)
+	return ok && coordinator.TargetMatchesAgent(target, agent, agent.Generation)
 }
 
 // reservePushTest rate limits delivery tests per device. Entries older than one

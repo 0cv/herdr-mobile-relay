@@ -95,13 +95,9 @@ func validateExactPaneTarget(state *coordinator.State, inbound protocol.Inbound,
 		apiErr := protocol.NewApiError(protocol.ErrorInvalidRequest, map[string]any{"field": "target"})
 		return &apiErr
 	}
-	if !targetMatchesAgent(*target, agent) {
+	if !coordinator.TargetMatchesAgent(*target, agent, agent.Generation) {
 		apiErr := protocol.NewApiError(protocol.ErrorInvalidRequest, map[string]any{"field": "target"})
 		return &apiErr
 	}
 	return nil
-}
-
-func targetMatchesAgent(target protocol.TargetRef, agent *coordinator.AgentState) bool {
-	return target.TerminalID != "" && target == agent.TargetRef()
 }

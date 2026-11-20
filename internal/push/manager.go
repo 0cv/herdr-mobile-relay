@@ -23,12 +23,11 @@ type Subscription struct {
 		P256dh string `json:"p256dh"`
 		Auth   string `json:"auth"`
 	} `json:"keys"`
-	DeviceID           string   `json:"device_id,omitempty"`
-	Locale             string   `json:"locale,omitempty"`
-	Platform           Platform `json:"platform,omitempty"`
-	UserAgent          string   `json:"user_agent,omitempty"`
-	ClientID           string   `json:"client_id,omitempty"`
-	OrderedWaitingPush bool     `json:"ordered_waiting_push,omitempty"`
+	DeviceID  string   `json:"device_id,omitempty"`
+	Locale    string   `json:"locale,omitempty"`
+	Platform  Platform `json:"platform,omitempty"`
+	UserAgent string   `json:"user_agent,omitempty"`
+	ClientID  string   `json:"client_id,omitempty"`
 }
 
 type Manager struct {
@@ -67,8 +66,7 @@ func NewManager(pushDir string, logger *slog.Logger) (*Manager, error) {
 				return http.ErrUseLastResponse
 			},
 		},
-		active: make(map[PushEventKey]bool),
-		wake:   make(chan struct{}, 1),
+		wake: make(chan struct{}, 1),
 	}
 
 	if err := m.load(); err != nil {
@@ -94,11 +92,8 @@ func NewManager(pushDir string, logger *slog.Logger) (*Manager, error) {
 		return nil, err
 	}
 	m.signer = signer
-	recovered := m.queue.activeKeys()
-	for _, key := range recovered {
-		m.active[key] = true
-	}
-	m.reconciled = len(m.queue.state.Entries) == 0 && len(recovered) == 0
+	m.active = queue.state.activeKeys()
+	m.reconciled = len(queue.state.Entries) == 0 && len(m.active) == 0
 
 	return m, nil
 }
@@ -220,16 +215,11 @@ func (m *Manager) publish(next *queueFile, request PublishRequest) (PublishResul
 			continue
 		}
 		refExpiry := expiresAt
+		var waitingSeq uint64
 		if key.Category.Waiting() {
 			refExpiry = now.Add(48 * time.Hour)
-		}
-		var waitingSeq uint64
-		if key.Category.Waiting() && subscription.OrderedWaitingPush {
-			var err error
-			waitingSeq, err = next.nextWaitingSeq()
-			if err != nil {
-				return result, nil, err
-			}
+			next.WaitingSeq++
+			waitingSeq = next.WaitingSeq
 		}
 		payload, err := BuildPayload(PayloadRequest{
 			Key:        key,
@@ -250,16 +240,6 @@ func (m *Manager) publish(next *queueFile, request PublishRequest) (PublishResul
 		result.Queued++
 	}
 	return result, added, nil
-}
-
-func (m *Manager) Resolve(ctx context.Context, key PushEventKey) error {
-	if err := key.Validate(); err != nil {
-		return err
-	}
-	m.queue.process.Lock()
-	defer m.queue.process.Unlock()
-	_, err := m.updateQueue(ctx, nil, func(candidate PushEventKey) bool { return candidate == key })
-	return err
 }
 
 func (m *Manager) retract(next *queueFile, key PushEventKey, now time.Time) error {
@@ -283,9 +263,7 @@ func (m *Manager) retract(next *queueFile, key PushEventKey, now time.Time) erro
 		event := PushEvent{
 			Key: key, Payload: payload, CreatedAt: now, ExpiresAt: expiresAt, Retract: true, WaitingSeq: record.WaitingSeq,
 		}
-		if _, pending := next.Entries[id]; !pending {
-			next.enqueue(event, record.Subscription, now)
-		}
+		next.enqueue(event, record.Subscription, now)
 		delete(next.Delivered, id)
 	}
 	return nil
@@ -411,10 +389,6 @@ func (m *Manager) SetPolicy(policy DevicePolicy) error {
 
 func (m *Manager) SetViewedPane(deviceID string, target *protocol.TargetRef) {
 	m.policy.SetViewedPane(deviceID, target)
-}
-
-func (m *Manager) RecoveredKeys() []PushEventKey {
-	return m.queue.activeKeys()
 }
 
 func (m *Manager) VerifyEventReference(token string, now time.Time) (ReferenceClaims, error) {

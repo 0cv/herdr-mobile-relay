@@ -386,12 +386,16 @@ func (s *State) AttentionTransitionCurrent(
 		rec.attentionRev == attentionRevision
 }
 
+func TargetMatchesAgent(target protocol.TargetRef, agent *AgentState, generation int64) bool {
+	return target.TerminalID != "" && agent.matchesTarget(target, generation)
+}
+
 func (s *State) WaitingRequestCurrent(target protocol.TargetRef, eventID string, revision int64, isQuestion bool) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	rec := s.panes[target.PaneID]
 	return rec != nil &&
-		target.TerminalID != "" && target == s.targetRefLocked(rec) &&
+		TargetMatchesAgent(target, rec.agent, s.generation[target.PaneID]) &&
 		rec.agent.Status == "blocked" &&
 		rec.agent.BlockedEventID == eventID &&
 		rec.attentionRev == revision &&
@@ -1189,10 +1193,10 @@ func (a *AgentState) TargetRef() protocol.TargetRef {
 	}
 }
 
-func (s *State) targetRefLocked(rec *paneRecord) protocol.TargetRef {
-	target := rec.agent.TargetRef()
-	target.Generation = s.generation[target.PaneID]
-	return target
+func (a *AgentState) matchesTarget(target protocol.TargetRef, generation int64) bool {
+	current := a.TargetRef()
+	current.Generation = generation
+	return target == current
 }
 
 func (s *State) cloneAgentLocked(rec *paneRecord) *AgentState {

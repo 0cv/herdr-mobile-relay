@@ -218,8 +218,26 @@ func publishQuestion(t *testing.T, manager *Manager, eventID string, now time.Ti
 	publishQuestionFor(t, manager, eventID, now, time.Hour)
 }
 
+func setDeliveryTime(manager *Manager, now time.Time) {
+	manager.now = func() time.Time { return now }
+}
+
 func runAt(ctx context.Context, manager *Manager, now time.Time) ([]DeliveryResult, error) {
-	return manager.processDue(ctx, func() time.Time { return now })
+	setDeliveryTime(manager, now)
+	return manager.RunOnce(ctx)
+}
+
+func retirePane(t *testing.T, manager *Manager, paneID string) {
+	t.Helper()
+	if _, err := manager.ApplyPaneTransition(t.Context(), paneID, nil, func() bool { return true }); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func enqueueFixture(queue *durableQueue, event PushEvent, subscription Subscription, dueAt time.Time) error {
+	next := queue.state.clone()
+	next.enqueue(event, subscription, dueAt)
+	return queue.commitLocked(next)
 }
 
 func runPass(t *testing.T, manager *Manager, now time.Time) []DeliveryResult {
@@ -270,7 +288,7 @@ func TestQueueFileShape(t *testing.T) {
 		if err := json.Unmarshal(data, &top); err != nil {
 			t.Fatal(err)
 		}
-		if got := slices.Sorted(maps.Keys(top)); !reflect.DeepEqual(got, []string{"delivered", "entries"}) {
+		if got := slices.Sorted(maps.Keys(top)); !reflect.DeepEqual(got, []string{"delivered", "entries", "waiting_seq"}) {
 			t.Fatalf("top-level keys = %v", got)
 		}
 		return top
@@ -295,7 +313,7 @@ func TestQueueFileShape(t *testing.T) {
 	if results := runPass(t, manager, deliveryNow); len(results) != 1 || results[0].Disposition != DeliveryAccepted {
 		t.Fatalf("RunOnce() = %#v", results)
 	}
-	requireFields("delivered", readTop()["delivered"], "accepted_at", "key", "subscription", "tag")
+	requireFields("delivered", readTop()["delivered"], "accepted_at", "key", "subscription", "tag", "waiting_seq")
 }
 
 func TestPublishQueuesOncePerLogicalDevice(t *testing.T) {
@@ -350,6 +368,7 @@ func TestTerminalSubscriptionFallsBackToRetainedEndpoint(t *testing.T) {
 func TestTerminalFallbackRestoresPrunedEventWhenSubscriptionsCannotPersist(t *testing.T) {
 	manager, dir := newDeliveringManager(t, endpointOne, endpointTwo)
 	publishQuestion(t, manager, "event-1", deliveryNow)
+	token := queuedEventRef(t, dir, "event-1")
 	manager.path = filepath.Join(t.TempDir(), "missing", "subscriptions.json")
 	manager.sendPush = func(_ context.Context, subscription Subscription, _ []byte, _ sendOptions) error {
 		if subscription.Endpoint != endpointTwo {
@@ -364,9 +383,7 @@ func TestTerminalFallbackRestoresPrunedEventWhenSubscriptionsCannotPersist(t *te
 	if subscriptions := manager.Subscriptions(); len(subscriptions) != 2 {
 		t.Fatalf("subscriptions changed after failed recovery = %#v", subscriptions)
 	}
-	if keys := manager.RecoveredKeys(); len(keys) != 1 {
-		t.Fatalf("RecoveredKeys() = %#v, want the restored event", keys)
-	}
+	requireReferenceAccepted(t, manager, token)
 }
 
 func TestTerminalEndpointIsSentOncePerQueuePass(t *testing.T) {
@@ -447,9 +464,6 @@ func TestRemoveDeviceClearsPushState(t *testing.T) {
 	if subscriptions := manager.Subscriptions(); len(subscriptions) != 0 {
 		t.Fatalf("Subscriptions() = %#v", subscriptions)
 	}
-	if keys := manager.RecoveredKeys(); len(keys) != 0 {
-		t.Fatalf("RecoveredKeys() = %#v", keys)
-	}
 	if !manager.Policy("device-a", "en").Categories[CategoryAttention] {
 		t.Fatal("device policy was not removed")
 	}
@@ -469,10 +483,8 @@ func TestSubscriptionReplacementPrunesDeliveredEndpoint(t *testing.T) {
 	if err := manager.Subscribe(typedTestSubscription("device-1", endpointTwo), []string{endpointOne}); err != nil {
 		t.Fatal(err)
 	}
-	if err := manager.Resolve(t.Context(), exactKey("event-1")); err != nil {
-		t.Fatal(err)
-	}
-	runPass(t, manager, time.Now().UTC())
+	retirePane(t, manager, "pane-1")
+	runPass(t, manager, deliveryNow)
 
 	requireEndpoints(t, "endpoints after replacement", log.endpoints(), endpointOne)
 	if delivered := readQueueFile(t, dir).Delivered; len(delivered) != 0 {
@@ -491,10 +503,8 @@ func TestSubscriptionRefreshPreservesDeliveredEndpoint(t *testing.T) {
 	if err := manager.Subscribe(refreshed); err != nil {
 		t.Fatal(err)
 	}
-	if err := manager.Resolve(t.Context(), exactKey("event-1")); err != nil {
-		t.Fatal(err)
-	}
-	runPass(t, manager, time.Now().UTC())
+	retirePane(t, manager, "pane-1")
+	runPass(t, manager, deliveryNow)
 
 	if len(log.sent) != 2 {
 		t.Fatalf("sends = %#v, want notification then retract", log.sent)
@@ -505,7 +515,7 @@ func TestSubscriptionRefreshPreservesDeliveredEndpoint(t *testing.T) {
 	}
 }
 
-func TestResolveWaitsForInFlightDelivery(t *testing.T) {
+func TestPaneRetirementWaitsForInFlightDelivery(t *testing.T) {
 	manager, dir := newDeliveringManager(t, endpointOne)
 	log := &sendLog{}
 	started := make(chan struct{})
@@ -524,16 +534,20 @@ func TestResolveWaitsForInFlightDelivery(t *testing.T) {
 	publishQuestion(t, manager, "event-1", deliveryNow)
 
 	processed := make(chan error, 1)
+	setDeliveryTime(manager, deliveryNow)
 	go func() {
-		_, err := runAt(t.Context(), manager, deliveryNow)
+		_, err := manager.RunOnce(t.Context())
 		processed <- err
 	}()
 	<-started
 	resolved := make(chan error, 1)
-	go func() { resolved <- manager.Resolve(t.Context(), exactKey("event-1")) }()
+	go func() {
+		_, err := manager.ApplyPaneTransition(t.Context(), "pane-1", nil, func() bool { return true })
+		resolved <- err
+	}()
 	select {
 	case err := <-resolved:
-		t.Fatalf("Resolve returned before the delivery completed: %v", err)
+		t.Fatalf("Pane retirement returned before the delivery completed: %v", err)
 	case <-time.After(20 * time.Millisecond):
 	}
 	close(release)
@@ -543,7 +557,7 @@ func TestResolveWaitsForInFlightDelivery(t *testing.T) {
 	if err := <-resolved; err != nil {
 		t.Fatal(err)
 	}
-	runPass(t, manager, time.Now().UTC())
+	runPass(t, manager, deliveryNow)
 
 	if len(log.sent) != 2 || log.sent[0].Payload.Retract || !log.sent[1].Payload.Retract {
 		t.Fatalf("sent payloads = %#v, want notification then retract", log.sent)
@@ -583,8 +597,9 @@ func TestPublishDuringTerminalRecovery(t *testing.T) {
 		}
 
 		passed := make(chan error, 1)
+		setDeliveryTime(manager, deliveryNow)
 		go func() {
-			_, err := runAt(t.Context(), manager, deliveryNow)
+			_, err := manager.RunOnce(t.Context())
 			passed <- err
 		}()
 		<-started
@@ -809,16 +824,14 @@ func TestAcceptedDeliveryIsKeptWhenPolicyCannotPersist(t *testing.T) {
 	}
 }
 
-func TestResolveWithoutDeliveredRecordSendsNothing(t *testing.T) {
+func TestPaneRetirementWithoutDeliveredRecordSendsNothing(t *testing.T) {
 	t.Run("queued event", func(t *testing.T) {
 		manager, dir := newDeliveringManager(t, endpointOne)
 		log := acceptingManager(manager)
 		publishQuestion(t, manager, "event-1", deliveryNow)
 		token := queuedEventRef(t, dir, "event-1")
 
-		if err := manager.Resolve(t.Context(), exactKey("event-1")); err != nil {
-			t.Fatal(err)
-		}
+		retirePane(t, manager, "pane-1")
 		runPass(t, manager, deliveryNow)
 
 		if len(log.sent) != 0 {
@@ -828,13 +841,11 @@ func TestResolveWithoutDeliveredRecordSendsNothing(t *testing.T) {
 		requireReferenceStale(t, manager, token)
 	})
 
-	t.Run("unknown event", func(t *testing.T) {
+	t.Run("unknown pane", func(t *testing.T) {
 		manager, dir := newDeliveringManager(t, endpointOne)
 		log := acceptingManager(manager)
 
-		if err := manager.Resolve(t.Context(), exactKey("missing")); err != nil {
-			t.Fatal(err)
-		}
+		retirePane(t, manager, "missing-pane")
 		runPass(t, manager, deliveryNow)
 
 		if len(log.sent) != 0 {
@@ -845,51 +856,49 @@ func TestResolveWithoutDeliveredRecordSendsNothing(t *testing.T) {
 }
 
 func TestReconcileRetractsOnlyStaleRecoveredEvents(t *testing.T) {
-	recoverManager := func(t *testing.T) *Manager {
+	recoverManager := func(t *testing.T) (*Manager, string) {
 		t.Helper()
 		first, dir := newDeliveringManager(t, endpointOne)
 		acceptingManager(first)
 		publishQuestion(t, first, "event-1", deliveryNow)
+		token := queuedEventRef(t, dir, "event-1")
 		runPass(t, first, deliveryNow)
 		recovered, err := NewManager(dir, testLogger())
 		if err != nil {
 			t.Fatal(err)
 		}
-		if keys := recovered.RecoveredKeys(); len(keys) != 1 || keys[0] != exactKey("event-1") {
-			t.Fatalf("RecoveredKeys() = %#v", keys)
-		}
-		return recovered
+		return recovered, token
 	}
 
 	t.Run("stale key", func(t *testing.T) {
-		recovered := recoverManager(t)
+		recovered, token := recoverManager(t)
+		setDeliveryTime(recovered, deliveryNow)
 		log := acceptingManager(recovered)
 
 		if err := recovered.Reconcile(t.Context(), func(PushEventKey) bool { return false }); err != nil {
 			t.Fatal(err)
 		}
-		runPass(t, recovered, time.Now().UTC())
+		runPass(t, recovered, deliveryNow)
 
 		if len(log.sent) != 1 || !log.sent[0].Payload.Retract || log.sent[0].Payload.Key != exactKey("event-1") {
 			t.Fatalf("sent payloads = %#v, want one retract", log.sent)
 		}
+		requireReferenceStale(t, recovered, token)
 	})
 
 	t.Run("current key", func(t *testing.T) {
-		recovered := recoverManager(t)
+		recovered, token := recoverManager(t)
 		log := acceptingManager(recovered)
 
 		if err := recovered.Reconcile(t.Context(), func(key PushEventKey) bool { return key == exactKey("event-1") }); err != nil {
 			t.Fatal(err)
 		}
-		runPass(t, recovered, time.Now().UTC())
+		runPass(t, recovered, deliveryNow)
 
 		if len(log.sent) != 0 {
 			t.Fatalf("sent payloads = %#v, want none", log.sent)
 		}
-		if keys := recovered.RecoveredKeys(); len(keys) != 1 {
-			t.Fatalf("RecoveredKeys() = %#v, want the event kept", keys)
-		}
+		requireReferenceAccepted(t, recovered, token)
 	})
 }
 
@@ -911,7 +920,7 @@ func TestPanePublicationKeepsExactActiveKey(t *testing.T) {
 	if err != nil || result.Queued != 0 {
 		t.Fatalf("republication = %#v, %v", result, err)
 	}
-	runPass(t, manager, time.Now().UTC())
+	runPass(t, manager, deliveryNow)
 
 	if len(log.sent) != 3 || !log.sent[2].Payload.Retract || log.sent[2].Payload.Key != exactKey("event-1") {
 		t.Fatalf("sent payloads = %#v, want one retract for event-1", log.sent)
@@ -926,6 +935,7 @@ func TestTerminalFailureWithoutOtherEndpointRemovesItsState(t *testing.T) {
 	publishQuestion(t, manager, "event-1", deliveryNow)
 	runPass(t, manager, deliveryNow)
 	publishQuestion(t, manager, "event-2", deliveryNow)
+	token := queuedEventRef(t, dir, "event-2")
 	if queue := readQueueFile(t, dir); len(queue.Entries) != 1 || len(queue.Delivered) != 1 {
 		t.Fatalf("queue before terminal failure = %#v", queue)
 	}
@@ -941,8 +951,9 @@ func TestTerminalFailureWithoutOtherEndpointRemovesItsState(t *testing.T) {
 	if queue := readQueueFile(t, dir); len(queue.Entries) != 0 || len(queue.Delivered) != 0 {
 		t.Fatalf("queue = %#v, want no state for the removed endpoint", queue)
 	}
-	if len(manager.Subscriptions()) != 0 || len(manager.RecoveredKeys()) != 0 {
-		t.Fatalf("subscriptions = %#v, recovered keys = %#v", manager.Subscriptions(), manager.RecoveredKeys())
+	requireReferenceStale(t, manager, token)
+	if len(manager.Subscriptions()) != 0 {
+		t.Fatalf("subscriptions = %#v", manager.Subscriptions())
 	}
 }
 
@@ -1036,9 +1047,7 @@ func TestWaitingSendExpiresDuringRelaySleep(t *testing.T) {
 	if err != nil || len(results) != 1 || results[0].Disposition != DeliveryExpired {
 		t.Fatalf("wake-up results = %#v, %v", results, err)
 	}
-	if err := manager.Resolve(t.Context(), key); err != nil {
-		t.Fatal(err)
-	}
+	retirePane(t, manager, key.PaneID)
 	if _, err := manager.RunOnce(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -1084,9 +1093,7 @@ func TestVerifyEventReference(t *testing.T) {
 	}
 	requireReferenceAccepted(t, recovered, token)
 
-	if err := manager.Resolve(t.Context(), exactKey("event-1")); err != nil {
-		t.Fatal(err)
-	}
+	retirePane(t, manager, "pane-1")
 	if _, err := manager.VerifyEventReference(token, late); !errors.Is(err, ErrStaleReference) {
 		t.Fatalf("resolved token error = %v, want %v", err, ErrStaleReference)
 	}

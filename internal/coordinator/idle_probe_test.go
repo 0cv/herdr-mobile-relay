@@ -245,6 +245,20 @@ func TestProbeHandoffAndDialogIdentity(t *testing.T) {
 	}
 }
 
+func TestProbeCanResolveStopWithoutExternalTarget(t *testing.T) {
+	a := probeAgent("working")
+	a.TerminalID = ""
+	s, _ := probeState(t, a)
+	s.CommitEvent("pane", "idle", 1)
+	current, _ := s.Agent("pane")
+	if TargetMatchesAgent(current.TargetRef(), current, current.Generation) {
+		t.Fatal("external target accepted a missing terminal")
+	}
+	if !s.CommitProbe(captureProbe(t, s, false), questionHit("current"), true, false, time.Now()) {
+		t.Fatal("internal stop with no terminal could not promote")
+	}
+}
+
 func TestProbeRejectsResultFromEarlierStop(t *testing.T) {
 	s, _ := probeState(t, probeAgent("working"))
 	s.CommitEvent("pane", "idle", 1)

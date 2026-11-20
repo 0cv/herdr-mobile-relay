@@ -122,7 +122,7 @@ func probeEligible(rec *paneRecord, leased bool) bool {
 
 func (s *State) probePaneLocked(target protocol.TargetRef) *paneRecord {
 	rec := s.panes[target.PaneID]
-	if rec == nil || s.targetRefLocked(rec) != target {
+	if rec == nil || !rec.agent.matchesTarget(target, s.generation[target.PaneID]) {
 		return nil
 	}
 	return rec
