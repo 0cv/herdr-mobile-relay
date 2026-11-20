@@ -1,9 +1,14 @@
-import { render, screen } from '@testing-library/svelte';
+import { render, screen, waitFor } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it } from 'vitest';
 import ConversationMessage from '$components/ConversationMessage.svelte';
 import { clampPayload, conversationEntries, formatToolPayload, isChosenOption, maxPayloadLines, parseAskUserQuestion, pendingQuestionEntryId } from '$lib/conversation';
 import type { ConversationEntry, ConversationTool } from '$lib/types';
+import { ConversationLiveReader, LIVE_MAX_BYTES } from '$lib/conversation-live';
+import { normalizeConversationBatch, normalizeConversationPage } from '$lib/conversation-page';
+import { estimateEntriesBytes } from '$lib/conversation-values';
+import editFixture from '../../../contracts/fixtures/conversation_edit_diff.json';
+import { makeAgent } from '../support/relay';
 
 // Shapes copied from a recorded Claude Code transcript: tool arguments arrive as
 // a serialised JSON object, and a Write call embeds a whole file in one string.
@@ -22,6 +27,125 @@ function turn(id: string, role: 'user' | 'assistant', text = '', tools?: Convers
 }
 
 const bashTool: ConversationTool = { id: 'call-1', name: 'Bash', input: bashInput, output: 'done' };
+
+describe('recorded edit previews', () => {
+  const row = { id: 'call', role: 'assistant', text: '', tools: [editFixture] };
+  const provisional = { ...row, id: 'live:edit' };
+  const wire = { available: true, has_more: false, state: 'ready', mode: 'recent', entries: [row], provisional: [provisional] };
+  const batch = { kind: 'batch', source_revision: 'r', subscription_id: 'sub', state: 'ready', sequence: 1, entries: [provisional], remove: [] };
+
+  it('keeps the shared patch in history, provisional entries and batches only when enabled', () => {
+    const raw = normalizeConversationPage(wire);
+    const accepted = normalizeConversationPage(wire, true);
+    expect(accepted.entries[0].tools![0].diff).toEqual(editFixture.diff);
+    expect(accepted.provisional![0].tools![0].diff).toEqual(editFixture.diff);
+    expect(normalizeConversationBatch(batch, true).entries[0].tools![0].diff).toEqual(editFixture.diff);
+    expect(raw.entries[0].tools![0]).toMatchObject({ input: editFixture.input });
+    expect(raw.entries[0].tools![0].diff).toBeUndefined();
+    expect(raw.provisional![0].tools![0].diff).toBeUndefined();
+    expect(normalizeConversationBatch(batch).entries[0].tools![0].diff).toBeUndefined();
+    expect(estimateEntriesBytes(accepted.entries) - estimateEntriesBytes(raw.entries)).toBeGreaterThanOrEqual((editFixture.diff.path.length + editFixture.diff.text.length) * 2);
+  });
+
+  it('drops only malformed or over-budget preview fields', () => {
+    const diff = editFixture.diff;
+    for (const invalid of [undefined, null, [], { ...diff, kind: 'delete' }, { ...diff, path: ' ' },
+      { ...diff, path: '日'.repeat(342) }, { ...diff, text: '+'.concat('日'.repeat(2731)) },
+      { ...diff, path: 'a\t' }, { ...diff, text: '+old\n context' }, { ...diff, text: '+row\r' },
+      { ...diff, text: '+\ud800' }, { ...diff, text: '+row\n@@' }, { ...diff, text: '+\n'.repeat(200) + '+' },
+      { ...diff, added: '1' }, { ...diff, removed: -1 }, { ...diff, removed: 2 ** 53 }, { ...diff, truncated: 0 }]) {
+      const tool = { ...editFixture, diff: invalid, output: 'failed to save', error: true };
+      const page = normalizeConversationPage({ ...wire, entries: [{ ...row, tools: [tool] }] }, true);
+      expect(page.entries[0].tools![0]).toMatchObject({ name: tool.name, input: tool.input, output: tool.output, error: true });
+      expect(page.entries[0].tools![0].diff).toBeUndefined();
+    }
+    const truncatedTool = { ...row, tools: [{ ...editFixture, truncated: true }] };
+    expect(normalizeConversationPage({ ...wire, entries: [truncatedTool] }, true).entries[0].tools![0].diff).toBeUndefined();
+  });
+
+  it.each([false, true])('keeps raw live activity that fits without previews (capability: %s)', (allowDiffs) => {
+    const tool = { ...editFixture, output: 'permission denied', error: true, diff: undefined as typeof editFixture.diff | undefined };
+    const padding = { id: 'padding', role: 'assistant', text: 'x'.repeat(1_048_576) };
+    const update = { ...batch, entries: [padding, { ...row, tools: [tool] }] };
+    update.entries[1].text = 'x'.repeat(2 * 1024 * 1024 - JSON.stringify(update).length);
+    for (const diff of [{ ...editFixture.diff, text: '+' + 'x'.repeat(2 * 1024 * 1024) }, editFixture.diff]) {
+      tool.diff = diff;
+      const accepted = normalizeConversationBatch(update, allowDiffs);
+      expect(accepted.entries[1].tools![0]).toMatchObject({ input: tool.input, output: 'permission denied', error: true });
+      expect(accepted.entries[1].tools![0].diff).toBeUndefined();
+      expect(tool.diff).toBe(diff);
+    }
+
+    update.entries[1].text += 'x';
+    expect(() => normalizeConversationBatch(update, allowDiffs)).toThrow('invalid conversation history');
+  });
+
+  it('charges provisional previews to the live budget without discarding raw calls', () => {
+    const page = normalizeConversationPage({ ...wire, source_revision: 'r', subscription_id: 'sub', capabilities: { source: 'pi_events', active_branch: true } }, true);
+    const entry = page.provisional![0];
+    const first = entry.tools![0];
+    const raw = { ...first, diff: undefined };
+    const fills = Array.from({ length: 32 }, () => ({ name: 'Read', input: 'x'.repeat(16000), output: 'x'.repeat(16000) }));
+    const filler = { name: 'Read', input: 'x'.repeat(16000), output: '' };
+    const entries: ConversationEntry[] = [{ ...entry, tools: [raw, ...fills, filler] }];
+    filler.output = 'x'.repeat(LIVE_MAX_BYTES - JSON.stringify(entries).length);
+    entries[0].tools![0] = first;
+    let retained: ConversationEntry[] = [];
+    const live = new ConversationLiveReader({
+      request: () => new Promise(() => {}), unsubscribe: () => {}, apply: () => true, reset: () => {},
+      onState: (_, tail) => { retained = tail; },
+    });
+    live.observe(makeAgent(), page);
+    expect(retained[0].tools![0].diff).toEqual(editFixture.diff);
+    live.observe(makeAgent(), { ...page, sequence: 2, provisional: entries });
+    expect(retained[0].tools![0].diff).toBeUndefined();
+    expect(retained[0].tools![0].input).toBe(editFixture.input);
+    expect(retained[0].tools).toHaveLength(entries[0].tools!.length);
+    expect(entries[0].tools![0]).toEqual(first);
+    live.stop(false);
+  });
+
+  it('mounts signed literal rows only while open and retains a failed result and disclosure state', async () => {
+    const viewState = { tableOffsets: [], openTools: new Set<string>() };
+    const tool: ConversationTool = {
+      ...editFixture, state: 'failed', error: true, output: 'permission denied',
+      diff: { ...editFixture.diff, kind: 'edit', path: 'src/<a>/main.go', added: 2, removed: 1, text: '--- literal\n+++ literal\n+  <img src=x onerror=alert(1)>' },
+    };
+    const props = { text: '', tools: [tool], viewState };
+    const user = userEvent.setup();
+    const { container, unmount } = render(ConversationMessage, props);
+    const summary = container.querySelector('summary')!;
+    expect(summary).toHaveAccessibleName('apply_patch main.go 2 lines added, 1 line removed failed');
+    expect(container.querySelector('.workspace-diff-line')).toBeNull();
+    await user.click(summary);
+    const pre = await screen.findByLabelText('Requested change');
+    expect(screen.getByText('src/<a>/main.go')).toBeVisible();
+    expect(pre.querySelector('img')).toBeNull();
+    expect([...pre.querySelectorAll('span')].map(line => [line.classList[1], line.textContent])).toEqual([
+      ['diff-deletion', '--- literal'], ['diff-addition', '+++ literal'], ['diff-addition', '+  <img src=x onerror=alert(1)>'],
+    ]);
+    expect(screen.getByText('permission denied')).toBeVisible();
+    expect(screen.queryByText('Input', { exact: true })).toBeNull();
+    await user.click(summary);
+    await waitFor(() => expect(container.querySelector('.workspace-diff-line')).toBeNull());
+    await user.click(summary);
+    await screen.findByLabelText('Requested change');
+    unmount();
+    const restored = render(ConversationMessage, props);
+    expect(await screen.findByLabelText('Requested change')).toBeVisible();
+    await restored.rerender({ ...props, showDiffs: false });
+    expect(screen.queryByLabelText('Requested change')).toBeNull();
+    expect(screen.getByText('Input', { exact: true })).toBeVisible();
+  });
+
+  it('labels a cut write as written content, not removed lines', () => {
+    const tool: ConversationTool = { name: 'Write', input: writeInput, diff: { kind: 'write', path: 'src/main.go', text: '+  package main', added: 350, removed: 0, truncated: true } };
+    const { container } = render(ConversationMessage, { text: '', tools: [tool], viewState: { tableOffsets: [], openTools: new Set(['Write:0']) } });
+    expect(container.querySelector('summary')).toHaveTextContent('+350 / -0');
+    expect(screen.getByLabelText('Written content')).toBeVisible();
+    expect(screen.getByText('Diff truncated')).toBeVisible();
+  });
+});
 
 describe('conversationEntries', () => {
   it('drops text-less assistant tool turns from the compact view', () => {

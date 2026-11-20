@@ -137,12 +137,12 @@ func validateActivityFrame(frame ActivityFrame) error {
 		if frame.Page.SourceRevision == "" || frame.Page.Capabilities == nil || frame.Page.Capabilities.Source != "pi_events" {
 			return errors.New("invalid activity snapshot")
 		}
-		if len(frame.Page.Provisional) > 16 {
-			return errors.New("activity provisional limit")
+		if len(frame.Page.Provisional) > 16 || len(frame.Page.Entries) > 200 {
+			return errors.New("activity page exceeds limits")
 		}
-		entries = append(append([]conversation.Entry{}, frame.Page.Entries...), frame.Page.Provisional...)
+		entries = append(append(append([]conversation.Entry{}, entries...), frame.Page.Entries...), frame.Page.Provisional...)
 	}
-	if len(entries) > 216 || len(frame.Remove) > 200 {
+	if len(frame.Entries) > 200 || len(entries) > 216 || len(frame.Remove) > 200 {
 		return errors.New("activity frame exceeds limits")
 	}
 	for _, entry := range entries {
@@ -150,7 +150,7 @@ func validateActivityFrame(frame ActivityFrame) error {
 			return errors.New("invalid activity entry")
 		}
 		for _, tool := range entry.Tools {
-			if len(tool.ID) > 256 || len(tool.ParentID) > 256 || len(tool.Name) > 160 || len(tool.Input) > 16384 || len(tool.Output) > 16384 || (tool.State != "" && tool.State != "running" && tool.State != "completed" && tool.State != "failed") {
+			if tool.Diff != nil || len(tool.ID) > 256 || len(tool.ParentID) > 256 || len(tool.Name) > 160 || len(tool.Input) > 16384 || len(tool.Output) > 16384 || (tool.State != "" && tool.State != "running" && tool.State != "completed" && tool.State != "failed") {
 				return errors.New("invalid activity tool")
 			}
 		}

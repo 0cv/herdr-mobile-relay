@@ -35,10 +35,28 @@ type BrowseScope struct {
 }
 
 type BrowseRequest struct {
-	Scope  BrowseScope
-	Cursor string
-	Limit  int
-	Retry  bool
+	Scope       BrowseScope
+	Cursor      string
+	Limit       int
+	Retry       bool
+	Observation *BrowseObservation
+}
+
+type BrowseObservation struct {
+	SubscriptionID string
+	Sequence       uint64
+	Capabilities   *SourceCapabilities
+	LiveState      string
+}
+
+func (request BrowseRequest) withObservation(page BrowsePage) BrowsePage {
+	if observation := request.Observation; observation != nil {
+		page.SubscriptionID = observation.SubscriptionID
+		page.Sequence = observation.Sequence
+		page.Capabilities = observation.Capabilities
+		page.LiveState = observation.LiveState
+	}
+	return page
 }
 
 type BrowseState string
@@ -516,7 +534,8 @@ func (b *Browser) evictExpired(now time.Time) {
 	}
 }
 
-func (b *Browser) ReadPage(ctx context.Context, request BrowseRequest) (BrowsePage, error) {
+func (b *Browser) ReadPage(ctx context.Context, request BrowseRequest) (page BrowsePage, err error) {
+	defer func() { page = request.withObservation(page) }()
 	b.mu.Lock()
 	if b.closing {
 		b.mu.Unlock()
@@ -989,7 +1008,7 @@ func (b *Browser) readRecentFilePage(ctx context.Context, request BrowseRequest,
 	}
 	projection.Diagnostics.SourceTruncated = start > 0
 	return b.memoryPage(
-		request.Scope, source, projection, capturedRange{start: start, end: source.end, boundary: source.end, digest: digest}, true, request.Limit,
+		request, source, projection, capturedRange{start: start, end: source.end, boundary: source.end, digest: digest}, true,
 	), nil
 }
 
@@ -1034,7 +1053,7 @@ func (b *Browser) readRecentCursorPage(ctx context.Context, request BrowseReques
 		return b.recordReadFailure(err), nil
 	}
 	projection.Diagnostics.SourceTruncated = captured.start > 0
-	return b.memoryPage(request.Scope, source, projection, captured, false, request.Limit), nil
+	return b.memoryPage(request, source, projection, captured, false), nil
 }
 
 func (b *Browser) openCursorSource(ctx context.Context, scope BrowseScope, cursor browseCursor, captured capturedRange, omo bool) (fileSource, *BrowsePage) {
@@ -1153,17 +1172,17 @@ func (b *Browser) readSnapshotCursorPage(ctx context.Context, request BrowseRequ
 	if !matches {
 		return browseInvalidSnapshotCursor(), nil
 	}
-	return b.readSnapshotPageAt(ctx, request.Scope, request.Limit, job, boundary)
+	return b.readSnapshotPageAt(ctx, request, job, boundary)
 }
 
-func (b *Browser) readSnapshotPage(ctx context.Context, scope BrowseScope, limit int, job *browseJob) (BrowsePage, error) {
+func (b *Browser) readSnapshotPage(ctx context.Context, request BrowseRequest, job *browseJob) (BrowsePage, error) {
 	job.mu.RLock()
 	boundary := job.boundary
 	job.mu.RUnlock()
-	return b.readSnapshotPageAt(ctx, scope, limit, job, boundary)
+	return b.readSnapshotPageAt(ctx, request, job, boundary)
 }
 
-func (b *Browser) readSnapshotPageAt(ctx context.Context, scope BrowseScope, limit int, job *browseJob, boundary int64) (BrowsePage, error) {
+func (b *Browser) readSnapshotPageAt(ctx context.Context, request BrowseRequest, job *browseJob, boundary int64) (BrowsePage, error) {
 	b.observe(browserObservation{kind: "snapshot_read", job: job})
 	b.renewJob(job)
 	job.mu.Lock()
@@ -1178,7 +1197,7 @@ func (b *Browser) readSnapshotPageAt(ctx context.Context, scope BrowseScope, lim
 	jobCursor := job.cursor
 	job.mu.Unlock()
 	if state != BrowseReady {
-		return b.continueJob(ctx, BrowseRequest{Scope: scope, Limit: limit}, job)
+		return b.continueJob(ctx, request, job)
 	}
 	if index == nil {
 		return failPage("index_failed", "The prepared conversation history is no longer available.", true), nil
@@ -1189,24 +1208,27 @@ func (b *Browser) readSnapshotPageAt(ctx context.Context, scope BrowseScope, lim
 		}
 		return browseSourceChanged(), nil
 	}
-	entries, hasMore, err := index.entriesBefore(boundary, limit)
+	entries, hasMore, err := index.entriesBefore(boundary, request.Limit)
 	if err != nil {
 		return failPage("index_failed", "The prepared conversation history could not be read.", true), nil
 	}
-	base := BrowsePage{
+	base := request.withObservation(BrowsePage{
 		Available: true, State: BrowseReady, Mode: BrowseSnapshot, SourceRevision: revision,
 		SnapshotID: snapshotID, Entries: []Entry{}, HasMore: hasMore, Diagnostics: diagnostics,
-		OMOPlan: boundTodoPlan(plan, browseResponseBytes/4),
-	}
-	baseTotal := total
-	base.Total = &baseTotal
-	selected, omitted := b.fitProjected(entries, cursorCandidatePage(base, func(nextBoundary int64) (string, error) {
-		return b.snapshotCursor(scope, job, nextBoundary)
-	}))
+		OMOPlan: boundTodoPlan(plan, browseResponseBytes/4), Total: &total,
+	})
+	selected, omitted := b.fitProjected(entries, func(candidate []projectedEntry, omitted int) (BrowsePage, error) {
+		if omitted == 0 && !hasMore {
+			return cursorCandidatePage(base, nil)(candidate, omitted)
+		}
+		return cursorCandidatePage(base, func(nextBoundary int64) (string, error) {
+			return b.snapshotCursor(request.Scope, job, nextBoundary)
+		})(candidate, omitted)
+	})
 	if omitted > 0 || hasMore {
 		base.HasMore = true
 		if len(selected) > 0 {
-			base.NextCursor, err = b.snapshotCursor(scope, job, selected[0].Offset)
+			base.NextCursor, err = b.snapshotCursor(request.Scope, job, selected[0].Offset)
 		} else {
 			base.NextCursor = jobCursor
 		}
@@ -1285,7 +1307,7 @@ func (b *Browser) readAgyNative(ctx context.Context, request BrowseRequest, curs
 	if cursor.Revision != "" && cursor.Revision != revision {
 		return failPage("source_changed", "The Antigravity database changed while history was being browsed.", false), nil
 	}
-	return b.nativePage(request.Scope, result.Entries, result.HasMore, result.Corrupt, result.Metadata.Total, fmt.Sprint(result.Metadata.OldestIdx), revision, cursor), nil
+	return b.nativePage(request, result.Entries, result.HasMore, result.Corrupt, BrowseDiagnostics{}, result.Metadata.Total, fmt.Sprint(result.Metadata.OldestIdx), revision, cursor), nil
 }
 
 func (b *Browser) readOpenCodeNative(ctx context.Context, request BrowseRequest, cursor browseCursor, before string) (BrowsePage, error) {
@@ -1301,7 +1323,7 @@ func (b *Browser) readOpenCodeNative(ctx context.Context, request BrowseRequest,
 	if cursor.Revision != "" && cursor.Revision != revision {
 		return failPage("source_changed", "The OpenCode database changed while history was being browsed.", false), nil
 	}
-	page := b.nativePage(request.Scope, result.Entries, result.HasMore, result.Corrupt, result.Metadata.Total, result.Metadata.MessageID, revision, cursor)
+	page := b.nativePage(request, result.Entries, result.HasMore, result.Corrupt, BrowseDiagnostics{}, result.Metadata.Total, result.Metadata.MessageID, revision, cursor)
 	page.recordedPending = result.Metadata.pendingIDs
 	return page, nil
 }
@@ -1334,7 +1356,7 @@ func (b *Browser) readHermesNative(ctx context.Context, request BrowseRequest, c
 	if cursor.Revision != "" && cursor.Revision != revision {
 		return failPage("source_changed", "The Hermes database changed while history was being browsed.", false), nil
 	}
-	return b.nativePage(request.Scope, result.Entries, result.HasMore, result.Corrupt, result.Metadata.Total, fmt.Sprint(result.Metadata.MessageID), revision, cursor), nil
+	return b.nativePage(request, result.Entries, result.HasMore, result.Corrupt, BrowseDiagnostics{}, result.Metadata.Total, fmt.Sprint(result.Metadata.MessageID), revision, cursor), nil
 }
 
 type nativeReadResult[Metadata any] struct {

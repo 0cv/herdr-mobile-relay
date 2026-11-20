@@ -352,6 +352,120 @@ func TestResponseBudgetDropsOldestEntriesWhole(t *testing.T) {
 	}
 }
 
+func TestResponseBudgetFitsEditDiffsAfterMetadata(t *testing.T) {
+	page := BrowsePage{Available: true, State: BrowseReady, Mode: BrowseNative, Entries: make([]Entry, 200),
+		HasMore: true, NextCursor: strings.Repeat("c", 1024), SubscriptionID: strings.Repeat("s", 26), Sequence: 8,
+		Capabilities: &SourceCapabilities{Source: "recorded_history"}, Diagnostics: BrowseDiagnostics{OmittedPayloads: 1}}
+	tool := ToolActivity{Name: "Write", Input: `{"file_path":"a","content":"` + strings.Repeat("<日", 800) + `\nlast"}`, Output: "saved"}
+	for i := range page.Entries {
+		page.Entries[i] = Entry{ID: fmt.Sprint(i), Role: "assistant", Tools: []ToolActivity{tool}}
+	}
+	clipped := newToolActivity("clipped", "Write", map[string]string{"file_path": "clipped", "content": strings.Repeat("x", 64*1024) + "omitted-input-marker"})
+	page.Entries[198].Tools = []ToolActivity{clipped}
+	base, _ := json.Marshal(page)
+	for _, remaining := range []int{0, 240, 10_000} {
+		page.Entries[0].Text = strings.Repeat("x", browseResponseBytes-len(base)-len(`,"text":""`)-remaining)
+		response := page.WithEditDiffs("Claude Code")
+		wire, err := json.Marshal(response)
+		if err != nil || len(wire) > browseResponseBytes || len(response.Entries) != 200 || response.NextCursor != page.NextCursor || !response.HasMore || response.Diagnostics != page.Diagnostics {
+			t.Fatalf("encoded bytes = %d, error = %v", len(wire), err)
+		}
+		last := response.Entries[199].Tools[0]
+		if last.Input != tool.Input || last.Output != tool.Output || response.Entries[198].Tools[0] != clipped || strings.Contains(string(wire), "omitted-input-marker") || page.Entries[199].Tools[0] != tool {
+			t.Fatal("fitting changed the raw tools, exposed omitted text, or mutated the source")
+		}
+		if remaining == 0 && last.Diff != nil || remaining == 240 && (last.Diff == nil || last.Diff.Added != 2 || !last.Diff.Truncated || !strings.HasPrefix(last.Diff.Text, "+<日")) || remaining == 10_000 && (last.Diff == nil || last.Diff.Truncated || !strings.HasSuffix(last.Diff.Text, "\n+last")) {
+			t.Fatalf("remaining = %d, preview = %+v", remaining, last.Diff)
+		}
+	}
+}
+
+func TestRecordedPageReservesOnlyMetadataItSends(t *testing.T) {
+	entry := Entry{ID: "assistant", Role: "assistant"}
+	for i := range 17 {
+		entry.Tools = append(entry.Tools, ToolActivity{ID: fmt.Sprint(i), Name: "Read", Output: strings.Repeat("x", 120*1024)})
+	}
+	entry.Tools = append(entry.Tools, ToolActivity{ID: "last", Name: "Read", Output: "saved"})
+	projection := recentProjection{Entries: []projectedEntry{{Entry: entry, Offset: 1}}}
+	b := &Browser{}
+	read := func(observation *BrowseObservation) BrowsePage {
+		return b.memoryPage(BrowseRequest{Limit: 1, Observation: observation}, fileSource{revision: "fixture"}, projection, capturedRange{boundary: 2}, true)
+	}
+	last := &entry.Tools[len(entry.Tools)-1]
+	last.Output += strings.Repeat("x", browseResponseBytes-pageSize(read(nil))-100)
+	page := read(nil).WithEditDiffs("pi")
+	if pageSize(page) != browseResponseBytes-100 || !reflect.DeepEqual(page.Entries, []Entry{entry}) || page.Diagnostics.OmittedPayloads != 0 {
+		t.Fatalf("unobserved page bytes=%d diagnostics=%+v", pageSize(page), page.Diagnostics)
+	}
+
+	observed := read(&BrowseObservation{SubscriptionID: "subscriber", Sequence: 1})
+	if !observed.FitsReply() || !reflect.DeepEqual(observed.Entries, page.Entries) || observed.SubscriptionID != "subscriber" {
+		t.Fatalf("observed page lost content that fits: bytes=%d diagnostics=%+v", pageSize(observed), observed.Diagnostics)
+	}
+	observed = read(&BrowseObservation{SubscriptionID: "subscriber", Sequence: 1000, LiveState: "recorded", Capabilities: &SourceCapabilities{Source: "recorded_history"}})
+	if !observed.FitsReply() || len(observed.Entries) != 1 || !observed.Entries[0].Truncated || observed.Diagnostics.OmittedPayloads != 1 {
+		t.Fatalf("observed page did not fit actual metadata: bytes=%d diagnostics=%+v", pageSize(observed), observed.Diagnostics)
+	}
+}
+
+func TestClaudePreparedTerminalPageUsesFullBudgetWithoutContinuation(t *testing.T) {
+	entries := []budgetEntry{{label: "oldest", text: "oldest:", tools: 11}, {label: "newest", text: "newest:"}}
+	readTerminal := func(t *testing.T) BrowsePage {
+		t.Helper()
+		fixture := claudeChainBudgetFixture(t, 1, entries)
+		pages := walkBrowsePages(t, fixture.browser, fixture.scope, fixture.labels())
+		page := pages[len(pages)-1]
+		if fixture.preparedJobs() == 0 || page.Mode != BrowseSnapshot || page.HasMore || page.NextCursor != "" || len(page.Entries) != 1 {
+			t.Fatalf("expected a terminal prepared page: jobs=%d mode=%s more=%v cursor=%q entries=%d", fixture.preparedJobs(), page.Mode, page.HasMore, page.NextCursor, len(page.Entries))
+		}
+		return page
+	}
+	base := readTerminal(t)
+	const target = browseResponseBytes - 32
+	entries[0].text += strings.Repeat("x", target-pageSize(base))
+	page := readTerminal(t)
+	want := base.Entries[0]
+	want.ID, want.Text = page.Entries[0].ID, entries[0].text
+	if pageSize(page) != target || !reflect.DeepEqual(page.Entries[0], want) || page.Diagnostics.OmittedPayloads != 0 {
+		t.Fatalf("terminal page lost content that fits: bytes=%d diagnostics=%+v", pageSize(page), page.Diagnostics)
+	}
+}
+
+func TestClaudePreparedLatestPageFitsRecentMetadata(t *testing.T) {
+	entries := []budgetEntry{{label: "parent", text: "parent:"}, {label: "newest", text: "newest:", tools: 11}}
+	readLatest := func(t *testing.T) BrowsePage {
+		t.Helper()
+		fixture := claudeChainBudgetFixture(t, 1, entries)
+		request := BrowseRequest{Scope: fixture.scope, Limit: 1}
+		initial, err := fixture.browser.ReadPage(t.Context(), request)
+		if err != nil || initial.NextCursor == "" || len(initial.Entries) != 0 {
+			t.Fatalf("expected a clipped latest page with a preparation cursor: entries=%d more=%v err=%v", len(initial.Entries), initial.HasMore, err)
+		}
+		prepared := waitForReadySnapshot(t, fixture.browser, fixture.scope, initial.NextCursor, 1)
+		if labels := entryLabels(prepared.Entries); !reflect.DeepEqual(labels, []string{"newest"}) || prepared.SnapshotID == "" {
+			t.Fatalf("newest segment was not prepared: entries=%v snapshot=%q", labels, prepared.SnapshotID)
+		}
+		latest, err := fixture.browser.ReadPage(t.Context(), request)
+		if err != nil || latest.State != BrowseReady || latest.Mode != BrowseRecent || latest.SnapshotID != "" || !latest.HasMore || latest.NextCursor == "" || len(latest.Entries) != 1 {
+			t.Fatalf("expected cursorless latest in recent mode: state=%s mode=%s snapshot=%q more=%v entries=%d err=%v", latest.State, latest.Mode, latest.SnapshotID, latest.HasMore, len(latest.Entries), err)
+		}
+		older := waitForReadySnapshot(t, fixture.browser, fixture.scope, latest.NextCursor, 1)
+		if labels := entryLabels(older.Entries); !reflect.DeepEqual(labels, []string{"parent"}) || older.HasMore {
+			t.Fatalf("latest cursor did not reach the parent: entries=%v more=%v", labels, older.HasMore)
+		}
+		return latest.WithEditDiffs("claude")
+	}
+	base := readLatest(t)
+	const target = browseResponseBytes - 32
+	entries[1].text += strings.Repeat("x", target-pageSize(base))
+	page := readLatest(t)
+	want := base.Entries[0]
+	want.ID, want.Text = page.Entries[0].ID, entries[1].text
+	if pageSize(page) != target || !reflect.DeepEqual(page.Entries[0], want) || page.Diagnostics.OmittedPayloads != 0 {
+		t.Fatalf("latest page lost content that fits: bytes=%d diagnostics=%+v", pageSize(page), page.Diagnostics)
+	}
+}
+
 func TestResponseBudgetBoundsOneOversizedEntry(t *testing.T) {
 	entries := oversizedBudgetEntries()
 	for _, path := range budgetPaths() {

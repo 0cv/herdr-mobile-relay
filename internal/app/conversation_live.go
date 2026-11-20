@@ -17,7 +17,10 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/transport"
 )
 
-const conversationFeedBytes = 2 * 1024 * 1024
+const (
+	conversationFeedBytes           = 2 * 1024 * 1024
+	conversationSubscriptionReserve = len(`"subscription_id":"",`) + 26
+)
 
 func supportsConversationActivity(agent string) bool {
 	return conversation.Supported(agent)
@@ -34,6 +37,12 @@ type conversationBatch struct {
 	Capabilities   *conversation.SourceCapabilities `json:"capabilities"`
 	recordedEdits  map[string]bool
 }
+
+func (batch conversationBatch) withEditDiffs(agent string) conversationBatch {
+	conversation.AddEditDiffs(agent, batch, conversationFeedBytes, &batch.Entries)
+	return batch
+}
+
 type conversationFeed struct {
 	mu            sync.Mutex
 	ctx           context.Context
@@ -169,7 +178,7 @@ func (feed *conversationFeed) publish(batch conversationBatch) {
 	feed.sequence = batch.Sequence
 	feed.capabilities = batch.Capabilities
 	encoded, _ := json.Marshal(batch)
-	if len(encoded) > conversationFeedBytes {
+	if len(encoded) > conversationFeedBytes-conversationSubscriptionReserve {
 		batch.Kind = "reset"
 		batch.Entries = nil
 		batch.Remove = nil
@@ -402,12 +411,14 @@ func (s *Server) conversationFeedPage(client *transport.ClientConn, inbound prot
 	feed.mu.Unlock()
 	if identity != nil {
 		ctx, cancel := context.WithTimeout(client.Context(), 2*time.Second)
-		defer cancel()
-		page, err := pibridge.ActivityPage(ctx, *identity, inbound.Cursor, inbound.Limit)
+		page, err := readPiFeedPage(ctx, *identity, inbound.Cursor, inbound.Limit, subscription)
+		cancel()
 		if err != nil {
 			return conversation.BrowsePage{}, err
 		}
-		current, err := s.activityIdentity(ctx, feed.target)
+		checkCtx, stop := context.WithTimeout(client.Context(), 2*time.Second)
+		defer stop()
+		current, err := s.activityIdentity(checkCtx, feed.target)
 		if err != nil || current != *identity || !s.conversationCurrent(feed) {
 			return conversation.BrowsePage{}, errors.New("conversation process replaced")
 		}
@@ -417,13 +428,15 @@ func (s *Server) conversationFeedPage(client *transport.ClientConn, inbound prot
 		if currentSubscription != subscription {
 			return conversation.BrowsePage{}, errors.New("conversation subscription changed")
 		}
-		page.SubscriptionID = subscription
 		return page, nil
 	}
 	if strings.HasPrefix(inbound.Cursor, "pa:") {
 		return conversation.BrowsePage{}, errors.New("runtime conversation unavailable")
 	}
-	page, err := s.conversationB.ReadPage(client.Context(), conversation.BrowseRequest{Scope: conversationScope(agent), Cursor: inbound.Cursor, Limit: inbound.Limit, Retry: inbound.Retry})
+	page, err := s.conversationB.ReadPage(client.Context(), conversation.BrowseRequest{
+		Scope: conversationScope(agent), Cursor: inbound.Cursor, Limit: inbound.Limit, Retry: inbound.Retry,
+		Observation: &conversation.BrowseObservation{SubscriptionID: subscription, Sequence: seq, Capabilities: capabilities, LiveState: "recorded"},
+	})
 	feed.mu.Lock()
 	currentSubscription := feed.subscriptions[client.ID()]
 	watch := feed.database
@@ -435,12 +448,45 @@ func (s *Server) conversationFeedPage(client *transport.ClientConn, inbound prot
 	if currentSubscription != subscription || !s.conversationCurrent(feed) {
 		return conversation.BrowsePage{}, errors.New("conversation subscription changed")
 	}
-	page.SubscriptionID = subscription
-	page.Sequence = seq
-	page.Capabilities = capabilities
-	page.LiveState = "recorded"
 	return page, err
 }
+
+func readPiFeedPage(ctx context.Context, identity pibridge.Identity, cursor string, limit int, subscription string) (conversation.BrowsePage, error) {
+	read := func(limit int) (conversation.BrowsePage, error) {
+		page, err := pibridge.ActivityPage(ctx, identity, cursor, limit)
+		if err == nil && len(page.Entries) > limit {
+			err = errors.New("activity bridge exceeded requested page size")
+		}
+		page.SubscriptionID = subscription
+		return page, err
+	}
+	page, err := read(max(1, min(200, limit)))
+	if err != nil {
+		return conversation.BrowsePage{}, err
+	}
+	first := page
+	for {
+		if page.FitsReply() {
+			return page, nil
+		}
+		if len(page.Entries) < 2 {
+			break
+		}
+		smaller, err := read(len(page.Entries) / 2)
+		if err != nil {
+			// Issuing a continuation can evict the requested cursor from Pi's cache.
+			page = first
+			break
+		}
+		page = smaller
+	}
+	page = page.BoundActivityPayloads()
+	if !page.FitsReply() {
+		return conversation.BrowsePage{}, errors.New("conversation page exceeds reply limit")
+	}
+	return page, nil
+}
+
 func (s *Server) handleConversationUpdates(client *transport.ClientConn, inbound protocol.Inbound) {
 	action := "get_conversation_updates"
 	reply := s.reply(client, inbound.RequestID, action, inbound.PaneID)
@@ -506,7 +552,7 @@ func (s *Server) handleConversationUpdates(client *transport.ClientConn, inbound
 				continue
 			}
 		}
-		if failed || !s.conversationCurrent(feed) || s.authorizeDeviceAction(client, protocol.ActionMetadata{Operation: action, Class: protocol.ActionReadOnly}, "") != nil {
+		if failed {
 			reply.fail("Conversation source disconnected")
 			return
 		}
@@ -521,6 +567,11 @@ func (s *Server) handleConversationUpdates(client *transport.ClientConn, inbound
 				return
 			}
 			batch.SubscriptionID = inbound.SubscriptionID
+			batch = batch.withEditDiffs(feed.agent.Agent)
+			if !s.conversationCurrent(feed) || s.authorizeDeviceAction(client, protocol.ActionMetadata{Operation: action, Class: protocol.ActionReadOnly}, "") != nil {
+				reply.fail("Conversation source disconnected")
+				return
+			}
 			reply.complete(batch)
 			return
 		}

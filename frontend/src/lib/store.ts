@@ -7,6 +7,7 @@ import { inputContextIdentity } from './input-target-state';
 import { terminalInputDelivery } from './terminal-input-delivery.svelte';
 import { piPromptTarget, piPromptDelivery, validPiPromptText, type PiPromptCapability, type PiPromptLease } from './pi-prompt.svelte';
 import { clearConversationPreviews, clearConversationPreviewsForRelay } from './conversation-cache-control';
+import { normalizeConversationBatch, normalizeConversationPage } from './conversation-page';
 import {
   AttachmentBatchController,
   type AttachmentUploadCallbacks,
@@ -62,7 +63,6 @@ import {
 import { PaneStreams } from './pane-streams';
 import { reportAppAnomaly } from './crash-banner';
 import { CommandError, dispatchedUnknownError } from './command-error';
-import { normalizeConversationBatch, normalizeConversationPage } from './conversation-page';
 import {
   normalizeAgentInventory,
   normalizeAgentTargetFields,
@@ -2139,12 +2139,12 @@ class RelayStore {
       retry: request.retry,
       observe: this.connectionsValue.get(agent.relay_id)?.capabilities.includes('conversation_activity') === true,
     }, 20_000, request.signal);
-    return normalizeConversationPage(result.data);
+    return normalizeConversationPage(result.data, this.connectionsValue.get(agent.relay_id)?.capabilities.includes('conversation_edit_diffs'));
   }
 
   async getConversationUpdates(agent: Agent, sourceRevision: string, after: number, signal: AbortSignal, subscriptionId: string): Promise<import('./types').ConversationBatch> {
     const result = await this.sendToAgent(agent, { type: 'get_conversation_updates', source_revision: sourceRevision, after, subscription_id: subscriptionId }, 15_000, signal);
-    return normalizeConversationBatch(result.data);
+    return normalizeConversationBatch(result.data, this.connectionsValue.get(agent.relay_id)?.capabilities.includes('conversation_edit_diffs'));
   }
 
   stopConversationUpdates(agent: Agent, subscriptionId: string): void {

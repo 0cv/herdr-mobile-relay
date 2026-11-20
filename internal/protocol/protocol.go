@@ -503,6 +503,7 @@ var Capabilities = []string{
 	"slash_commands",
 	"conversation_history",
 	"conversation_activity",
+	"conversation_edit_diffs",
 	"workspace_inspection",
 	"invitation_qr",
 	"paging_keys",

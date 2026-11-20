@@ -41,6 +41,11 @@ export class ConversationLiveReader {
     this.sequence = page.sequence || 0;
     this.capabilities = page.capabilities;
     this.tail = new Map((page.provisional || []).map(entry => [entry.id, entry]));
+    if (!this.fitTail()) {
+      this.stop();
+      this.options.onState('incomplete', [], this.capabilities);
+      return;
+    }
     this.abort = new AbortController();
     this.options.onState('synchronizing', [...this.tail.values()], this.capabilities);
     void this.run(this.epoch, this.abort);
@@ -90,7 +95,7 @@ export class ConversationLiveReader {
         }
         for (const id of batch.remove) this.tail.delete(id);
         for (const entry of batch.entries) if (entry.id.startsWith('live:')) this.tail.set(entry.id, entry);
-        if (this.tail.size > LIVE_MAX_ENTRIES || new TextEncoder().encode(JSON.stringify([...this.tail.values()])).length > LIVE_MAX_BYTES) {
+        if (!this.fitTail()) {
           this.resynchronize('incomplete');
           return;
         }
@@ -102,6 +107,20 @@ export class ConversationLiveReader {
         return;
       }
     }
+  }
+
+  private fitTail(): boolean {
+    if (this.tail.size > LIVE_MAX_ENTRIES) return false;
+    const encoder = new TextEncoder();
+    const fits = (entries: ConversationEntry[]) => encoder.encode(JSON.stringify(entries)).length <= LIVE_MAX_BYTES;
+    const entries = [...this.tail.values()];
+    if (fits(entries)) return true;
+    const raw = entries.map(entry => entry.tools?.some(tool => tool.diff)
+      ? { ...entry, tools: entry.tools.map(tool => ({ ...tool, diff: undefined })) }
+      : entry);
+    if (!fits(raw)) return false;
+    this.tail = new Map(raw.map(entry => [entry.id, entry]));
+    return true;
   }
 
   private publish(state: string): void {
