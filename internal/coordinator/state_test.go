@@ -431,7 +431,7 @@ func TestBlockedClassificationStartsUnknownAndCommitsUnderEventGuards(t *testing
 		Command: "make check",
 		Options: []string{"Approve", "Reject"},
 	}
-	current, ok := s.CommitAttentionClassification(
+	current, _, ok := s.CommitAttentionClassification(
 		"p1", blocked.BlockedEventID, generation, s.ContentRevision("p1"), classification,
 	)
 	if !ok || current.AttentionKind != question.AttentionApproval ||
@@ -440,7 +440,7 @@ func TestBlockedClassificationStartsUnknownAndCommitsUnderEventGuards(t *testing
 	}
 
 	s.CommitEvent("p1", "working", 2000)
-	if _, ok := s.CommitAttentionClassification(
+	if _, _, ok := s.CommitAttentionClassification(
 		"p1", blocked.BlockedEventID, generation, s.ContentRevision("p1"), classification,
 	); ok {
 		t.Fatal("stale blocked classification committed after the status changed")
@@ -458,7 +458,7 @@ func TestInflightPollPreservesNewerBlockedClassification(t *testing.T) {
 	token := s.BeginPoll()
 	s.CommitEvent("p1", "blocked", 1000)
 	blocked, _ := s.Agent("p1")
-	if _, ok := s.CommitAttentionClassification(
+	if _, _, ok := s.CommitAttentionClassification(
 		"p1",
 		blocked.BlockedEventID,
 		s.Generation("p1"),
@@ -490,7 +490,7 @@ func TestTopologyCommitPreservesCurrentStatusAndAttention(t *testing.T) {
 	s.CommitInventory([]*AgentState{{PaneID: "p1", Agent: "codex", Status: "working"}}, 0)
 	s.CommitEvent("p1", "blocked", 1000)
 	blocked, _ := s.Agent("p1")
-	if _, ok := s.CommitAttentionClassification(
+	if _, _, ok := s.CommitAttentionClassification(
 		"p1",
 		blocked.BlockedEventID,
 		s.Generation("p1"),

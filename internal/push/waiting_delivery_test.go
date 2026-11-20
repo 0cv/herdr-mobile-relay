@@ -2,6 +2,7 @@ package push
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"path/filepath"
@@ -184,6 +185,97 @@ func TestWaitingAlertWaitsForRetract(t *testing.T) {
 				t.Fatalf("unexpected replacement count: %#v", log.sent)
 			}
 		})
+	}
+}
+
+func TestWaitingSequenceSurvivesRetryRetractAndEmptyQueueRestart(t *testing.T) {
+	manager, dir := newDeliveringManager(t, endpointOne)
+	now := deliveryNow
+	manager.now = func() time.Time { return now }
+	sub := manager.Subscriptions()[0]
+	sub.OrderedWaitingPush = true
+	if err := manager.Subscribe(sub); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Subscribe(typedTestSubscription("ordinary", endpointTwo)); err != nil {
+		t.Fatal(err)
+	}
+	a, b := exactKey("ordered-a"), exactKey("ordered-b")
+	b.PaneID = "pane-2"
+	for _, key := range []PushEventKey{a, b} {
+		applyWaiting(t, manager, key, now)
+	}
+	log := &sendLog{}
+	manager.sendPush = func(_ context.Context, sub Subscription, payload []byte, _ sendOptions) error {
+		if err := log.record(sub, payload); err != nil {
+			return err
+		}
+		if log.sent[len(log.sent)-1].Payload.Key == a && len(log.sent) <= 2 {
+			return &pushError{statusCode: http.StatusServiceUnavailable}
+		}
+		return nil
+	}
+	process := func() {
+		t.Helper()
+		if _, err := manager.RunOnce(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	process()
+	now = now.Add(time.Second)
+	process()
+	for _, key := range []PushEventKey{a, b} {
+		if err := manager.Resolve(t.Context(), key); err != nil {
+			t.Fatal(err)
+		}
+	}
+	process()
+	count := map[PushEventKey]int{}
+	for _, sent := range log.sent {
+		payload := sent.Payload
+		want := uint64(1)
+		if payload.Key == b {
+			want = 2
+		}
+		if payload.WaitingSeq != want || payload.Retract != (count[payload.Key] == int(3-want)) {
+			t.Fatalf("sequence or retract mismatch: %#v", payload)
+		}
+		count[payload.Key]++
+	}
+	if count[a] != 3 || count[b] != 2 || len(manager.queue.state.Entries)+len(manager.queue.state.Delivered) != 0 {
+		t.Fatalf("wanted retry, retracts and empty queue: %#v, %#v", count, manager.queue.state)
+	}
+
+	var err error
+	manager, err = NewManager(dir, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.now = func() time.Time { return now }
+	log = acceptingManager(manager)
+	c := exactKey("after-restart")
+	applyWaiting(t, manager, c, now)
+	update := PushEventKey{Category: CategoryUpdate, EventID: "update", DeviceID: sub.DeviceID}
+	ordinary := exactKey("ordinary")
+	ordinary.DeviceID = "ordinary"
+	for _, key := range []PushEventKey{update, ordinary} {
+		if result, err := manager.Publish(t.Context(), PublishRequest{Key: key, Preview: PreviewHidden}); err != nil || result.Queued != 1 {
+			t.Fatalf("Publish = %#v, %v", result, err)
+		}
+		entry := manager.queue.state.Entries[deliveryID(key, map[string]string{sub.DeviceID: endpointOne, "ordinary": endpointTwo}[key.DeviceID])]
+		var wire map[string]json.RawMessage
+		if err := json.Unmarshal(entry.Event.Payload, &wire); err != nil || wire["waiting_seq"] != nil {
+			t.Fatalf("ordinary alert contains waiting sequence: %s, %v", entry.Event.Payload, err)
+		}
+	}
+	process()
+	if len(log.sent) != 2 {
+		t.Fatalf("expected new alert and update, got %#v", log.sent)
+	}
+	for _, sent := range log.sent {
+		if sent.Payload.Key == c && sent.Payload.WaitingSeq != 3 {
+			t.Fatalf("sequence reset on restart: %#v", sent.Payload)
+		}
 	}
 }
 

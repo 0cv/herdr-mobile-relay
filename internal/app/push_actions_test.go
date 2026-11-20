@@ -252,7 +252,7 @@ func TestPushOpenRef(t *testing.T) {
 	eventID := agent.BlockedEventID
 	classify := func(command string) {
 		t.Helper()
-		if _, ok := s.state.CommitAttentionClassification(target.PaneID, eventID, target.Generation,
+		if _, _, ok := s.state.CommitAttentionClassification(target.PaneID, eventID, target.Generation,
 			s.state.ContentRevision(target.PaneID), question.Classification{
 				Kind: question.AttentionApproval, Command: command, ApprovalIdentity: command,
 			}); !ok {
@@ -368,29 +368,46 @@ func TestPushTestDevice(t *testing.T) {
 }
 
 func TestPushSubscribe(t *testing.T) {
-	s, conn, client, _ := pushActionServer(t)
+	s, conn, client, dir := pushActionServer(t)
 	subscribe := func(subscription string) map[string]any {
 		t.Helper()
 		s.handlePushSubscribe(client, protocol.Inbound{Subscription: json.RawMessage(subscription), ClientID: "client-1"}, pushIdentity)
 		return readFrame(t, conn)
 	}
 
-	t.Run("the stored subscription takes its identity from the connection", func(t *testing.T) {
+	for _, ordered := range []bool{true, false} {
+		flags := ""
+		if ordered {
+			flags = `, "ordered_waiting_push": true`
+		}
 		requirePushResult(t, subscribe(`{
 			"endpoint": "https://fcm.googleapis.com/fcm/send/one", "keys": {"p256dh": "p", "auth": "a"},
-			"device_id": "someone-else", "locale": "de", "platform": "ios", "user_agent": "Mozilla"
+			"device_id": "someone-else", "locale": "de", "platform": "ios", "user_agent": "Mozilla"`+flags+`
 		}`), "push_subscribed", true)
 
-		subscriptions := s.pushM.Subscriptions()
-		if len(subscriptions) != 1 {
-			t.Fatalf("subscriptions = %#v", subscriptions)
+		for _, manager := range []*push.Manager{s.pushM, newPushManager(t, dir)} {
+			subscriptions := manager.Subscriptions()
+			if len(subscriptions) != 1 {
+				t.Fatalf("subscriptions = %#v", subscriptions)
+			}
+			stored := subscriptions[0]
+			if stored.DeviceID != "device-1" || stored.Locale != "zh-CN" || stored.Platform != push.PlatformOther ||
+				stored.UserAgent != "" || stored.ClientID != "client-1" || stored.OrderedWaitingPush != ordered {
+				t.Fatalf("stored = %#v, ordered = %v", stored, ordered)
+			}
 		}
-		stored := subscriptions[0]
-		if stored.DeviceID != "device-1" || stored.Locale != "zh-CN" || stored.Platform != push.PlatformOther ||
-			stored.UserAgent != "" || stored.ClientID != "client-1" {
-			t.Fatalf("stored = %#v", stored)
+		target := currentPaneTarget(t, s)
+		id := "subscription-" + strconv.FormatBool(ordered)
+		if result := publishAttention(t, s, pushIdentity.DeviceID, id, target); result.Queued != 1 {
+			t.Fatalf("Publish = %#v", result)
 		}
-	})
+		for _, payload := range queuedPushPayloads(t, dir) {
+			if payload.Key.EventID == id && (len(payload.Actions) != 0 || len(payload.ActionRefs) != 0 ||
+				(payload.WaitingSeq != 0) != ordered || payload.Key.DeviceID != pushIdentity.DeviceID) {
+				t.Fatalf("notification changed actions or device binding: %#v", payload)
+			}
+		}
+	}
 
 	for name, subscription := range map[string]string{
 		"malformed JSON":       `"endpoint"`,

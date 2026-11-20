@@ -884,7 +884,7 @@ func (s *State) CommitAttentionClassification(
 	generation int64,
 	contentRevision int64,
 	classification question.Classification,
-) (*AgentState, bool) {
+) (*AgentState, int64, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rec := s.panes[paneID]
@@ -892,7 +892,7 @@ func (s *State) CommitAttentionClassification(
 		rec.agent.BlockedEventID != eventID ||
 		s.generation[paneID] != generation ||
 		rec.contentRev != contentRevision {
-		return nil, false
+		return nil, 0, false
 	}
 	agent := rec.agent
 	if classification.Kind == "" {
@@ -909,7 +909,8 @@ func (s *State) CommitAttentionClassification(
 	}
 	copy := *agent
 	copy.StateRevision = rec.revision
-	return &copy, true
+	copy.Generation = generation
+	return &copy, rec.attentionRev, true
 }
 
 func applyAttentionClassification(

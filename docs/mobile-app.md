@@ -160,6 +160,13 @@ a withdrawal lasts only five minutes. If it doesn't arrive, an old alert
 already on screen can remain, but tapping it won't open an answered or
 replaced request.
 
+The provider can only replace messages it hasn't delivered. Once the updated
+app syncs its subscription with an updated relay, a newer waiting alert also
+replaces an older alert already on screen for that pane, without another
+push. An older app can still receive an alert after being offline, but may
+leave both alerts on screen if it missed the withdrawal. Connections to older
+relays keep their original delivery and display behavior.
+
 ## Opening links from other apps on iOS
 
 External links open in Safari, not the installed Home Screen app. To use those

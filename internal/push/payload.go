@@ -116,11 +116,12 @@ func (s *ReferenceSigner) Verify(token string, now time.Time) (ReferenceClaims, 
 }
 
 type PayloadRequest struct {
-	Key       PushEventKey
-	Locale    string
-	Preview   PreviewMode
-	ExpiresAt time.Time
-	Retract   bool
+	Key        PushEventKey
+	Locale     string
+	Preview    PreviewMode
+	ExpiresAt  time.Time
+	Retract    bool
+	WaitingSeq uint64
 }
 
 type notificationAction struct {
@@ -140,6 +141,7 @@ type Payload struct {
 	ActionRefs map[string]string    `json:"action_refs"`
 	EventRef   string               `json:"event_ref"`
 	Retract    bool                 `json:"retract,omitempty"`
+	WaitingSeq uint64               `json:"waiting_seq,omitempty,string"`
 }
 
 func BuildPayload(request PayloadRequest, signer *ReferenceSigner) ([]byte, error) {
@@ -169,6 +171,7 @@ func BuildPayload(request PayloadRequest, signer *ReferenceSigner) ([]byte, erro
 		ActionRefs: map[string]string{},
 		EventRef:   eventRef,
 		Retract:    request.Retract,
+		WaitingSeq: request.WaitingSeq,
 	}
 	if request.Key.Category == CategoryUpdate || request.Key.Category == CategoryTest {
 		payload.URL = "./#settings"

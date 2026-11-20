@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -25,11 +26,12 @@ const (
 )
 
 type PushEvent struct {
-	Key       PushEventKey `json:"key"`
-	Payload   []byte       `json:"payload"`
-	CreatedAt time.Time    `json:"created_at"`
-	ExpiresAt time.Time    `json:"expires_at"`
-	Retract   bool         `json:"retract,omitempty"`
+	Key        PushEventKey `json:"key"`
+	Payload    []byte       `json:"payload"`
+	CreatedAt  time.Time    `json:"created_at"`
+	ExpiresAt  time.Time    `json:"expires_at"`
+	Retract    bool         `json:"retract,omitempty"`
+	WaitingSeq uint64       `json:"waiting_seq,omitempty"`
 }
 
 func (e PushEvent) Validate(now time.Time) error {
@@ -59,17 +61,20 @@ type deliveredRecord struct {
 	Subscription Subscription `json:"subscription"`
 	Tag          string       `json:"tag"`
 	AcceptedAt   time.Time    `json:"accepted_at"`
+	WaitingSeq   uint64       `json:"waiting_seq,omitempty"`
 }
 
 type queueFile struct {
-	Entries   map[string]queueEntry      `json:"entries"`
-	Delivered map[string]deliveredRecord `json:"delivered"`
+	WaitingSeq uint64                     `json:"waiting_seq,omitempty"`
+	Entries    map[string]queueEntry      `json:"entries"`
+	Delivered  map[string]deliveredRecord `json:"delivered"`
 }
 
 func (f queueFile) clone() queueFile {
 	return queueFile{
-		Entries:   maps.Clone(f.Entries),
-		Delivered: maps.Clone(f.Delivered),
+		WaitingSeq: f.WaitingSeq,
+		Entries:    maps.Clone(f.Entries),
+		Delivered:  maps.Clone(f.Delivered),
 	}
 }
 
@@ -117,6 +122,14 @@ func (q *durableQueue) enqueue(event PushEvent, subscription Subscription, dueAt
 		return "", err
 	}
 	return id, nil
+}
+
+func (f *queueFile) nextWaitingSeq() (uint64, error) {
+	if f.WaitingSeq == math.MaxUint64 {
+		return 0, errors.New("push_waiting_sequence_exhausted")
+	}
+	f.WaitingSeq++
+	return f.WaitingSeq, nil
 }
 
 func (f *queueFile) enqueue(event PushEvent, subscription Subscription, dueAt time.Time) string {
@@ -454,7 +467,7 @@ func (q *durableQueue) finishInMemory(id string, snapshot queueEntry, dispositio
 	} else if disposition == DeliveryAccepted {
 		q.state.Delivered[id] = deliveredRecord{
 			Key: snapshot.Event.Key, Subscription: snapshot.Subscription,
-			Tag: notificationTag(snapshot.Event.Key), AcceptedAt: now,
+			Tag: notificationTag(snapshot.Event.Key), AcceptedAt: now, WaitingSeq: snapshot.Event.WaitingSeq,
 		}
 	}
 	return true
@@ -466,6 +479,7 @@ func sameQueueEntry(left, right queueEntry) bool {
 		left.Event.CreatedAt.Equal(right.Event.CreatedAt) &&
 		left.Event.ExpiresAt.Equal(right.Event.ExpiresAt) &&
 		left.Event.Retract == right.Event.Retract &&
+		left.Event.WaitingSeq == right.Event.WaitingSeq &&
 		bytes.Equal(left.Event.Payload, right.Event.Payload) &&
 		left.Subscription == right.Subscription &&
 		left.DueAt.Equal(right.DueAt) &&

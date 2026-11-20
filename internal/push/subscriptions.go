@@ -19,11 +19,12 @@ type pythonSubscription struct {
 			Auth   string `json:"auth"`
 		} `json:"keys"`
 	} `json:"subscription"`
-	DeviceID  string   `json:"device_id,omitempty"`
-	Locale    string   `json:"locale,omitempty"`
-	Platform  Platform `json:"platform,omitempty"`
-	ClientID  string   `json:"client_id"`
-	UserAgent string   `json:"user_agent"`
+	DeviceID           string   `json:"device_id,omitempty"`
+	Locale             string   `json:"locale,omitempty"`
+	Platform           Platform `json:"platform,omitempty"`
+	ClientID           string   `json:"client_id"`
+	UserAgent          string   `json:"user_agent"`
+	OrderedWaitingPush bool     `json:"ordered_waiting_push,omitempty"`
 }
 
 type pythonFile struct {
@@ -84,6 +85,7 @@ func (m *Manager) load() error {
 		sub.Platform = ps.Platform
 		sub.UserAgent = ps.UserAgent
 		sub.ClientID = ps.ClientID
+		sub.OrderedWaitingPush = ps.OrderedWaitingPush
 		m.subscriptions = append(m.subscriptions, sub)
 	}
 	m.subscriptions = keepValidPushSubscriptions(m.subscriptions)
@@ -102,6 +104,7 @@ func encodeSubscriptions(subscriptions []Subscription) ([]byte, error) {
 		ps.Platform = sub.Platform
 		ps.UserAgent = sub.UserAgent
 		ps.ClientID = sub.ClientID
+		ps.OrderedWaitingPush = sub.OrderedWaitingPush
 		pf.Subscriptions = append(pf.Subscriptions, ps)
 	}
 

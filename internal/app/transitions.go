@@ -109,7 +109,7 @@ func (s *Server) transitionBlocked(
 	revision, transitionAt int64,
 ) {
 	agentState, agentExists := s.state.Agent(paneID)
-	if !agentExists || agentState.Status != "blocked" || agentState.StateRevision != revision {
+	if !agentExists || agentState.Status != "blocked" {
 		return
 	}
 	session := agentState.Session
@@ -136,7 +136,7 @@ func (s *Server) transitionBlocked(
 	if !transitionCurrent() {
 		return
 	}
-	persisted, ok := s.state.CommitAttentionClassification(
+	persisted, classifiedAttentionRevision, ok := s.state.CommitAttentionClassification(
 		paneID,
 		blockedEventID,
 		paneGeneration,
@@ -147,7 +147,6 @@ func (s *Server) transitionBlocked(
 		return
 	}
 	agentState = persisted
-	classifiedAttentionRevision := s.state.AttentionRevision(paneID)
 	classifiedCurrent := func() bool {
 		return s.state.AttentionTransitionCurrent(
 			paneID,

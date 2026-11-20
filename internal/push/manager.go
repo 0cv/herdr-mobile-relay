@@ -23,11 +23,12 @@ type Subscription struct {
 		P256dh string `json:"p256dh"`
 		Auth   string `json:"auth"`
 	} `json:"keys"`
-	DeviceID  string   `json:"device_id,omitempty"`
-	Locale    string   `json:"locale,omitempty"`
-	Platform  Platform `json:"platform,omitempty"`
-	UserAgent string   `json:"user_agent,omitempty"`
-	ClientID  string   `json:"client_id,omitempty"`
+	DeviceID           string   `json:"device_id,omitempty"`
+	Locale             string   `json:"locale,omitempty"`
+	Platform           Platform `json:"platform,omitempty"`
+	UserAgent          string   `json:"user_agent,omitempty"`
+	ClientID           string   `json:"client_id,omitempty"`
+	OrderedWaitingPush bool     `json:"ordered_waiting_push,omitempty"`
 }
 
 type Manager struct {
@@ -222,16 +223,25 @@ func (m *Manager) publish(next *queueFile, request PublishRequest) (PublishResul
 		if key.Category.Waiting() {
 			refExpiry = now.Add(48 * time.Hour)
 		}
+		var waitingSeq uint64
+		if key.Category.Waiting() && subscription.OrderedWaitingPush {
+			var err error
+			waitingSeq, err = next.nextWaitingSeq()
+			if err != nil {
+				return result, nil, err
+			}
+		}
 		payload, err := BuildPayload(PayloadRequest{
-			Key:       key,
-			Locale:    subscription.Locale,
-			Preview:   request.Preview,
-			ExpiresAt: refExpiry,
+			Key:        key,
+			Locale:     subscription.Locale,
+			Preview:    request.Preview,
+			ExpiresAt:  refExpiry,
+			WaitingSeq: waitingSeq,
 		}, m.signer)
 		if err != nil {
 			return result, nil, err
 		}
-		event := PushEvent{Key: key, Payload: payload, CreatedAt: now, ExpiresAt: expiresAt}
+		event := PushEvent{Key: key, Payload: payload, CreatedAt: now, ExpiresAt: expiresAt, WaitingSeq: waitingSeq}
 		if err := event.Validate(now); err != nil {
 			return result, nil, err
 		}
@@ -260,17 +270,18 @@ func (m *Manager) retract(next *queueFile, key PushEventKey, now time.Time) erro
 			continue
 		}
 		payload, err := BuildPayload(PayloadRequest{
-			Key:       key,
-			Locale:    record.Subscription.Locale,
-			Preview:   PreviewHidden,
-			ExpiresAt: expiresAt,
-			Retract:   true,
+			Key:        key,
+			Locale:     record.Subscription.Locale,
+			Preview:    PreviewHidden,
+			ExpiresAt:  expiresAt,
+			Retract:    true,
+			WaitingSeq: record.WaitingSeq,
 		}, m.signer)
 		if err != nil {
 			return err
 		}
 		event := PushEvent{
-			Key: key, Payload: payload, CreatedAt: now, ExpiresAt: expiresAt, Retract: true,
+			Key: key, Payload: payload, CreatedAt: now, ExpiresAt: expiresAt, Retract: true, WaitingSeq: record.WaitingSeq,
 		}
 		if _, pending := next.Entries[id]; !pending {
 			next.enqueue(event, record.Subscription, now)
