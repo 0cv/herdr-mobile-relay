@@ -22,8 +22,9 @@ func TestInventoryFailureClearsReadinessAndPreservesStaleSnapshot(t *testing.T) 
 		t.Fatal("inventory remained ready after a failed poll")
 	}
 	status := state.InventoryStatus()
-	if status["state"] != "error" || status["stale"] != true {
-		t.Fatalf("inventory status = %+v", status)
+	if status["state"] != "error" || status["stale"] != true ||
+		status["error_code"] != "command_failed" || status["message"] != "Unable to read the current Herdr agent inventory." {
+		t.Fatalf("inventory status = %+v, want generic error with stale inventory", status)
 	}
 	if state.AgentCount() != 1 {
 		t.Fatal("failed poll discarded the last known snapshot")

@@ -233,7 +233,8 @@ func (s *State) MarkInventoryFailure(err error) {
 	s.lastAttemptAt = time.Now().UTC()
 	s.inventoryReady = false
 	var cliErr *herdr.CLIError
-	if errors.As(err, &cliErr) && cliErr.Code == "server_not_running" {
+	if errors.Is(err, herdr.ErrServerNotRunning) ||
+		(errors.As(err, &cliErr) && cliErr.Code == "server_not_running") {
 		s.inventoryErrorCode = "server_not_running"
 		s.inventoryMessage = "Herdr is not running on this computer. Start it with `herdr`."
 		return
