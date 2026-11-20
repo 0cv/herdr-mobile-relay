@@ -13,7 +13,7 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/question"
 )
 
-func (s *Server) reconcileRecoveredPush(ctx context.Context, agents []*coordinator.AgentState) {
+func (s *Server) reconcileRecoveredPush(ctx context.Context) {
 	if s.pushM == nil {
 		return
 	}
@@ -22,42 +22,14 @@ func (s *Server) reconcileRecoveredPush(ctx context.Context, agents []*coordinat
 	if s.pushReconciled {
 		return
 	}
-	subscriptions := s.pushM.Subscriptions()
-	current := make([]push.PushEventKey, 0)
-	for _, key := range s.pushM.RecoveredKeys() {
-		if key.Category == push.CategoryFinished &&
+	if err := s.pushM.Reconcile(ctx, func(key push.PushEventKey) bool {
+		if key.Category.Waiting() {
+			return s.pushEventCurrent(key)
+		}
+		return key.Category == push.CategoryFinished &&
 			s.pushTargetCurrent(key.Target()) &&
-			s.state.CompletionCurrent(key.PaneID, key.InteractionRevision) {
-			current = append(current, key)
-		}
-	}
-	for _, agent := range agents {
-		if agent == nil || agent.Status != "blocked" || agent.BlockedEventID == "" ||
-			agent.TerminalID == "" || agent.AttentionKind == question.AttentionChat {
-			continue
-		}
-		category := push.CategoryAttention
-		if agent.AttentionKind == question.AttentionQuestion {
-			category = push.CategoryQuestion
-		}
-		for _, subscription := range subscriptions {
-			if subscription.DeviceID == "" {
-				continue
-			}
-			current = append(current, push.PushEventKey{
-				DeviceID:            subscription.DeviceID,
-				ServerSessionID:     protocol.PrimaryServerSessionID,
-				PaneID:              agent.PaneID,
-				TerminalID:          agent.TerminalID,
-				AgentSessionID:      agent.SessionID,
-				Generation:          agent.Generation,
-				EventID:             agent.BlockedEventID,
-				InteractionRevision: s.state.AttentionRevision(agent.PaneID),
-				Category:            category,
-			})
-		}
-	}
-	if err := s.pushM.Reconcile(ctx, current); err != nil {
+			s.state.CompletionCurrent(key.PaneID, key.InteractionRevision)
+	}); err != nil {
 		s.logger.Warn("recovered push queue reconciliation failed", "error", err)
 		return
 	}
@@ -183,7 +155,7 @@ func (s *Server) publishCurrentInventory(ctx context.Context) error {
 		return batchErr
 	}
 	if runAgentSideEffects {
-		s.reconcileRecoveredPush(ctx, sideEffectAgents)
+		s.reconcileRecoveredPush(ctx)
 		s.syncHistoryPanes(sideEffectAgents)
 		active := make(map[string]bool, len(sideEffectAgents))
 		for _, agent := range sideEffectAgents {

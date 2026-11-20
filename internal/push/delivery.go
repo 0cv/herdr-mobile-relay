@@ -10,17 +10,7 @@ func terminalSubscriptionKey(subscription Subscription) string {
 }
 
 func (m *Manager) RunOnce(ctx context.Context, now time.Time) ([]DeliveryResult, error) {
-	m.mu.Lock()
-	reconciled := m.reconciled
-	m.mu.Unlock()
-	if !reconciled {
-		return nil, nil
-	}
-	results, err := m.processDue(ctx, now)
-	if err != nil {
-		return results, err
-	}
-	return results, m.retireFinishedKeys(results)
+	return m.processDue(ctx, now)
 }
 
 func (m *Manager) retireFinishedKeys(results []DeliveryResult) error {
@@ -29,18 +19,6 @@ func (m *Manager) retireFinishedKeys(results []DeliveryResult) error {
 		seen[result.Key] = true
 	}
 	for key := range seen {
-		m.mu.Lock()
-		retracting := m.retracting[key]
-		m.mu.Unlock()
-		if retracting && !m.queue.hasEntriesFor(key) {
-			if err := m.queue.forgetDelivered(key); err != nil {
-				return err
-			}
-			m.mu.Lock()
-			delete(m.retracting, key)
-			m.mu.Unlock()
-			continue
-		}
 		if m.queue.hasEntriesFor(key) {
 			continue
 		}
@@ -61,6 +39,12 @@ func (m *Manager) retireFinishedKeys(results []DeliveryResult) error {
 func (m *Manager) processDue(ctx context.Context, now time.Time) ([]DeliveryResult, error) {
 	m.queue.process.Lock()
 	defer m.queue.process.Unlock()
+	m.mu.Lock()
+	reconciled := m.reconciled
+	m.mu.Unlock()
+	if !reconciled {
+		return nil, nil
+	}
 	entries := m.queue.dueEntries(now)
 	results := make([]DeliveryResult, 0, len(entries))
 	terminalSubscriptions := make(map[string]bool)
@@ -73,6 +57,9 @@ func (m *Manager) processDue(ctx context.Context, now time.Time) ([]DeliveryResu
 		if err != nil {
 			return m.finishPass(results, dirty, now, err)
 		}
+		if result.Disposition == "" {
+			continue
+		}
 		if result.Disposition == DeliveryPruned {
 			terminalSubscriptions[terminalSubscriptionKey(entry.Subscription)] = true
 		}
@@ -83,7 +70,11 @@ func (m *Manager) processDue(ctx context.Context, now time.Time) ([]DeliveryResu
 		}
 		results = append(results, result)
 	}
-	return m.finishPass(results, dirty, now, nil)
+	results, err := m.finishPass(results, dirty, now, nil)
+	if err != nil {
+		return results, err
+	}
+	return results, m.retireFinishedKeys(results)
 }
 
 func (m *Manager) applyResult(entry queueEntry, result DeliveryResult, now time.Time) (bool, error) {
@@ -91,10 +82,10 @@ func (m *Manager) applyResult(entry queueEntry, result DeliveryResult, now time.
 		return m.queue.rescheduleInMemory(entry.ID, entry, result.Attempts, result.NextAttempt), nil
 	}
 	changed := m.queue.finishInMemory(entry.ID, entry, result.Disposition, now)
-	if result.Disposition != DeliveryAccepted {
+	if result.Disposition != DeliveryAccepted || entry.Event.Retract {
 		return changed, nil
 	}
-	return changed, m.markAccepted(entry.Event.Key, now)
+	return changed, m.policy.MarkAccepted(entry.Event.Key, now)
 }
 
 func (m *Manager) finishPass(results []DeliveryResult, dirty bool, now time.Time, cause error) ([]DeliveryResult, error) {
@@ -123,19 +114,8 @@ func (m *Manager) flush(dirty bool) error {
 func (m *Manager) deliverable(key PushEventKey, now time.Time) bool {
 	m.mu.Lock()
 	active := m.active[key]
-	retracting := m.retracting[key]
 	m.mu.Unlock()
-	return retracting || active && m.policy.Allows(key, "en", now)
-}
-
-func (m *Manager) markAccepted(key PushEventKey, acceptedAt time.Time) error {
-	m.mu.Lock()
-	retracting := m.retracting[key]
-	m.mu.Unlock()
-	if retracting {
-		return nil
-	}
-	return m.policy.MarkAccepted(key, acceptedAt)
+	return active && m.policy.Allows(key, "en", now)
 }
 
 func (m *Manager) deliverOne(
@@ -150,8 +130,13 @@ func (m *Manager) deliverOne(
 	if !now.Before(entry.Event.ExpiresAt) {
 		return newDeliveryResult(entry, DeliveryExpired, entry.Attempts), nil
 	}
-	if !m.deliverable(entry.Event.Key, now) {
-		return newDeliveryResult(entry, DeliveryStale, entry.Attempts), nil
+	if !entry.Event.Retract {
+		if !m.deliverable(entry.Event.Key, now) {
+			return newDeliveryResult(entry, DeliveryStale, entry.Attempts), nil
+		}
+		if entry.Event.Key.Category.Waiting() && now.Before(m.queue.waitingRetractDeadline(entry)) {
+			return result, nil
+		}
 	}
 	sendErr := m.sendPush(ctx, entry.Subscription, entry.Event.Payload)
 	if sendErr != nil && ctx.Err() != nil {

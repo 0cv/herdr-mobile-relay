@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -282,15 +283,40 @@ func TestPushOpenRef(t *testing.T) {
 	refuse(queuedEventRef(t, dir, "device-2", eventID))
 	refuse("not-a-reference")
 
+	firstAgent, _ := s.state.Agent(target.PaneID)
+	firstRevision := s.state.AttentionRevision(target.PaneID)
+	replacementPublished := make(chan struct{})
+	staleCallbacksDone := make(chan struct{})
+	go func() {
+		defer close(staleCallbacksDone)
+		select {
+		case <-replacementPublished:
+		case <-t.Context().Done():
+			return
+		}
+		s.publishAgentPush(t.Context(), firstAgent, eventID, firstRevision, push.CategoryAttention, push.PreviewHidden, func() bool { return false })
+		s.transitionWorking(context.Background(), target.PaneID, "claude", "", firstAgent.StateRevision, 0)
+	}()
+
 	classify("different approval")
 	oldClaims, err := s.pushM.VerifyEventReference(old, time.Now())
 	if err != nil || oldClaims.Key.Target() != target || oldClaims.Key.EventID != eventID {
 		t.Fatalf("old key should still be active for the same target and event: %#v, %v", oldClaims, err)
 	}
 	refuse(old)
-	publishAttention(t, s, "device-1", eventID, target)
+	secondAgent, _ := s.state.Agent(target.PaneID)
+	s.publishAgentPush(t.Context(), secondAgent, eventID, s.state.AttentionRevision(target.PaneID), push.CategoryAttention, push.PreviewHidden, func() bool { return true })
+	close(replacementPublished)
+	<-staleCallbacksDone
+	payloads := queuedPushPayloads(t, dir)
+	if len(payloads) != 2 {
+		t.Fatalf("stale callbacks changed the replacement queue: %#v", payloads)
+	}
 	var replacement string
-	for _, payload := range queuedPushPayloads(t, dir) {
+	for _, payload := range payloads {
+		if payload.Key.InteractionRevision == firstRevision {
+			t.Fatalf("stale callback requeued the old key: %#v", payload)
+		}
 		if payload.Key.DeviceID == "device-1" && payload.Key.InteractionRevision == s.state.AttentionRevision(target.PaneID) {
 			replacement = payload.EventRef
 		}

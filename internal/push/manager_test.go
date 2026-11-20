@@ -525,7 +525,7 @@ func TestRecoveredManagerWaitsForAuthoritativeReconcile(t *testing.T) {
 		t.Fatalf("pre-reconcile RunOnce() = %#v, %v, sends %d", results, err, sends)
 	}
 	current := typedTestKey("device-1")
-	if err := recovered.Reconcile(t.Context(), []PushEventKey{current}); err != nil {
+	if err := recovered.Reconcile(t.Context(), func(key PushEventKey) bool { return key == current }); err != nil {
 		t.Fatal(err)
 	}
 	if results, err := recovered.RunOnce(t.Context(), now); err != nil || len(results) != 1 || sends != 1 {
@@ -736,8 +736,10 @@ func TestFailedPersistLeavesPolicyAndQueueUnchanged(t *testing.T) {
 	if _, err := queue.enqueue(otherEvent, subscription, now); err == nil {
 		t.Fatal("enqueue() succeeded with a broken path")
 	}
-	if err := queue.cancelKey(key); err == nil {
-		t.Fatal("cancelKey() succeeded with a broken path")
+	next := queue.state.clone()
+	next.cancelAlerts(key)
+	if err := queue.commitLocked(next); err == nil {
+		t.Fatal("committing cancellation succeeded with a broken path")
 	}
 	if err := queue.removeSubscriptions("device-1", []string{subscription.Endpoint}); err == nil {
 		t.Fatal("removeSubscriptions() succeeded with a broken path")

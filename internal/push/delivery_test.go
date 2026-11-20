@@ -861,7 +861,7 @@ func TestReconcileRetractsOnlyStaleRecoveredEvents(t *testing.T) {
 		recovered := recoverManager(t)
 		log := acceptingManager(recovered)
 
-		if err := recovered.Reconcile(t.Context(), nil); err != nil {
+		if err := recovered.Reconcile(t.Context(), func(PushEventKey) bool { return false }); err != nil {
 			t.Fatal(err)
 		}
 		runPass(t, recovered, time.Now().UTC())
@@ -875,7 +875,7 @@ func TestReconcileRetractsOnlyStaleRecoveredEvents(t *testing.T) {
 		recovered := recoverManager(t)
 		log := acceptingManager(recovered)
 
-		if err := recovered.Reconcile(t.Context(), []PushEventKey{exactKey("event-1")}); err != nil {
+		if err := recovered.Reconcile(t.Context(), func(key PushEventKey) bool { return key == exactKey("event-1") }); err != nil {
 			t.Fatal(err)
 		}
 		runPass(t, recovered, time.Now().UTC())
@@ -889,7 +889,7 @@ func TestReconcileRetractsOnlyStaleRecoveredEvents(t *testing.T) {
 	})
 }
 
-func TestResolvePaneIDKeepsExceptedEvent(t *testing.T) {
+func TestPanePublicationKeepsExactActiveKey(t *testing.T) {
 	manager, dir := newDeliveringManager(t, endpointOne)
 	log := acceptingManager(manager)
 	publishQuestion(t, manager, "event-1", deliveryNow)
@@ -901,8 +901,11 @@ func TestResolvePaneIDKeepsExceptedEvent(t *testing.T) {
 		t.Fatalf("sends = %d, want 2", len(log.sent))
 	}
 
-	if err := manager.ResolvePaneID(t.Context(), "pane-1", "event-2"); err != nil {
-		t.Fatal(err)
+	result, err := manager.ApplyPaneTransition(t.Context(), "pane-1", &PublishRequest{
+		Key: exactKey("event-2"), Preview: PreviewQuestion,
+	}, func() bool { return true })
+	if err != nil || result.Queued != 0 {
+		t.Fatalf("republication = %#v, %v", result, err)
 	}
 	runPass(t, manager, time.Now().UTC())
 
@@ -999,7 +1002,7 @@ func TestVerifyEventReference(t *testing.T) {
 		t.Fatal(err)
 	}
 	requireReferenceStale(t, recovered, token)
-	if err := recovered.Reconcile(t.Context(), []PushEventKey{exactKey("event-1")}); err != nil {
+	if err := recovered.Reconcile(t.Context(), func(key PushEventKey) bool { return key == exactKey("event-1") }); err != nil {
 		t.Fatal(err)
 	}
 	requireReferenceAccepted(t, recovered, token)

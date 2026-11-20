@@ -43,7 +43,6 @@ type Manager struct {
 	policy        *PolicyEngine
 	signer        *ReferenceSigner
 	active        map[PushEventKey]bool
-	retracting    map[PushEventKey]bool
 	reconciled    bool
 	wake          chan struct{}
 }
@@ -65,9 +64,8 @@ func NewManager(pushDir string, logger *slog.Logger) (*Manager, error) {
 				return http.ErrUseLastResponse
 			},
 		},
-		active:     make(map[PushEventKey]bool),
-		retracting: make(map[PushEventKey]bool),
-		wake:       make(chan struct{}, 1),
+		active: make(map[PushEventKey]bool),
+		wake:   make(chan struct{}, 1),
 	}
 
 	if err := m.load(); err != nil {
@@ -97,7 +95,7 @@ func NewManager(pushDir string, logger *slog.Logger) (*Manager, error) {
 	for _, key := range recovered {
 		m.active[key] = true
 	}
-	m.reconciled = len(recovered) == 0
+	m.reconciled = len(m.queue.state.Entries) == 0 && len(recovered) == 0
 
 	return m, nil
 }
@@ -115,10 +113,82 @@ type PublishResult struct {
 }
 
 func (m *Manager) Publish(ctx context.Context, request PublishRequest) (PublishResult, error) {
-	var result PublishResult
-	if err := ctx.Err(); err != nil {
-		return result, err
+	m.queue.process.Lock()
+	defer m.queue.process.Unlock()
+	return m.updateQueue(ctx, &request, nil)
+}
+
+func (m *Manager) ApplyPaneTransition(ctx context.Context, paneID string, request *PublishRequest, current func() bool) (PublishResult, error) {
+	m.queue.process.Lock()
+	defer m.queue.process.Unlock()
+	if !current() {
+		return PublishResult{}, nil
 	}
+	return m.updateQueue(ctx, request, func(key PushEventKey) bool {
+		if key.PaneID != paneID {
+			return false
+		}
+		if request == nil {
+			return true
+		}
+		if !key.Category.Waiting() {
+			return key.EventID != request.Key.EventID
+		}
+		replacement := request.Key
+		replacement.DeviceID = key.DeviceID
+		return key != replacement
+	})
+}
+
+func (m *Manager) updateQueue(ctx context.Context, request *PublishRequest, superseded func(PushEventKey) bool) (PublishResult, error) {
+	if err := ctx.Err(); err != nil {
+		return PublishResult{}, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.queue.mu.Lock()
+	defer m.queue.mu.Unlock()
+
+	next := m.queue.state.clone()
+	var retire []PushEventKey
+	if superseded != nil {
+		now := time.Now().UTC()
+		for key := range m.active {
+			if superseded(key) {
+				if err := m.retract(&next, key, now); err != nil {
+					return PublishResult{}, err
+				}
+				retire = append(retire, key)
+			}
+		}
+	}
+	var result PublishResult
+	var added []PushEventKey
+	if request != nil {
+		var err error
+		result, added, err = m.publish(&next, *request)
+		if err != nil {
+			return PublishResult{}, err
+		}
+	}
+	if len(retire) == 0 && len(added) == 0 {
+		return result, nil
+	}
+	if err := m.queue.commitLocked(next); err != nil {
+		return PublishResult{}, err
+	}
+	for _, key := range retire {
+		delete(m.active, key)
+	}
+	for _, key := range added {
+		m.active[key] = true
+	}
+	m.signal()
+	return result, nil
+}
+
+func (m *Manager) publish(next *queueFile, request PublishRequest) (PublishResult, []PushEventKey, error) {
+	var result PublishResult
 	now := request.CreatedAt
 	if now.IsZero() {
 		now = time.Now().UTC()
@@ -127,24 +197,20 @@ func (m *Manager) Publish(ctx context.Context, request PublishRequest) (PublishR
 	if expiresAt.IsZero() {
 		expiresAt = now.Add(5 * time.Minute)
 	}
-	m.queue.process.Lock()
-	defer m.queue.process.Unlock()
-	subscriptions := m.Subscriptions()
-	selected := make([]Subscription, 0, len(subscriptions))
-	seenDevices := make(map[string]bool, len(subscriptions))
-	for index := len(subscriptions) - 1; index >= 0; index-- {
-		subscription := subscriptions[index]
+	var added []PushEventKey
+	seenDevices := make(map[string]bool, len(m.subscriptions))
+	for index := len(m.subscriptions) - 1; index >= 0; index-- {
+		subscription := m.subscriptions[index]
+		key := request.Key
 		if subscription.DeviceID == "" || seenDevices[subscription.DeviceID] ||
-			(request.Key.DeviceID != "" && request.Key.DeviceID != subscription.DeviceID) {
+			(key.DeviceID != "" && key.DeviceID != subscription.DeviceID) {
 			continue
 		}
 		seenDevices[subscription.DeviceID] = true
-		selected = append(selected, subscription)
-	}
-	for _, subscription := range selected {
-		key := request.Key
 		key.DeviceID = subscription.DeviceID
-		event := PushEvent{Key: key, CreatedAt: now, ExpiresAt: expiresAt}
+		if key.Category.Waiting() && m.active[key] {
+			continue
+		}
 		decision := m.policy.Decide(key, subscription.Locale, now)
 		if !decision.Deliver {
 			result.Suppressed++
@@ -161,49 +227,36 @@ func (m *Manager) Publish(ctx context.Context, request PublishRequest) (PublishR
 			ExpiresAt: refExpiry,
 		}, m.signer)
 		if err != nil {
-			return result, err
+			return result, nil, err
 		}
-		event.Payload = payload
+		event := PushEvent{Key: key, Payload: payload, CreatedAt: now, ExpiresAt: expiresAt}
 		if err := event.Validate(now); err != nil {
-			return result, err
+			return result, nil, err
 		}
-		if _, err := m.queue.enqueue(event, subscription, decision.DueAt); err != nil {
-			return result, err
-		}
-		m.mu.Lock()
-		m.active[key] = true
-		m.mu.Unlock()
+		next.enqueue(event, subscription, decision.DueAt)
+		added = append(added, key)
 		result.Queued++
 	}
-	if result.Queued > 0 {
-		m.signal()
-	}
-	return result, nil
+	return result, added, nil
 }
 
 func (m *Manager) Resolve(ctx context.Context, key PushEventKey) error {
 	if err := key.Validate(); err != nil {
 		return err
 	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if err := m.queue.cancelKey(key); err != nil {
-		return err
-	}
-	records := m.queue.deliveredFor(key)
-	m.mu.Lock()
-	delete(m.active, key)
-	if len(records) > 0 {
-		m.retracting[key] = true
-	}
-	m.mu.Unlock()
-	if len(records) == 0 {
-		return m.queue.forgetDelivered(key)
-	}
-	now := time.Now().UTC()
+	m.queue.process.Lock()
+	defer m.queue.process.Unlock()
+	_, err := m.updateQueue(ctx, nil, func(candidate PushEventKey) bool { return candidate == key })
+	return err
+}
+
+func (m *Manager) retract(next *queueFile, key PushEventKey, now time.Time) error {
+	next.cancelAlerts(key)
 	expiresAt := now.Add(5 * time.Minute)
-	for _, record := range records {
+	for id, record := range next.Delivered {
+		if record.Key != key {
+			continue
+		}
 		payload, err := BuildPayload(PayloadRequest{
 			Key:       key,
 			Locale:    record.Subscription.Locale,
@@ -217,55 +270,22 @@ func (m *Manager) Resolve(ctx context.Context, key PushEventKey) error {
 		event := PushEvent{
 			Key: key, Payload: payload, CreatedAt: now, ExpiresAt: expiresAt, Retract: true,
 		}
-		if _, err := m.queue.enqueue(event, record.Subscription, now); err != nil {
-			return err
+		if _, pending := next.Entries[id]; !pending {
+			next.enqueue(event, record.Subscription, now)
 		}
-	}
-	m.signal()
-	return nil
-}
-
-func (m *Manager) ResolvePaneID(ctx context.Context, paneID, exceptEventID string) error {
-	m.mu.Lock()
-	keys := make([]PushEventKey, 0, len(m.active))
-	for key := range m.active {
-		if key.PaneID == paneID && key.EventID != exceptEventID {
-			keys = append(keys, key)
-		}
-	}
-	m.mu.Unlock()
-	for _, key := range keys {
-		if err := m.Resolve(ctx, key); err != nil {
-			return err
-		}
+		delete(next.Delivered, id)
 	}
 	return nil
 }
 
-// Reconcile releases recovered deliveries only after the caller has supplied
-// the first authoritative inventory. Recovered events absent from that exact
-// inventory are retracted rather than retried against a guessed session.
-func (m *Manager) Reconcile(ctx context.Context, current []PushEventKey) error {
-	currentSet := make(map[PushEventKey]bool, len(current))
-	for _, key := range current {
-		if err := key.Validate(); err != nil {
-			return err
-		}
-		currentSet[key] = true
-	}
-	m.mu.Lock()
-	stale := make([]PushEventKey, 0)
-	for key := range m.active {
-		if key.Category != CategoryUpdate && key.Category != CategoryTest && !currentSet[key] {
-			stale = append(stale, key)
-		}
-	}
-	m.reconciled = false
-	m.mu.Unlock()
-	for _, key := range stale {
-		if err := m.Resolve(ctx, key); err != nil {
-			return err
-		}
+func (m *Manager) Reconcile(ctx context.Context, current func(PushEventKey) bool) error {
+	m.queue.process.Lock()
+	defer m.queue.process.Unlock()
+	_, err := m.updateQueue(ctx, nil, func(key PushEventKey) bool {
+		return key.Category != CategoryUpdate && key.Category != CategoryTest && !current(key)
+	})
+	if err != nil {
+		return err
 	}
 	m.mu.Lock()
 	m.reconciled = true

@@ -145,6 +145,12 @@ mobile browsers often provide no useful console. Copy or photograph its text
 for a bug report, then tap the banner to dismiss it; a later independent error
 will display a new banner.
 
+## Push notifications
+
+When an agent's approval or question changes, the relay cancels any unsent
+alert for the old request, including retries. It withdraws an old alert only
+if the push service already accepted it.
+
 ## Opening links from other apps on iOS
 
 External links open in Safari, not the installed Home Screen app. To use those
