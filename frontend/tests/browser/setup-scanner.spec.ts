@@ -18,6 +18,29 @@ async function fakeCamera(page: Page, source: 'denied' | 'live' | 'setup-qr-dire
   const frame = source === 'live' || source === 'denied' ? undefined : qrPixels(source);
   await page.addInitScript(({ source, frame }) => {
     window.__scannerTracks = [];
+    const frames = new Map<string, HTMLCanvasElement>();
+    function currentFrame(video: HTMLVideoElement) {
+      const stream = video.srcObject;
+      return stream instanceof MediaStream && stream.active ? frames.get(stream.id) : undefined;
+    }
+
+    if (frame) {
+      // Linux WebKit can stall playing a reopened canvas stream. Feed the QR frame directly while keeping real tracks.
+      const play = HTMLVideoElement.prototype.play;
+      HTMLVideoElement.prototype.play = async function () {
+        if (!currentFrame(this)) return play.call(this);
+        Object.defineProperties(this, {
+          readyState: { get: () => currentFrame(this) ? HTMLMediaElement.HAVE_CURRENT_DATA : HTMLMediaElement.HAVE_NOTHING },
+          videoWidth: { get: () => currentFrame(this)?.width ?? 0 },
+          videoHeight: { get: () => currentFrame(this)?.height ?? 0 },
+        });
+      };
+      const drawImage = CanvasRenderingContext2D.prototype.drawImage;
+      CanvasRenderingContext2D.prototype.drawImage = function (source, ...args: number[]) {
+        Reflect.apply(drawImage, this, [source instanceof HTMLVideoElement ? currentFrame(source) ?? source : source, ...args]);
+      };
+    }
+
     function cameraStream() {
       if (!frame) {
         if (source === 'denied') throw new DOMException('Fake camera denial', 'NotAllowedError');
@@ -29,11 +52,8 @@ async function fakeCamera(page: Page, source: 'denied' | 'live' | 'setup-qr-dire
       const context = canvas.getContext('2d')!;
       const image = new ImageData(new Uint8ClampedArray(frame.data), frame.width, frame.height);
       context.putImageData(image, 0, 0);
-      const stream = canvas.captureStream(10);
-      const timer = window.setInterval(() => {
-        if (!stream.active) window.clearInterval(timer);
-        else context.putImageData(image, 0, 0);
-      }, 100);
+      const stream = canvas.captureStream(0);
+      frames.set(stream.id, canvas);
       return stream;
     }
     Object.defineProperty(navigator, 'mediaDevices', {
