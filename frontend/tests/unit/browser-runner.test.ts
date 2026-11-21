@@ -37,6 +37,7 @@ if (args[0] === 'port') console.log(process.env.FAKE_BIND || '127.0.0.1:43210');
 `;
   executable('docker', runtime);
   executable('podman', runtime);
+  executable('node', record);
   executable('grep', 'process.exit(process.env.FAKE_FEDORA === "1" ? 0 : 1);');
   const result = spawnSync('bash', [runner, runnerConfig, ...args], {
     env: {
@@ -90,10 +91,23 @@ describe('browser test runner', () => {
     expect(launched.args).toContain('mcr.microsoft.com/playwright:v1.62.1-noble');
     expect(launched.args).toContain('HERDR_WEB_ROOT=../web');
     expect(launched.args.some((arg) => arg.endsWith(':/work/web:ro'))).toBe(true);
+    expect(launched.args.some((arg) => arg.endsWith(':/work/contracts:ro'))).toBe(true);
     expect(launched.args.slice(launched.args.indexOf('npx'))).toEqual([
       'npx', 'playwright', 'test', '--config', mainConfig, '--project=webkit-mobile',
       '--workers=3', '--output=/tmp/playwright-results', '--grep', 'caching',
     ]);
+    expect(result.calls.filter((call) => call.command === 'node').map((call) => call.args)).toEqual([
+      ['scripts/demo-site.mjs', '../web', 'test-results/container-demo'],
+    ]);
+    expect(launched.args).toContain('HERDR_DEMO_ROOT=/work/frontend/test-results/container-demo');
+  });
+
+  it('leaves the demo site to the container config when there is no build', () => {
+    const result = run({ HERDR_WEB_ROOT: '/nonexistent-herdr-build' }, ['--list'], mainConfig);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.calls.some((call) => call.command === 'node')).toBe(false);
+    const launched = result.calls.find((call) => call.command === 'docker' && call.args[0] === 'run')!;
+    expect(launched.args.some((arg) => arg.startsWith('HERDR_DEMO_ROOT='))).toBe(false);
   });
 
   it('rejects an invalid main-suite WebKit worker count', () => {
