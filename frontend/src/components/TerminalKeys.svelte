@@ -25,7 +25,6 @@
   let shiftArmed = $state(false);
   let altArmed = $state(false);
   let keyFeedback = $state('');
-  let keyFeedbackError = $state(false);
   const keySending = $derived(sending || blocked);
   const disabled = $derived(readOnly || blocked || !targetRefForAgent(agent));
   const { connections } = relayStore;
@@ -89,7 +88,9 @@
           activity_label: command.label,
         });
         command.resolve(true);
-        showKeyFeedback(keyResultMessage?.(result) || `${command.label} sent`);
+        const note = keyResultMessage?.(result);
+        if (note) relayStore.showToast(note);
+        showKeyFeedback(`${command.label} sent`);
         if (keyReadTimer) clearTimeout(keyReadTimer);
         keyReadTimer = setTimeout(() => {
           if (componentMounted && targetRefMatchesAgent(identity, agent)) relayStore.readPane(command.target);
@@ -97,7 +98,7 @@
       } catch (error) {
         command.resolve(false);
         const message = error instanceof Error ? error.message : 'Terminal keys could not be sent.';
-        showKeyFeedback('Key send failed', true);
+        showKeyFeedback('Key send failed');
         relayStore.showToast(message, true);
         for (const queued of keyQueue.splice(0)) queued.resolve(false);
       }
@@ -105,14 +106,12 @@
     sending = false;
   }
 
-  function showKeyFeedback(message: string, error = false) {
+  function showKeyFeedback(message: string) {
     if (!componentMounted) return;
     if (keyFeedbackTimer) clearTimeout(keyFeedbackTimer);
     keyFeedback = message;
-    keyFeedbackError = error;
     keyFeedbackTimer = setTimeout(() => {
       keyFeedback = '';
-      keyFeedbackError = false;
     }, 2_000);
   }
 
@@ -264,9 +263,7 @@
 
 
 <div>
-    {#if keyControlStatus}
-      <p class:error={keyFeedbackError} class="key-feedback" role="status" aria-live="polite">{keyControlStatus}</p>
-    {/if}
+    <p class="sr-only" role="status" aria-live="polite">{keyControlStatus}</p>
     <div class="term-keys" aria-busy={keySending}>
       <Button variant="secondary" size="sm" disabled={disabled} onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Escape')}>Esc</Button>
       <Button variant="secondary" size="sm" disabled={disabled} aria-label="Tab" title="Send Tab" onpointerdown={(event) => event.preventDefault()} onclick={sendTab}>{@render tabIcon()}</Button>
