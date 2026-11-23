@@ -27,6 +27,7 @@
   import { ConversationLiveReader, LIVE_MAX_BYTES, type LiveReaderState } from '$lib/conversation-live';
   import { ConversationMessageStateStore } from '$lib/conversation-message-state';
   import { CommandError } from '$lib/command-error';
+  import { fileLinkContext } from '$lib/file-links';
   import { relayStore } from '$lib/store';
   import { stripAnsi } from '$lib/terminal';
   import { terminalTextInputMode } from '$lib/terminal-menu';
@@ -41,6 +42,7 @@
   }: { agent: Agent; readOnly?: boolean; frame?: TerminalFrame; responding?: Set<string>; onInitialPage?: (page: ConversationPage) => void } = $props();
 
   const connections = relayStore.connections;
+  const fileLinks = $derived(fileLinkContext(agent, $connections.get(agent.relay_id)));
   const paneConnectionStatus = $derived($connections.get(agent.relay_id)?.status);
   const paneStateIdentity = $derived(JSON.stringify(targetRefForAgent(agent)));
   $effect(() => {
@@ -89,6 +91,7 @@
   let sourceChangedNotice = $state('');
   let query = $state('');
   let mode = $state<'conversation' | 'activity'>('conversation');
+  const showDiffs = $derived(mode === 'activity' && $connections.get(agent.relay_id)?.capabilities.includes('conversation_edit_diffs') === true);
   let listElement = $state<HTMLElement>(null!);
   let streamElement = $state<HTMLElement>(null!);
   /**
@@ -719,7 +722,7 @@
                 <ConversationMessageActions {entry} {agent} {agentName} />
               </span>
             </header>
-            <ConversationMessage role={entry.role} viewState={messageStates.get(entry.id)} text={entry.text} tools={entry.tools} highlight={query.trim()} awaiting={entry.id === waitingQuestionEntryId ? (questionFormShown ? 'below' : 'elsewhere') : null} />
+            <ConversationMessage role={entry.role} viewState={messageStates.get(entry.id)} text={entry.text} tools={entry.tools} {showDiffs} highlight={query.trim()} {fileLinks} awaiting={entry.id === waitingQuestionEntryId ? (questionFormShown ? 'below' : 'elsewhere') : null} />
             {#if entry.id.startsWith('live:')}<small>Live · not saved yet</small>{/if}
             {#if entry.truncated}<small>Long turn truncated by the relay.</small>{/if}
           </article>

@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -44,6 +45,60 @@ func TestConversationFeedJournalIsBoundedAndSignalsChanges(t *testing.T) {
 	feed.publish(conversationBatch{Kind: "reset", SourceRevision: "fixture:2", Sequence: 1})
 	if len(feed.batches) != 1 || feed.batches[0].Remove == nil || feed.batches[0].Entries == nil {
 		t.Fatal("source reset must discard replay and normalize empty lists")
+	}
+}
+
+func TestPiEditDiffPageAndBatchCopies(t *testing.T) {
+	running := conversation.ToolActivity{ID: "edit", Name: "edit", Input: `{"path":"a.go","oldText":"old","newText":"new"}`, State: "running"}
+	shortened := running
+	shortened.ID, shortened.Truncated = "shortened", true
+	provisional := conversation.Entry{ID: "live:tools", Role: "assistant", Tools: []conversation.ToolActivity{running, shortened}}
+	page := conversation.BrowsePage{Provisional: []conversation.Entry{provisional}, SubscriptionID: "subscriber", Sequence: 1}
+	observed := page.WithEditDiffs("PiCodingAgent")
+	tool := observed.Provisional[0].Tools[0]
+	if tool.ID != running.ID || tool.State != "running" || tool.Diff == nil || tool.Diff.Text != "-old\n+new" || observed.Provisional[0].Tools[1] != shortened || page.Provisional[0].Tools[0] != running {
+		t.Fatalf("projected = %+v, source = %+v", observed.Provisional[0].Tools, page.Provisional[0].Tools)
+	}
+	completed := running
+	completed.State, completed.Output = "completed", "saved"
+	shared := conversationBatch{Sequence: 2, SubscriptionID: "subscriber", Kind: "batch", Entries: []conversation.Entry{{ID: "pi:completed", Role: "assistant", Tools: []conversation.ToolActivity{completed}}}}
+	tool = shared.withEditDiffs("pi").Entries[0].Tools[0]
+	if tool.ID != running.ID || tool.State != "completed" || tool.Output != "saved" || tool.Diff == nil || *tool.Diff != *observed.Provisional[0].Tools[0].Diff || shared.Entries[0].Tools[0] != completed {
+		t.Fatalf("completed = %+v, source = %+v", tool, shared.Entries[0].Tools[0])
+	}
+}
+
+func TestConversationLiveEditDiffBudget(t *testing.T) {
+	tool := conversation.ToolActivity{ID: "edit", Name: "write", Input: `{"path":"a","content":"` + strings.Repeat("<日", 2000) + `\nnext"}`, Output: "saved"}
+	batch := conversationBatch{Kind: "batch", Sequence: 7, SourceRevision: "revision", SubscriptionID: rand.Text(), Entries: []conversation.Entry{{ID: "live:entry", Role: "assistant"}}, Remove: []string{}, Capabilities: &conversation.SourceCapabilities{Source: "pi_events"}}
+	for len(batch.Entries[0].Tools) < 48 {
+		batch.Entries[0].Tools = append(batch.Entries[0].Tools, tool)
+	}
+	base, _ := json.Marshal(batch)
+	for _, remaining := range []int{0, 200, 10_000} {
+		batch.Entries[0].Text = strings.Repeat("x", conversationFeedBytes-len(base)-len(`,"text":""`)-remaining)
+		feed := &conversationFeed{ready: make(chan struct{}), notify: make(chan struct{})}
+		published := batch
+		published.SubscriptionID = ""
+		feed.publish(published)
+		if len(feed.batches) != 1 || feed.batches[0].Kind != "batch" {
+			t.Fatalf("raw batch with %d bytes to spare was not retained", remaining)
+		}
+		replay := feed.batches[0]
+		replay.SubscriptionID = batch.SubscriptionID
+		response := replay.withEditDiffs("pi")
+		wire, err := json.Marshal(response)
+		if err != nil || len(wire) > conversationFeedBytes || remaining == 0 && len(wire) != conversationFeedBytes || response.SubscriptionID != batch.SubscriptionID || response.Sequence != batch.Sequence {
+			t.Fatalf("encoded bytes = %d, error = %v", len(wire), err)
+		}
+		tools := response.Entries[0].Tools
+		last := tools[len(tools)-1]
+		if len(tools) != len(batch.Entries[0].Tools) || last.Input != tool.Input || last.Output != tool.Output || batch.Entries[0].Tools[len(tools)-1].Diff != nil {
+			t.Fatal("fitting changed the raw tools or the shared batch")
+		}
+		if remaining == 0 && last.Diff != nil || remaining > 0 && (last.Diff == nil || last.Diff.Added != 2 || !last.Diff.Truncated || !strings.HasPrefix(last.Diff.Text, "+<日")) {
+			t.Fatalf("remaining = %d, preview = %+v", remaining, last.Diff)
+		}
 	}
 }
 

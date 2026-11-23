@@ -93,14 +93,15 @@ func (b *Browser) readKimiPage(ctx context.Context, request BrowseRequest) (Brow
 	if code != "" {
 		return browseUnavailable(code, kimiReason(code)), nil
 	}
-	page := b.nativePage(request.Scope, entries, start > 0, false, len(projection.entries), "", revision, cursor)
-	page.Diagnostics.ContinuationIncomplete = projection.metadata.diagnostics.ContinuationIncomplete
-	page.Diagnostics.ContinuationReason = projection.metadata.diagnostics.ContinuationReason
-	page.Capabilities = &SourceCapabilities{Source: "recorded_history", ActiveBranch: true}
+	diagnostics := BrowseDiagnostics{
+		ContinuationIncomplete: projection.metadata.diagnostics.ContinuationIncomplete,
+		ContinuationReason:     projection.metadata.diagnostics.ContinuationReason,
+	}
+	page := b.nativePage(request, entries, start > 0, false, diagnostics, len(projection.entries), "", revision, cursor)
 	if !b.reader.KimiSelectionCurrent(request.Scope) {
 		return browseUnavailable("source_changed", "Kimi session changed. Start again from the latest messages."), nil
 	}
-	return b.enforcePageBudget(page), nil
+	return page, nil
 }
 
 func (r *Reader) kimiChangeToken(ctx context.Context, scope BrowseScope) (string, error) {

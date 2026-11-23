@@ -1,6 +1,9 @@
 import { CommandError } from './command-error';
+import type { FileTarget } from './file-links';
 import { relayStore } from './store';
 import type { Agent, WorkspaceFile, WorkspaceGitDiff, WorkspaceGitStatus, WorkspaceTree } from './types';
+
+export type WorkspaceFileTarget = FileTarget & Pick<Agent, 'pane_id' | 'cwd'>;
 
 function workspaceInspectionAvailable(agent: Agent): void {
   const connection = relayStore.connection(agent.relay_id);

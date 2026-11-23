@@ -12,7 +12,8 @@ setup and want to know what every screen and control is for.
 - Start, rename, clear, and stop agents from relay-provided launch profiles.
 - Send prompts, atomic terminal text-and-key input, slash commands, and
   cancellable attachment batches; drafts survive locally for 48 hours. Search
-  loaded terminal output and open explicit HTTP(S) links.
+  loaded terminal output, open explicit HTTP(S) links, and tap workspace file
+  links in Terminal or Conversation to preview them read-only.
 - Answer approvals bound to the current prompt, command, and ordered choices
   from Codex, Claude Code, Qoder, Oh My Pi, and Pi, plus structured questions
   from those agents and OpenCode.
@@ -133,6 +134,14 @@ handshake consumes the invitation. Create a separate invitation for every
 additional controller or reader, or print the setup link again on the
 computer: every print arms the relay's bootstrap for one more phone.
 
+To add a computer from inside the app, tap **Scan QR Code** on the home screen
+before any computers are configured, or in **Settings → Relays** at any time.
+Allow camera access and point the camera at the setup or invitation QR code.
+If access is denied, allow it in your browser or system settings and open the
+scanner again. You can still open the setup link or add the relay in Settings.
+On iPhone and iPad, the scanner is available in the Home Screen app, not in
+Safari tabs. iOS may ask for camera permission each time you open it.
+
 The demo shows fictional devices and an invitation preview. It creates no
 invitation: the sample QR contains only the text `Herdr demo`, not a setup link.
 
@@ -145,10 +154,35 @@ mobile browsers often provide no useful console. Copy or photograph its text
 for a bug report, then tap the banner to dismiss it; a later independent error
 will display a new banner.
 
+## Push notifications
+
+When an agent's approval or question changes, the relay cancels any unsent
+alert for the old request, including retries. It withdraws an old alert only
+if the push service already accepted it.
+
+The relay has five minutes to send a waiting alert. After accepting it, the
+push provider can hold it for an unreachable phone for up to 24 hours from
+the alert's creation. The relay does not retry for a day. The provider can
+replace an undelivered alert with its withdrawal or a newer alert for that
+pane. This is best effort: providers can limit retention and storage, and
+a withdrawal lasts only five minutes. If it doesn't arrive, an old alert
+already on screen can remain, but tapping it won't open an answered or
+replaced request.
+
+The provider can only replace messages it hasn't delivered. With an updated
+app and relay, a newer waiting alert also replaces an older waiting alert
+already on screen for that pane, without another push. Alerts shown before
+the update aren't grouped with new ones. An older app can still receive
+an alert after being offline, but may leave both alerts on screen if it
+missed the withdrawal. Connections to older relays keep their original
+delivery and display behavior.
+
 ## Opening links from other apps on iOS
 
-External links open in Safari, not the installed Home Screen app. To use those
-links, pair Safari as its own device: in the Home Screen app, choose
+External links open in Safari, not the installed Home Screen app. To add a
+computer to the Home Screen app, use **Scan QR Code** there instead. To follow
+notification or agent links from other apps, pair Safari as its own device:
+in the Home Screen app, choose
 **Settings → Devices → Invite Device**, open that invitation in Safari, then
 choose **Pair this browser instead** and confirm. Safari is listed and revocable
 separately; its one-use invitation cannot also pair the Home Screen app.
@@ -249,9 +283,19 @@ notification missed while disconnected.
 
 **Inspect Workspace** is read-only and is available only when the connected
 relay advertises workspace inspection and the agent reports a working
-directory. The relay confines reads to that directory, skips symlinks and
-common generated directories, and returns at most 4,000 tree entries. Text
-previews are limited to 1 MiB and image previews to 5 MiB.
+directory. The relay confines reads to that directory and refuses symlinks.
+The file list hides common generated directories and shows at most 4,000
+entries. Text previews are limited to 1 MiB and image previews to 5 MiB.
+
+When **Inspect Workspace** is available, paths in Terminal and Conversation
+become links if they have a directory part and a file extension. Bare names
+and paths in fenced code stay plain. Paths are resolved from the agent's
+working directory; absolute and `~/` paths only link inside it. Tap to open a
+read-only preview, scrolled to the referenced line for suffixes such as `:42`,
+`:42:7`, `:42-50`, `#L42`, or `#L42C7`. Links can open files hidden from the
+file list. If a file can't be opened, the preview names it and explains why.
+This works for readers and controllers on both Herdr TUI and herdr-core
+relays that offer workspace inspection, without a relay update.
 
 Git inspection disables hooks, pagers, text conversion, external diffs, lazy
 fetches, and user/system Git configuration. Status is limited to 2,000 changed
@@ -259,6 +303,32 @@ files, individual unified diffs to 1 MiB, and Git commands to eight seconds.
 On narrow screens, swipe the file or changed-file sidebar left to collapse it;
 the adjacent sidebar button restores it. Pinch the diff or use its zoom
 controls to resize it without changing the rest of the app.
+
+### Live questions when an agent looks idle
+
+With the idle question probe on, the TUI and core relays check supported agents
+that just stopped working or waiting for input. They also check idle or done
+agents that have an active **Resize Session** lease, and recheck agents already
+pinned by the probe. The relay does not scan other idle panes. These checks
+share four visible-screen reads per reconcile cycle, one at a time; waiting
+panes take turns.
+
+The screen must show a complete, recognised dialog, not an old question or a
+printed menu. Recognised layouts include Claude Code questions (including
+review screens and known hints wrapped across two or three rows) and file
+approvals, Oh My Pi and Pi Ask boxes and tool approvals, Codex questions and
+plan approvals, Qoder and OpenCode questions, and the recognised Hermes and
+Antigravity permission dialogs. Cropped dialogs and unknown status rows are
+ignored. Reader devices can see the pin; a controller is required to answer,
+and the relay checks the live dialog again before sending input.
+
+A pin ends as soon as Herdr reports the agent working. Otherwise it takes two
+successful checks without the dialog, at least two seconds apart. A busy queue
+or failed reads can make dismissal take longer. Updated phones clear the pin
+on the relay's first confirmed update; older phones can show the choices but
+keep their usual dismissal delay. Updating only the phone does not enable the
+probe on an older relay. To disable it, set `HERDR_RELAY_IDLE_QUESTION_PROBE=0`
+in the relay's environment and restart it.
 
 ## Mobile terminal
 
@@ -349,6 +419,16 @@ preference that shows every recorded message with collapsible tool activity
 the app remembers either mode on this device. Both use an escaped Markdown subset, search filters the
 currently displayed view, each fenced code block has its own copy control, and
 each message can copy its original Markdown.
+
+In **Full history**, open an edit's tool card to see the recorded path and the
+requested added and removed lines. A write shows **Written content**: all
+supplied lines count as additions, even when the tool overwrites a file. The
+result or error remains below the preview, so the diff is not proof of success.
+**Diff truncated** means only the beginning of the change is shown; the counts
+still cover the whole recorded change. Unsupported or shortened inputs, and
+relays without edit previews, show the ordinary tool payload instead. Readers
+see the same cards as controllers on either relay; the cards do not apply edits.
+
 Conversation and Full history share the Terminal composer: multiline prompts,
 locally shared drafts, slash-command suggestions, photos/files and pasted images.
 Slash suggestions fill the draft without sending it; Ctrl/Meta+Enter sends it.
@@ -544,17 +624,25 @@ Terminal Refresh controls how often the relay checks a visible pane: 100 ms,
 visible matches, and moves between the first 1,000 of them.
 
 Explicit HTTP(S) URLs in terminal output become external links with opener and
-referrer isolation. When the last terminal lines name supported key hints such
-as arrows, Enter, Esc, Tab, Y/N, or a modifier chord, the app offers matching
+referrer isolation. Recognised workspace file paths open in the read-only
+workspace inspector instead.
+
+When the last terminal lines name supported key hints such as arrows, Enter,
+Esc, Tab, Y/N, or a modifier chord, the app offers matching
 one-tap actions through the same ordered key path. Detected actions can be
 dismissed and never replace verified approval or structured-question controls.
 
 The terminal controls send **Esc**, **Tab** (`⇥`), **Enter**, arrow keys, and
-**F1**–**F12** behind the **F keys** row. **Shift** (`⇧`), **Ctrl** (`^`), and
-**Alt** can be combined, remain armed for repeated input, and apply to typed
+**F1**–**F12** from the **F keys** menu. The **Arrow keys** menu also offers
+**Home**, **End**, **Page Up** and **Page Down** on both Herdr TUI and herdr-core
+once you update the relay. On the Herdr TUI relay, some full-screen programs may
+ignore **Home** and **End** without a modifier. **Shift** (`⇧`), **Ctrl** (`^`),
+and **Alt** can be combined, remain armed for repeated input, and apply to typed
 characters or any available terminal key — arm `^` and type `c` to interrupt.
-A live status confirms the exact chord. Toggle the modifiers off or move focus
-to the composer to disarm them.
+A tapped key briefly flashes, armed modifiers stay highlighted, and screen
+readers announce the exact chord that was sent; a failed send shows a
+notification. Toggle the modifiers off or
+move focus to the composer to disarm them.
 
 While the composer cannot send — the agent awaits an approval or question
 answer, or its pane needs inspection — the **Keyboard** button

@@ -1,6 +1,7 @@
 import type { Agent, AttentionKind, QuestionInteraction } from './types';
 import { stripAnsi } from './terminal';
 import { pathBase } from './paths';
+import { agentTargetsDiffer } from './resource-id';
 
 export type AgentKind = 'agy' | 'claude' | 'codex' | 'cursor' | 'grok' | 'hermes' | 'kimi' | 'omo' | 'omp' | 'opencode' | 'pi' | 'qoder';
 
@@ -210,6 +211,7 @@ export function normalizeAgent(
   relayLabel: string,
   agent: Partial<Agent>,
   attentionCapable = false,
+  idleProbeCapable = false,
 ): Agent {
   const rawPaneId = String(agent.raw_pane_id || agent.pane_id || '');
   return normalizeAgentAttention({
@@ -218,14 +220,15 @@ export function normalizeAgent(
     relay_label: relayLabel,
     raw_pane_id: rawPaneId,
     pane_id: clientPaneId(relayId, rawPaneId),
-  } as Agent, attentionCapable);
+  } as Agent, attentionCapable, idleProbeCapable);
 }
 
-export function normalizeAgentAttention(agent: Agent, capable: boolean): Agent {
+export function normalizeAgentAttention(agent: Agent, capable: boolean, idleProbeCapable = false): Agent {
   if (!rawBlocked(agent)) {
     return {
       ...agent,
       attention_capable: capable,
+      screen_attention: idleProbeCapable && agent.screen_attention === 'cleared' ? 'cleared' : undefined,
       attention_kind: undefined,
       options: undefined,
       approval_fingerprint: undefined,
@@ -236,6 +239,7 @@ export function normalizeAgentAttention(agent: Agent, capable: boolean): Agent {
   const next: Agent = {
     ...agent,
     attention_capable: capable,
+    screen_attention: idleProbeCapable && agent.screen_attention === 'waiting' ? 'waiting' : undefined,
     attention_kind: kind,
   };
   if (kind !== 'approval') {
@@ -270,6 +274,10 @@ export function stabilizeBlockedSnapshot(
 ): Agent {
   const paneId = next.pane_id;
   if (!paneId) return next;
+  if (next.screen_attention === 'cleared' || agentTargetsDiffer(previous, next)) {
+    misses.delete(paneId);
+    return next;
+  }
   const nextQuestion = rawBlocked(next)
     && attentionKind(next) === 'question'
     && Boolean(next.interaction);
@@ -300,7 +308,10 @@ export function stabilizeBlockedSnapshot(
 }
 
 export function mergeAgentDetails(previous: Agent | undefined, next: Agent): Agent {
-  if (!previous) return next;
+  if (next.screen_attention === 'cleared') {
+    next = { ...next, event_id: undefined, prompt: undefined, command: undefined };
+  }
+  if (!previous || agentTargetsDiffer(previous, next)) return next;
   const blocked = rawBlocked(next);
   const hasAttentionKind = Object.prototype.hasOwnProperty.call(next, 'attention_kind');
   const hasInteraction = Object.prototype.hasOwnProperty.call(next, 'interaction');

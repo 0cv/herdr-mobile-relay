@@ -32,6 +32,14 @@ func NewPaneSizer(client *Client) *PaneSizer {
 
 func (m *PaneSizer) Available() bool { return m != nil && m.client != nil }
 
+func (m *PaneSizer) Leased(paneID, terminalID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s := m.panes[paneID]
+	return !m.closed && s != nil && terminalID != "" && s.terminalID == terminalID &&
+		!s.attach.ended() && s.leases.HeldAt(m.now())
+}
+
 func (s *sizedPane) target(now time.Time) (int, int) {
 	cols, rows := s.leases.ActiveAt(now).Narrowest()
 	// Core attaches always specify both dimensions: width-only leases retain

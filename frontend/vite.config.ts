@@ -94,6 +94,12 @@ function stableReleaseAssets(): Plugin {
       const escapedWhitespaceTable = '" \\t\\n\\r\\f\\xA0\\v\\uFEFF"';
       appJavascript.code = appJavascript.code.replaceAll(whitespaceTable, escapedWhitespaceTable);
 
+      const scanner = bundle[`assets/SetupScanner-${versions.assets}.js`];
+      if (scanner?.type === 'chunk') {
+        const notice = readFileSync(new URL('./public/licenses/qr.txt', import.meta.url), 'utf8');
+        scanner.code = `/*!\n${notice}*/\n${scanner.code}`;
+      }
+
       this.emitFile({ type: 'asset', fileName: '_headers', source: pagesHeaders() });
       this.emitFile({ type: 'asset', fileName: 'setup.webmanifest', source: setupManifestSource() });
     },
@@ -122,6 +128,8 @@ export default defineConfig({
     outDir: 'dist',
     rollupOptions: {
       output: {
+        // The relay serves one initial script. Keep dependencies shared with lazy views in it.
+        codeSplitting: { groups: [{ name: 'app', tags: ['$initial'] }] },
         assetFileNames: (asset) => {
           const names = asset.names ?? [];
           return names.some((name) => name.endsWith('.css')) ? 'assets/app.css' : 'assets/[name][extname]';

@@ -21,6 +21,7 @@
     "slash_commands",
     "conversation_history",
     "conversation_activity",
+    "conversation_edit_diffs",
     "pane_size_opt_in",
     "pane_size_opt_in_rows",
     "workspace_inspection",
@@ -28,7 +29,8 @@
     "manual_terminal_input",
     "secret_input",
     "speech_voice_management",
-    "invitation_qr"
+    "invitation_qr",
+    "paging_keys"
   ],
   "herdr_status": {
     "installed_client_version": "0.9.0",

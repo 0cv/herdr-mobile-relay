@@ -22,8 +22,9 @@ func TestInventoryFailureClearsReadinessAndPreservesStaleSnapshot(t *testing.T) 
 		t.Fatal("inventory remained ready after a failed poll")
 	}
 	status := state.InventoryStatus()
-	if status["state"] != "error" || status["stale"] != true {
-		t.Fatalf("inventory status = %+v", status)
+	if status["state"] != "error" || status["stale"] != true ||
+		status["error_code"] != "command_failed" || status["message"] != "Unable to read the current Herdr agent inventory." {
+		t.Fatalf("inventory status = %+v, want generic error with stale inventory", status)
 	}
 	if state.AgentCount() != 1 {
 		t.Fatal("failed poll discarded the last known snapshot")
@@ -336,6 +337,40 @@ func TestInitialDoneAndDoneSynonymsDoNotPublishCompletion(t *testing.T) {
 	}
 }
 
+func TestWorkingTransitionCurrentSurvivesReportsButNotGenerationChanges(t *testing.T) {
+	for _, change := range []string{"explicit bump", "session change", "pane replacement"} {
+		t.Run(change, func(t *testing.T) {
+			s := testState()
+			pane := &AgentState{PaneID: "p1", TerminalID: "terminal-1", Status: "blocked"}
+			poll := func() { s.CommitInventory([]*AgentState{pane}, s.RevisionCounter()) }
+			poll()
+			if !s.CommitEvent(pane.PaneID, "working", 1) {
+				t.Fatal("missing working transition")
+			}
+			workingRevision := s.Revision(pane.PaneID)
+			s.CommitEvent(pane.PaneID, "working", 2)
+			pane.Status = "working"
+			poll()
+			if !s.WorkingTransitionCurrent(pane.PaneID, workingRevision) {
+				t.Fatal("repeat working reports invalidated the transition")
+			}
+			switch change {
+			case "explicit bump":
+				s.BumpGeneration(pane.PaneID)
+			case "session change":
+				pane.SessionID = "session-1"
+				poll()
+			case "pane replacement":
+				pane.TerminalID = "terminal-2"
+				poll()
+			}
+			if s.WorkingTransitionCurrent(pane.PaneID, workingRevision) {
+				t.Fatal("old working transition survived a new pane generation")
+			}
+		})
+	}
+}
+
 func TestFinishedRegistrationRequiresAttentionTransition(t *testing.T) {
 	s := testState()
 	s.CommitInventory([]*AgentState{{PaneID: "p1", Status: "working"}}, s.RevisionCounter())
@@ -431,8 +466,8 @@ func TestBlockedClassificationStartsUnknownAndCommitsUnderEventGuards(t *testing
 		Command: "make check",
 		Options: []string{"Approve", "Reject"},
 	}
-	current, ok := s.CommitAttentionClassification(
-		"p1", blocked.BlockedEventID, generation, s.ContentRevision("p1"), classification,
+	current, _, ok := s.CommitAttentionClassification(
+		"p1", blocked.BlockedEventID, generation, s.ContentRevision("p1"), classification, "",
 	)
 	if !ok || current.AttentionKind != question.AttentionApproval ||
 		len(current.Options) != 2 || current.StateRevision == blocked.StateRevision {
@@ -440,8 +475,8 @@ func TestBlockedClassificationStartsUnknownAndCommitsUnderEventGuards(t *testing
 	}
 
 	s.CommitEvent("p1", "working", 2000)
-	if _, ok := s.CommitAttentionClassification(
-		"p1", blocked.BlockedEventID, generation, s.ContentRevision("p1"), classification,
+	if _, _, ok := s.CommitAttentionClassification(
+		"p1", blocked.BlockedEventID, generation, s.ContentRevision("p1"), classification, "",
 	); ok {
 		t.Fatal("stale blocked classification committed after the status changed")
 	}
@@ -458,7 +493,7 @@ func TestInflightPollPreservesNewerBlockedClassification(t *testing.T) {
 	token := s.BeginPoll()
 	s.CommitEvent("p1", "blocked", 1000)
 	blocked, _ := s.Agent("p1")
-	if _, ok := s.CommitAttentionClassification(
+	if _, _, ok := s.CommitAttentionClassification(
 		"p1",
 		blocked.BlockedEventID,
 		s.Generation("p1"),
@@ -467,7 +502,7 @@ func TestInflightPollPreservesNewerBlockedClassification(t *testing.T) {
 			Kind:    question.AttentionApproval,
 			Command: "make check",
 			Options: []string{"Approve", "Reject"},
-		},
+		}, "",
 	); !ok {
 		t.Fatal("classification setup failed")
 	}
@@ -490,7 +525,7 @@ func TestTopologyCommitPreservesCurrentStatusAndAttention(t *testing.T) {
 	s.CommitInventory([]*AgentState{{PaneID: "p1", Agent: "codex", Status: "working"}}, 0)
 	s.CommitEvent("p1", "blocked", 1000)
 	blocked, _ := s.Agent("p1")
-	if _, ok := s.CommitAttentionClassification(
+	if _, _, ok := s.CommitAttentionClassification(
 		"p1",
 		blocked.BlockedEventID,
 		s.Generation("p1"),
@@ -498,7 +533,7 @@ func TestTopologyCommitPreservesCurrentStatusAndAttention(t *testing.T) {
 		question.Classification{
 			Kind:    question.AttentionApproval,
 			Options: []string{"Approve", "Reject"},
-		},
+		}, "",
 	); !ok {
 		t.Fatal("classification setup failed")
 	}

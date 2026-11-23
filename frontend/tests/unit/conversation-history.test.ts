@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { normalizeConversationPage } from '$lib/conversation-page';
+import { estimateEntriesBytes } from '$lib/conversation-values';
+import editFixture from '../../../contracts/fixtures/conversation_edit_diff.json';
 import unavailablePage from '../../../contracts/fixtures/conversation_unavailable.json';
 import {
   conversationIdentity,
@@ -7,7 +9,7 @@ import {
   HISTORY_ACTIVE_DEADLINE_MS,
   HISTORY_WIRE_PAGE_SIZE,
 } from '$lib/conversation-history';
-import type { Agent, ConversationEntry, ConversationHistoryRequest, ConversationPage } from '$lib/types';
+import type { Agent, ConversationEntry, ConversationHistoryRequest, ConversationPage, ConversationTool } from '$lib/types';
 
 function agent(rawPaneId = 'pane-1'): Agent {
   return {
@@ -787,6 +789,46 @@ describe('conversation history entry ownership', () => {
       expect(published.entries[1].tools).toBeUndefined();
       expect(published.entries[2].tools).toBeNull();
       expect(published.entries[3].tools).toEqual([]);
+    } finally {
+      controller.cancel();
+    }
+  });
+
+  it.each(['earlier page', 'committed live update'])('makes room for raw activity from a %s by dropping optional diffs', async (source) => {
+    const content = 'x'.repeat(210);
+    const rawTool = { name: 'write', input: JSON.stringify({ path: 'a', content }), output: 'saved' };
+    const small: ConversationTool = { ...editFixture, diff: { ...editFixture.diff, kind: 'edit' } };
+    const large: ConversationTool = {
+      ...rawTool, diff: { kind: 'write', path: 'a', added: 1, removed: 0, text: `+${content}`, truncated: false },
+    };
+    const olderEdit = entry('older-edit', 'assistant', '', [large]);
+    const recentEdit = entry('recent-edit', 'assistant', '', [small]);
+    const recent = [entry('head', 'user'), recentEdit];
+    const earlier = entry('earlier', 'user');
+    const paging = source === 'earlier page';
+    const initial = paging ? recent : [earlier, olderEdit];
+    const limit = estimateEntriesBytes([earlier, { ...olderEdit, tools: [rawTool] }, ...recent]);
+    const request = vi.fn()
+      .mockResolvedValueOnce(page({ entries: initial, sourceRevision: 'r', hasMore: true, nextCursor: 'older' }))
+      .mockResolvedValueOnce(page({ entries: [earlier, olderEdit], sourceRevision: 'r', hasMore: true, nextCursor: 'earliest' }));
+    const controller = new ConversationHistoryController(agent(), { request, maxContentBytes: limit });
+    try {
+      controller.start();
+      await vi.waitFor(() => expect(controller.state.authoritative).toBe(true));
+      if (paging) {
+        controller.demandOlder();
+        await vi.waitFor(() => expect(controller.state.nextCursor).toBe('earliest'));
+      } else {
+        expect(controller.state.entries[1].tools![0].diff).toEqual(large.diff);
+        expect(controller.applyLiveEntries('r', recent, 1)).toBe(true);
+        expect(controller.state.nextCursor).toBe('older');
+      }
+      expect(controller.state.error).toBeNull();
+      expect(controller.state.entries.map(({ id }) => id)).toEqual(['earlier', 'older-edit', 'head', 'recent-edit']);
+      expect(controller.state.entries[1].tools![0]).toEqual({ ...rawTool, diff: undefined });
+      expect(controller.state.entries[3].tools![0].diff).toEqual(small.diff);
+      expect(estimateEntriesBytes(controller.state.entries)).toBe(limit);
+      expect(olderEdit.tools![0].diff).toEqual(large.diff);
     } finally {
       controller.cancel();
     }

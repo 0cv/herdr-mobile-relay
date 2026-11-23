@@ -1,7 +1,7 @@
 import { CommandError } from './command-error';
 import { parseWireSafeInteger } from './protocol';
 import { isRecord } from './record';
-import type { ConversationPage, OmoTodoState } from './types';
+import type { ConversationEditDiff, ConversationPage, OmoTodoState } from './types';
 
 function normalizeOmoTodoState(value: unknown): OmoTodoState | undefined {
   if (!isRecord(value)) return undefined;
@@ -52,10 +52,22 @@ function conversationCapabilities(value: unknown): import('./types').Conversatio
   return { source: raw.source, active_branch: browseBoolean(raw.active_branch) };
 }
 
-export function normalizeConversationBatch(value: unknown): import('./types').ConversationBatch {
+export function normalizeConversationBatch(value: unknown, editDiffs = false): import('./types').ConversationBatch {
   const raw = browseRecord(value, true)!;
-  if (!['batch', 'reset', 'heartbeat'].includes(raw.kind) || !Array.isArray(raw.remove) || raw.remove.length > 200 || JSON.stringify(raw).length > 2 * 1024 * 1024) invalidBrowse();
-  const page = normalizeConversationPage({ available: true, has_more: false, entries: raw.entries || [], state: 'ready', mode: 'recent', source_revision: raw.source_revision });
+  if (!['batch', 'reset', 'heartbeat'].includes(raw.kind) || !Array.isArray(raw.remove) || raw.remove.length > 200) invalidBrowse();
+  const entries = Array.isArray(raw.entries) ? raw.entries.map((entry) => {
+    if (!Array.isArray(entry?.tools)) return entry;
+    return { ...entry, tools: entry.tools.map((tool: unknown) => {
+      const record = browseRecord(tool);
+      if (!record || !('diff' in record)) return tool;
+      return { ...record, diff: toolEditDiff(record, editDiffs) };
+    }) };
+  }) : raw.entries;
+  if (encoder.encode(JSON.stringify({ ...raw, entries })).length > 2 * 1024 * 1024) {
+    if (editDiffs) return normalizeConversationBatch(value, false);
+    invalidBrowse();
+  }
+  const page = normalizeConversationPage({ available: true, has_more: false, entries: entries || [], state: 'ready', mode: 'recent', source_revision: raw.source_revision }, editDiffs);
   return { subscriptionId: browseString(raw.subscription_id, 128, true), kind: raw.kind, sourceRevision: page.sourceRevision || '', sequence: browseCount(raw.sequence), entries: page.entries, remove: raw.remove.map((id: unknown) => browseString(id, 256, true)), state: browseString(raw.state, 32), capabilities: conversationCapabilities(raw.capabilities) };
 }
 
@@ -96,7 +108,38 @@ function browseBoolean(value: unknown, optional = false): boolean {
   return value;
 }
 
-export function normalizeConversationPage(value: unknown): ConversationPage {
+const encoder = new TextEncoder();
+
+function toolEditDiff(tool: Record<string, unknown>, enabled: boolean): ConversationEditDiff | undefined {
+  return enabled && tool.truncated !== true ? normalizeEditDiff(tool.diff) : undefined;
+}
+
+function normalizeEditDiff(value: unknown): ConversationEditDiff | undefined {
+  const diff = browseRecord(value);
+  if (!diff) return;
+  const { kind, path, added, removed, text, truncated } = diff;
+  if ((kind !== 'edit' && kind !== 'write') || typeof path !== 'string' || !path.trim() || path.length > 1024
+    || typeof text !== 'string' || text.length > 8192 || typeof truncated !== 'boolean'
+    || !Number.isSafeInteger(added) || added < 0 || !Number.isSafeInteger(removed) || removed < 0
+    || /\p{Cc}|\p{Cs}/u.test(path) || /[^\P{Cc}\n\t]|\p{Cs}/u.test(text)
+    || encoder.encode(path).length > 1024 || encoder.encode(text).length > 8192) return;
+  if (!text) return kind === 'write' && added === 0 && removed === 0 && !truncated ? { kind, path, added, removed, text, truncated } : undefined;
+  const rows = text.split('\n');
+  if (rows.length > 200) return;
+  let plus = 0;
+  let minus = 0;
+  let gap = true;
+  for (const row of rows) {
+    if (row[0] === '+') plus++;
+    else if (row[0] === '-') minus++;
+    else if (row !== '@@' || gap) return;
+    gap = row === '@@';
+  }
+  if (gap || (kind === 'write' && removed !== 0) || plus > added || minus > removed || (!truncated && (plus !== added || minus !== removed))) return;
+  return { kind, path, added, removed, text, truncated };
+}
+
+export function normalizeConversationPage(value: unknown, editDiffs = false): ConversationPage {
   const data = browseRecord(value, true)!;
   if (typeof data.available !== 'boolean' || typeof data.has_more !== 'boolean' || !Array.isArray(data.entries) || data.entries.length > 200) invalidBrowse();
   const entries = data.entries.flatMap((candidate: unknown) => {
@@ -106,7 +149,9 @@ export function normalizeConversationPage(value: unknown): ConversationPage {
     const tools = (Array.isArray(entry.tools) ? entry.tools : []).slice(0, 128).flatMap((candidateTool: unknown) => {
       const tool = browseRecord(candidateTool);
       if (!tool) return [];
+      const diff = toolEditDiff(tool, editDiffs);
       return [{
+        ...(diff ? { diff } : {}),
         id: browseIdentity(tool.id, 256), name: browseText(tool.name, 160) || 'Tool',
         input: browseText(tool.input, 1_048_576), output: browseText(tool.output, 1_048_576),
         ...(tool.state === 'running' || tool.state === 'completed' || tool.state === 'failed' ? { state: tool.state } : {}),
@@ -158,7 +203,7 @@ export function normalizeConversationPage(value: unknown): ConversationPage {
   if (data.provisional != null && (!Array.isArray(data.provisional) || data.provisional.length > 16)) invalidBrowse();
   return {
     subscriptionId: browseString(data.subscription_id, 128),
-    provisional: data.provisional ? normalizeConversationPage({ available: true, has_more: false, entries: data.provisional, mode: 'recent', state: 'ready' }).entries : undefined,
+    provisional: data.provisional ? normalizeConversationPage({ available: true, has_more: false, entries: data.provisional, mode: 'recent', state: 'ready' }, editDiffs).entries : undefined,
     capabilities: conversationCapabilities(data.capabilities), sequence: browseCount(data.sequence), liveState: browseString(data.live_state, 32),
     available: data.available, reason: browseString(data.reason, 512), reasonCode: browseString(data.reason_code, 64) || undefined, entries,
     nextCursor: cursor, hasMore: data.has_more, total: data.total == null ? null : browseCount(data.total),

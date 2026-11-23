@@ -12,9 +12,9 @@ var (
 	claudeReviewPattern      = regexp.MustCompile(`(?i)^\s*([❯›]?)\s*(\d+)\.\s*(submit answers|cancel)\s*$`)
 	claudeActiveTabPattern   = regexp.MustCompile(`\x1b\[[^m]*48[^m]*m`)
 	claudeSessionRulePattern = regexp.MustCompile(`^─{3,} \S.* ─$`)
-	claudeTaskPanelPattern   = regexp.MustCompile(
-		`^(?:\d+ tasks? \(\d+ done, (?:\d+ in progress, )?\d+ open\)|[◻◼✔] \S.*|… \+\d+ (?:in progress|pending|completed)(?:, \d+ (?:pending|completed))*)$`,
-	)
+	claudeTaskCount          = regexp.MustCompile(`^\d+ tasks? \(\d+ done, (?:\d+ in progress, )?\d+ open\)$`)
+	claudeTaskItem           = regexp.MustCompile(`^[◻◼✔] \S.*$`)
+	claudeTaskSummary        = regexp.MustCompile(`^… \+\d+ (?:in progress|pending|completed)(?:, \d+ (?:pending|completed))*$`)
 )
 
 func parseClaude(p *pane) *Interaction {

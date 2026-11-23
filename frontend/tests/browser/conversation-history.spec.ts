@@ -1,7 +1,8 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import { scrollConversationToBottom, showOlderConversationEntry } from '../support/journey-conversation';
-import { captureClipboard, copiedText, distanceFromBottom } from '../support/journey-device';
-import { commands, composerTarget, connectFedora, reply, server, setAutoCommands, setConversationFixture } from '../support/journey-relay';
+import { captureClipboard, copiedText, distanceFromBottom, saveDeviceCredential } from '../support/journey-device';
+import { boot, closeSocket, commands, composerTarget, connectFedora, fedora, handshake, lastCommand, reply, server, setAutoCommands, setConversationFixture, socketCount, type ConversationFixture } from '../support/journey-relay';
+import editFixture from '../../../contracts/fixtures/conversation_edit_diff.json' with { type: 'json' };
 
 test('reads and replies from native conversation history', async ({ page }) => {
   await page.addInitScript(() => {
@@ -250,6 +251,85 @@ test('shows tool-only agent turns only in full history and decodes their argumen
   await expect(panels.nth(1)).toContainText('line-199');
   await card.getByRole('button', { name: 'Show less' }).click();
   await expect(panels.nth(1)).not.toContainText('line-199');
+});
+
+test('a reader reviews edit previews by keyboard only on the advertising relay', async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem('herdr_default_agent_view', 'conversation');
+    localStorage.setItem('herdr-conversation-view', 'activity');
+  });
+  const older = { id: 'older', label: 'Older relay', url: 'ws://127.0.0.1:8872', token: '' };
+  await boot(page, [fedora, older]);
+  await expect.poll(() => socketCount(page)).toBe(2);
+  await saveDeviceCredential(page, { id: 'credential-reader', deviceId: 'device-reader', secret: 'R'.repeat(43), role: 'reader' });
+  await page.evaluate(() => {
+    const auth = JSON.parse(localStorage.getItem('herdr_device_auth_v1')!);
+    auth.relays.older = { ...auth.relays.fedora, id: 'older-reader', deviceId: 'older-device' };
+    localStorage.setItem('herdr_device_auth_v1', JSON.stringify(auth));
+  });
+  await handshake(page, 0, { capabilities: ['conversation_history', 'conversation_activity', 'conversation_edit_diffs'] });
+  await handshake(page, 1, { capabilities: ['conversation_history'] });
+  const agent = { status: 'working', agent: 'codex', conversation_history_available: true };
+  await server(page, 0, { type: 'agents', agents: [{ ...agent, project: 'Edit history', pane_id: 'w1:p1', agent_session_id: 'edit-session' }] });
+  await server(page, 1, { type: 'agents', agents: [{ ...agent, project: 'Raw history', pane_id: 'w1:p2', agent_session_id: 'raw-session' }] });
+  const edit = { id: 'edit', timestamp: '', role: 'assistant', tools: [{ ...editFixture, state: 'running' }] };
+  const written = { id: 'write', timestamp: '', role: 'user', text: 'Record this write', tools: [{ name: 'write', input: '{"path":"src/log.txt","content":"first"}', diff: { kind: 'write', path: 'src/log.txt', added: 300, removed: 0, text: '+first', truncated: true } }] };
+  const read = { id: 'read', timestamp: '', role: 'assistant', tools: [{ name: 'Read', output: Array.from({ length: 80 }, (_, index) => `ordinary output ${index}`).join('\n') }] };
+  const question = { id: 'question', timestamp: '', role: 'assistant', tools: [{ name: 'AskUserQuestion', input: JSON.stringify({ questions: [{ question: 'Use this change?', options: [{ label: 'Yes' }, { label: 'No' }] }] }), output: 'The user answered: "Use this change?"="Yes". Read the answers carefully.' }] };
+  const capabilities = { source: 'recorded_history', active_branch: false };
+  await setConversationFixture(page, { entries: [edit, written, read, question], total: 4, sourceRevision: 'edit:1', capabilities, sequence: 1 });
+  await page.getByRole('button', { name: 'Open Edit history on Fedora' }).click();
+  const card = page.locator('details').filter({ has: page.getByText('apply_patch', { exact: true }) });
+  const summary = card.locator('summary');
+  await expect(summary).toHaveAccessibleName(/apply_patch main\.go 1 line added, 2 lines removed running/);
+  await expect(card.locator('.workspace-diff-line')).toHaveCount(0);
+  await summary.focus();
+  await summary.press('Enter');
+  await expect(card.getByText('src/main.go', { exact: true })).toBeVisible();
+  await expect(card.locator('.diff-hunk')).toHaveText('@@');
+  await expect(card.locator('.diff-deletion')).toHaveText(['-old', '-gone']);
+  await expect(card.getByText('Input', { exact: true })).toHaveCount(0);
+  await expect(page.getByRole('combobox', { name: 'Prompt', exact: true })).toBeDisabled();
+
+  const update = await lastCommand(page, 'get_conversation_updates', 0);
+  await reply(page, update, { subscription_id: 'fixture-subscription', kind: 'batch', source_revision: 'edit:1', sequence: 2,
+    entries: [{ ...edit, tools: [{ ...editFixture, state: 'failed', error: true, output: 'Could not save this edit' }] }], remove: [], state: 'recorded', capabilities });
+  await expect(card.getByText('Could not save this edit', { exact: true })).toBeVisible();
+  await expect(card.locator('.diff-addition')).toHaveText('+new');
+
+  const search = page.getByRole('searchbox', { name: 'Search loaded conversation' });
+  await search.fill('context hint');
+  await expect(card).toBeVisible();
+  await expect(page.getByText('Use this change?', { exact: true })).toBeHidden();
+  await search.clear();
+  const writeCard = page.locator('[data-conversation-entry-id="write"] details');
+  await writeCard.locator('summary').click();
+  await expect(writeCard.getByLabel('Written content')).toBeVisible();
+  await expect(page.getByText('Diff truncated', { exact: true })).toBeVisible();
+  const rawRead = page.locator('details').filter({ has: page.getByText('Read', { exact: true }) });
+  await rawRead.locator('summary').click();
+  await rawRead.getByRole('button', { name: 'Show all 80 lines' }).click();
+  await expect(rawRead.locator('pre')).toContainText('ordinary output 79');
+
+  await page.getByRole('button', { name: 'Conversation', exact: true }).click();
+  await expect(card).toBeHidden();
+  await expect(page.getByText('Use this change?', { exact: true })).toBeVisible();
+  await expect(writeCard.locator('summary')).toHaveAccessibleName('write called');
+  await expect(writeCard.getByText('Input', { exact: true })).toBeVisible();
+  await expect(writeCard.locator('pre')).toContainText('path: src/log.txt');
+  await expect(writeCard.locator('.workspace-diff-line')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Full history', exact: true }).click();
+  await expect(card.getByText('Could not save this edit', { exact: true })).toBeVisible();
+  await expect(writeCard.getByLabel('Written content')).toBeVisible();
+  await page.getByRole('button', { name: 'Back', exact: true }).click();
+  await page.getByRole('button', { name: 'Open Raw history on Older relay' }).click();
+  await expect(summary).toHaveAccessibleName('apply_patch running');
+  await summary.click();
+  await expect(card.getByText('Input', { exact: true })).toBeVisible();
+  await expect(card.locator('pre')).toContainText('context hint');
+  await expect(card.locator('.workspace-diff-line')).toHaveCount(0);
+  const readCommands = new Set(['refresh_agents', 'get_conversation_history', 'get_conversation_updates', 'unwatch_conversation', 'read_pane', 'push_viewed_pane']);
+  expect((await commands(page)).filter(command => !readCommands.has(String(command.type)))).toEqual([]);
 });
 
 test('opens a long conversation at its newest turn and holds the pin', async ({ page }) => {
@@ -584,7 +664,11 @@ for (const availability of ['available', 'no-capability', 'no-directory'] as con
   test(`Conversation workspace button is compact and ${availability}`, async ({ page }) => {
     await page.setViewportSize({ width: 360, height: 740 });
     await connectFedora(page, { capabilities: ['conversation_history', ...(availability !== 'no-capability' ? ['workspace_inspection'] : [])] });
-    await setConversationFixture(page, { entries: [{ id: 'workspace:answer', timestamp: '', role: 'assistant', text: 'Workspace conversation' }], total: 1 });
+    const longPath = `src/${'a'.repeat(83)}.ts`;
+    await setConversationFixture(page, {
+      entries: [{ id: 'workspace:answer', timestamp: '', role: 'assistant', text: `Updated \`src/main.ts:42\` and ${longPath}. See https://example.com/docs/guide.html` }],
+      total: 1,
+    });
     await server(page, 0, { type: 'agents', agents: [{ ...composerTarget, status: 'idle', project: 'Conversation workspace with a long title', agent: 'pi', cwd: availability === 'no-directory' ? '' : '/work/mobile', conversation_history_available: true }] });
     await page.getByRole('button', { name: 'Open Conversation workspace with a long title on Fedora' }).click();
     await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
@@ -597,13 +681,23 @@ for (const availability of ['available', 'no-capability', 'no-directory'] as con
       expect(box!.x + box!.width).toBeLessThanOrEqual(360);
     }
     expect((await header.boundingBox())!.height).toBeLessThanOrEqual(50);
+    const path = page.getByRole('button', { name: 'src/main.ts:42', exact: true });
+    await expect(page.getByText('src/main.ts:42', { exact: true })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'https://example.com/docs/guide.html' })).toHaveAttribute('target', '_blank');
+    expect((await commands(page)).filter(({ type }) => String(type).startsWith('workspace_'))).toEqual([]);
     if (availability !== 'available') {
+      await expect(path).toHaveCount(0);
       await expect(inspect).toBeDisabled();
       await expect(inspect).toHaveAttribute('title', 'Workspace inspection is unavailable');
       return;
     }
     await expect(inspect).toBeEnabled();
     await expect(inspect).toHaveAttribute('title', 'Inspect workspace files and Git changes');
+    await expect(path).toBeVisible();
+    await page.setViewportSize({ width: 320, height: 740 });
+    const wrapped = page.getByRole('button', { name: longPath, exact: true });
+    await expect.poll(() => wrapped.evaluate((element) => element.getClientRects().length)).toBeGreaterThan(1);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(await page.evaluate(() => innerWidth));
     await inspect.click();
     const dialog = page.getByRole('dialog', { name: 'Workspace', exact: true });
     await expect(dialog).toBeVisible();
@@ -614,6 +708,184 @@ for (const availability of ['available', 'no-capability', 'no-directory'] as con
     await expect(dialog.getByLabel('Diff for README.md')).toContainText('+Read-only change');
   });
 }
+
+async function openFileLinkConversation(page: Page, conversation: string | ConversationFixture) {
+  await connectFedora(page, { capabilities: ['conversation_history', 'workspace_inspection'] });
+  await setConversationFixture(page, typeof conversation === 'string'
+    ? { entries: [{ id: 'path-answer', role: 'assistant', text: conversation, timestamp: '' }], total: 1 }
+    : conversation);
+  await server(page, 0, { type: 'agents', agents: [{ ...composerTarget, status: 'idle', project: 'File links', agent: 'codex', cwd: '/work/mobile', conversation_history_available: true }] });
+  await page.getByRole('button', { name: 'Open File links on Fedora' }).click();
+  await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
+}
+
+test('opens a Conversation file link by touch and keyboard, without changing the toolbar inspector', async ({ page }) => {
+  await openFileLinkConversation(page, 'Updated src/main.ts');
+  const link = page.getByRole('button', { name: 'src/main.ts', exact: true });
+  const dialog = page.getByRole('dialog', { name: 'Workspace', exact: true });
+  const preview = dialog.getByRole('main', { name: 'Workspace preview' });
+  const close = dialog.getByRole('button', { name: 'Close workspace inspector' });
+  await link.tap();
+  await expect(preview.locator('.preview-heading')).toContainText('src/main.ts');
+  await expect(dialog.getByRole('complementary', { name: 'Workspace files' })).toHaveCount(0);
+  const reads = (await commands(page)).filter(({ type }) => String(type).startsWith('workspace_'));
+  expect(reads.map(({ type }) => type).sort()).toEqual(['workspace_file', 'workspace_git_status', 'workspace_tree']);
+  expect(reads.find(({ type }) => type === 'workspace_file')).toMatchObject({ pane_id: 'w1:p1', path: 'src/main.ts' });
+  await close.click();
+  for (const key of ['Enter', 'Space']) {
+    await link.focus();
+    await page.keyboard.press(key);
+    await expect(preview.getByRole('textbox', { name: 'Contents of src/main.ts' })).toBeVisible();
+    await close.click();
+  }
+  await page.getByRole('button', { name: 'Inspect workspace' }).click();
+  await expect(dialog.getByRole('complementary', { name: 'Workspace files' })).toBeVisible();
+  await expect(preview).toContainText('Choose a file to preview it.');
+});
+
+test('closes a linked file preview without issuing new reads when the working directory changes', async ({ page }) => {
+  const path = '/work/mobile/src/main.ts';
+  await openFileLinkConversation(page, `Updated ${path}`);
+  const link = page.getByRole('button', { name: path, exact: true });
+  await link.tap();
+  const dialog = page.getByRole('dialog', { name: 'Workspace', exact: true });
+  await expect(dialog.getByLabel('Contents of src/main.ts')).toBeVisible();
+  const workspaceReads = async () => (await commands(page)).filter(({ type }) => String(type).startsWith('workspace_'));
+  const reads = await workspaceReads();
+  expect(reads.find(({ type }) => type === 'workspace_file')).toMatchObject({ pane_id: 'w1:p1', path: 'src/main.ts' });
+
+  await server(page, 0, { type: 'agents', agents: [{ ...composerTarget, status: 'idle', project: 'File links', agent: 'codex', cwd: '/work/other', conversation_history_available: true }] });
+  await expect(dialog).toBeHidden();
+  await expect(page.getByText(`Updated ${path}`, { exact: true })).toBeVisible();
+  await expect(link).toHaveCount(0);
+  expect(await workspaceReads()).toEqual(reads);
+
+  await page.getByRole('button', { name: 'Inspect workspace' }).click();
+  await expect(dialog.getByText('/work/other', { exact: true })).toBeVisible();
+  await expect(dialog.getByRole('complementary', { name: 'Workspace files' })).toBeVisible();
+  await expect(dialog.getByText('Choose a file to preview it.')).toBeVisible();
+});
+
+test('scrolls a file link preview to its line, clamps near the end, and ignores unavailable lines', async ({ page }) => {
+  await openFileLinkConversation(page, 'See src/long.ts:42 src/long.ts:295 src/long.ts:999 and docs/home.png:3');
+  const dialog = page.getByRole('dialog', { name: 'Workspace', exact: true });
+  const heading = dialog.locator('.preview-heading');
+  const textarea = dialog.getByRole('textbox', { name: 'Contents of src/long.ts' });
+  const close = dialog.getByRole('button', { name: 'Close workspace inspector' });
+  await page.getByRole('button', { name: 'src/long.ts:42', exact: true }).tap();
+  await expect(heading).toContainText('Line 42');
+  await expect(textarea).toHaveAttribute('readonly', '');
+  const position = await textarea.evaluate((element: HTMLTextAreaElement) => {
+    const { paddingTop, lineHeight } = getComputedStyle(element);
+    return {
+      scrollTop: element.scrollTop,
+      expected: parseFloat(paddingTop) + 41 * parseFloat(lineHeight),
+      selection: element.value.slice(element.selectionStart, element.selectionEnd),
+    };
+  });
+  expect(Math.abs(position.scrollTop - position.expected)).toBeLessThanOrEqual(1);
+  expect(position.selection).toBe('// Line 42');
+  await close.click();
+
+  await page.getByRole('button', { name: 'src/long.ts:295', exact: true }).tap();
+  await expect(heading).toContainText('Line 295');
+  await expect.poll(() => distanceFromBottom(textarea)).toBeLessThanOrEqual(1);
+  await close.click();
+
+  await page.getByRole('button', { name: 'src/long.ts:999', exact: true }).tap();
+  await expect(heading).toContainText('src/long.ts');
+  await expect(heading).not.toContainText('Line');
+  expect(await textarea.evaluate((element) => element.scrollTop)).toBe(0);
+  await close.click();
+
+  await page.getByRole('button', { name: 'docs/home.png:3', exact: true }).tap();
+  const image = dialog.getByRole('img', { name: 'Preview of docs/home.png' });
+  await expect(image).toBeVisible();
+  await expect.poll(() => image.evaluate((element: HTMLImageElement) => element.naturalWidth)).toBe(1);
+  await expect(dialog).not.toContainText('Line 3');
+});
+
+test('names a missing file and lets the reader choose another file from the list', async ({ page }) => {
+  await openFileLinkConversation(page, 'Removed missing/gone.ts');
+  await page.getByRole('button', { name: 'missing/gone.ts', exact: true }).tap();
+  const dialog = page.getByRole('dialog', { name: 'Workspace', exact: true });
+  await expect(dialog.getByRole('alert')).toHaveText('Could not open missing/gone.ts: Workspace file was not found');
+  await expect(dialog.locator('textarea')).toHaveCount(0);
+  await dialog.getByRole('button', { name: 'Show file list' }).click();
+  await dialog.getByRole('complementary', { name: 'Workspace files' }).getByRole('button', { name: 'README.md', exact: true }).click();
+  await expect(dialog.getByLabel('Contents of README.md')).toHaveValue('# Workspace preview\n\nRead-only file contents.');
+});
+
+test('names the file when the relay is disconnected and the tree also fails', async ({ page }) => {
+  await openFileLinkConversation(page, 'Updated src/main.ts');
+  const link = page.getByRole('button', { name: 'src/main.ts', exact: true });
+  await expect(link).toBeVisible();
+  await closeSocket(page, 0);
+  await link.tap();
+  const dialog = page.getByRole('dialog', { name: 'Workspace', exact: true });
+  await expect(dialog.getByRole('alert')).toHaveText('Could not open src/main.ts: Relay is not connected');
+  await expect(dialog.locator('textarea')).toHaveCount(0);
+  await dialog.getByRole('button', { name: 'Show file list' }).click();
+  await expect(dialog.getByRole('complementary').getByRole('alert')).toHaveText('Relay is not connected');
+  await expect(dialog.getByRole('main', { name: 'Workspace preview' }).getByRole('alert')).toHaveText('Could not open src/main.ts: Relay is not connected');
+  await dialog.getByRole('button', { name: 'Close workspace inspector' }).click();
+  await expect(link).toBeVisible();
+});
+
+test('keeps the linked file visible when a later tree request fails', async ({ page }) => {
+  await openFileLinkConversation(page, 'Updated src/main.ts');
+  const link = page.getByRole('button', { name: 'src/main.ts', exact: true });
+  await expect(link).toBeVisible();
+  await setAutoCommands(page, false);
+  await link.tap();
+  const file = await lastCommand(page, 'workspace_file');
+  const tree = await lastCommand(page, 'workspace_tree');
+  const git = await lastCommand(page, 'workspace_git_status');
+  await reply(page, file, { path: 'src/main.ts', kind: 'text', text: 'File ready', size: 10 });
+  const dialog = page.getByRole('dialog', { name: 'Workspace', exact: true });
+  const preview = dialog.getByLabel('Contents of src/main.ts');
+  await expect(preview).toHaveValue('File ready');
+  await reply(page, tree, undefined, { ok: false, phase: 'failed', error: 'Could not read tree' });
+  await reply(page, git, { available: false, files: [] });
+  await dialog.getByRole('button', { name: 'Show file list' }).click();
+  await expect(dialog.getByRole('alert')).toHaveText('Could not read tree');
+  await expect(preview).toHaveValue('File ready');
+});
+
+test('returns from a file link to the same Conversation scroll, older turns and draft', async ({ page }) => {
+  const entries = Array.from({ length: 24 }, (_, index) => ({
+    id: `file-turn-${index}`, role: index % 2 ? 'assistant' : 'user', timestamp: '',
+    text: index === 5 ? 'Updated src/main.ts' : `Conversation turn ${index}`,
+  }));
+  await openFileLinkConversation(page, {
+    entries: entries.slice(12), total: entries.length, hasMore: true, nextCursor: 'older-files',
+    pages: { 'older-files': { entries: entries.slice(0, 12) } },
+  });
+  await page.getByRole('button', { name: 'Load older turns' }).click();
+  const list = page.locator('.conversation-list');
+  await expect(list.locator('article')).toHaveCount(entries.length);
+  const link = list.getByRole('button', { name: 'src/main.ts', exact: true });
+  const composer = page.getByRole('combobox', { name: 'Prompt' });
+  await composer.fill('A draft to keep');
+  await link.evaluate((element) => element.scrollIntoView({ block: 'center' }));
+  await expect(link).toBeInViewport({ ratio: 1 });
+  expect(await distanceFromBottom(list)).toBeGreaterThan(200);
+  const scrollTop = await list.evaluate((element) => element.scrollTop);
+  expect(scrollTop).toBeGreaterThan(0);
+  const historyLength = await page.evaluate(() => history.length);
+
+  await link.tap();
+  const dialog = page.getByRole('dialog', { name: 'Workspace', exact: true });
+  await expect(dialog.getByLabel('Contents of src/main.ts')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeHidden();
+  await expect(list.locator('article')).toHaveCount(entries.length);
+  await expect(composer).toHaveValue('A draft to keep');
+  expect(await list.evaluate((element) => element.scrollTop)).toBe(scrollTop);
+  expect(await page.evaluate(() => history.length)).toBe(historyLength);
+  await page.getByRole('button', { name: 'Back', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Open File links on Fedora' })).toBeVisible();
+});
 
 test('inspects workspace files and Git changes without write controls', async ({ page }) => {
   await connectFedora(page, {

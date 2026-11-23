@@ -80,6 +80,65 @@ async function closeExactNotification(tag) {
   }
 }
 
+function waitingTag(key) {
+  if (key.category !== 'attention' && key.category !== 'question') return '';
+  return 'waiting:' + JSON.stringify([self.registration.scope, key.device_id, key.server_session_id, key.pane_id]);
+}
+
+function waitingSequence(value) {
+  return Number.isSafeInteger(value) && value > 0 ? value : 0;
+}
+
+function notificationOptions(payload, tag) {
+  return {
+    body: typeof payload.body === 'string' ? payload.body : '',
+    tag,
+    renotify: false,
+    icon: HERDR_NOTIFICATION_ICON,
+    badge: HERDR_NOTIFICATION_BADGE,
+    actions: androidNotificationActions(payload),
+    data: {
+      key: payload.key,
+      eventRef: typeof payload.event_ref === 'string' ? payload.event_ref : '',
+      actionRefs: payload.action_refs && typeof payload.action_refs === 'object' ? payload.action_refs : {},
+      url: safeAppURL(payload.url).href,
+    },
+  };
+}
+
+async function displayPush(payload) {
+  const sequence = waitingSequence(payload.waiting_seq);
+  const tag = sequence && waitingTag(payload.key);
+  const title = typeof payload.title === 'string' && payload.title ? payload.title : 'Herdr';
+  if (!tag) {
+    const exactTag = notificationTag(payload.key);
+    await closeExactNotification(exactTag);
+    if (payload.retract !== true) {
+      await self.registration.showNotification(title, notificationOptions(payload, exactTag));
+    }
+    return;
+  }
+
+  const [displayed] = await self.registration.getNotifications({tag});
+  const displayedSequence = waitingSequence(displayed?.data?.waitingSeq);
+  if (payload.retract === true) {
+    if (displayed && displayedSequence <= sequence) displayed.close();
+    return;
+  }
+
+  if (displayedSequence > sequence) {
+    // A push must show a notification or the browser may show its own or penalize the subscription.
+    const {body, icon, badge, actions, data} = displayed;
+    await self.registration.showNotification(displayed.title, {body, icon, badge, actions, data, tag, renotify: false});
+    return;
+  }
+
+  const options = notificationOptions(payload, tag);
+  options.data.waitingSeq = sequence;
+  await self.registration.showNotification(title, options);
+}
+
+let pushQueue = Promise.resolve();
 self.addEventListener('push', event => {
   let payload;
   try {
@@ -89,32 +148,9 @@ self.addEventListener('push', event => {
   }
   if (!payload || payload.v !== 1 || !validPushEventKey(payload.key)) return;
 
-  const tag = notificationTag(payload.key);
-  event.waitUntil((async () => {
-    // Replacement and resolution are both scoped to the complete event key.
-    // Never close a prefix or another revision's notification.
-    await closeExactNotification(tag);
-    if (payload.retract === true) return;
-
-    const options = {
-      body: typeof payload.body === 'string' ? payload.body : '',
-      tag,
-      renotify: false,
-      icon: HERDR_NOTIFICATION_ICON,
-      badge: HERDR_NOTIFICATION_BADGE,
-      actions: androidNotificationActions(payload),
-      data: {
-        key: payload.key,
-        eventRef: typeof payload.event_ref === 'string' ? payload.event_ref : '',
-        actionRefs: payload.action_refs && typeof payload.action_refs === 'object' ? payload.action_refs : {},
-        url: safeAppURL(payload.url).href,
-      },
-    };
-    await self.registration.showNotification(
-      typeof payload.title === 'string' && payload.title ? payload.title : 'Herdr',
-      options,
-    );
-  })());
+  const work = pushQueue.then(() => displayPush(payload));
+  pushQueue = work.catch(() => {});
+  event.waitUntil(work);
 });
 
 function notificationOpenRequest(data, action) {

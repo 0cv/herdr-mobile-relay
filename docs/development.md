@@ -239,7 +239,9 @@ the cached image. Test output and failure traces stay on the host.
 
 The UI journeys suite runs Chromium on the host and its whole WebKit project
 inside the container (`HERDR_WEBKIT_WORKERS` sets the container's worker count,
-default 2), because some of its tests launch WebKit directly.
+default 2), because some of its tests launch WebKit directly. The wrapper builds
+the demo site on the host first, since the container cannot load the host's
+native Vite bindings, and the container only serves the generated files.
 
 Journeys live in `frontend/tests/browser`, one file per journey, on the fake relay in `frontend/tests/support/journey-relay.ts`.
 

@@ -52,6 +52,13 @@ describe('accessible Svelte interactions', () => {
     vi.mocked(listWorktrees).mockReset();
   });
 
+  it('offers QR scanning on home only when no computers are configured', async () => {
+    const { rerender } = render(AgentList, { agents: [], relays: [], responding: new Set<string>(), onopen: vi.fn() });
+    expect(screen.getByRole('button', { name: 'Scan QR Code' })).toBeVisible();
+    await rerender({ relays: [{ id: 'fedora', label: 'Fedora', url: 'wss://fedora', token: '' }] });
+    expect(screen.queryByRole('button', { name: 'Scan QR Code' })).not.toBeInTheDocument();
+  });
+
   it('offers explicit browser pairing in the deferred agent-list empty state', async () => {
     const user = userEvent.setup();
     const relay = { id: 'invited', label: 'Invited', url: 'wss://invited.example', token: '' };

@@ -2,6 +2,7 @@ import { defineConfig, devices } from '@playwright/test';
 import { resolve } from 'node:path';
 
 const webRoot = resolve(process.env.HERDR_WEB_ROOT || 'dist');
+const demoRoot = process.env.HERDR_DEMO_ROOT;
 
 export default defineConfig({
   testDir: './tests/browser',
@@ -41,8 +42,10 @@ export default defineConfig({
       reuseExistingServer: false,
     },
     {
-      command: `demo=$(mktemp -d) && trap 'rm -rf "$demo"' EXIT &&
-        node scripts/demo-site.mjs ${JSON.stringify(webRoot)} "$demo/site" && node scripts/browser-server.mjs "$demo/site"`,
+      command: demoRoot
+        ? `node scripts/browser-server.mjs ${JSON.stringify(demoRoot)}`
+        : `demo=$(mktemp -d) && trap 'rm -rf "$demo"' EXIT &&
+          node scripts/demo-site.mjs ${JSON.stringify(webRoot)} "$demo/site" && node scripts/browser-server.mjs "$demo/site"`,
       port: 4174,
       env: { PORT: '4174' },
       reuseExistingServer: false,

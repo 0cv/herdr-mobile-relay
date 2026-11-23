@@ -7,11 +7,15 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"strings"
 	"sync/atomic"
+	"syscall"
 )
 
 const socketAPIBufferBytes = 64 * 1024
+
+var ErrServerNotRunning = errors.New("herdr: server is not running")
 
 type socketAPIClient struct {
 	path string
@@ -53,6 +57,9 @@ func (c *socketAPIClient) requestUnary(
 
 	conn, err := (&net.Dialer{}).DialContext(requestCtx, "unix", c.path)
 	if err != nil {
+		if socketServerNotRunning(c.path, err) {
+			err = errors.Join(err, ErrServerNotRunning)
+		}
 		return nil, false, fmt.Errorf("connect to Herdr socket API: %w", err)
 	}
 	stopWatch := context.AfterFunc(requestCtx, func() { _ = conn.Close() })
@@ -102,6 +109,19 @@ func (c *socketAPIClient) requestUnary(
 		return nil, true, errors.New("Herdr socket API response has no result")
 	}
 	return response.Result, true, nil
+}
+
+func socketServerNotRunning(path string, dialErr error) bool {
+	missing := errors.Is(dialErr, syscall.ENOENT)
+	refused := errors.Is(dialErr, syscall.ECONNREFUSED)
+	if !missing && !refused {
+		return false
+	}
+	info, err := os.Lstat(path)
+	if missing {
+		return errors.Is(err, os.ErrNotExist)
+	}
+	return err == nil && info.Mode()&os.ModeSocket != 0
 }
 
 func isPreDispatchRequestError(id, code, message string) bool {

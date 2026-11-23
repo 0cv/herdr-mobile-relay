@@ -54,6 +54,16 @@ if [ "$CONFIG" != playwright.attention.config.ts ]; then
 
     HERDR_WEB_ROOT="$WEB_ROOT" bun x playwright test --config "$CONFIG" --project=chromium-mobile "$@"
 
+    # The container cannot load the host's native Vite bindings, so the demo site
+    # is built here and the container only serves the generated files.
+    DEMO_ENV=()
+    if [ -f "$WEB_ROOT/release.json" ]; then
+        rm -rf test-results/container-demo
+        mkdir -p test-results
+        node scripts/demo-site.mjs "$WEB_ROOT" test-results/container-demo
+        DEMO_ENV=(-e HERDR_DEMO_ROOT=/work/frontend/test-results/container-demo)
+    fi
+
     # WebKit stays on the container image's own Node: it ships node and npx, and
     # installing Bun inside the image per run would cost more than Playwright's
     # few seconds of process startup saves.
@@ -61,8 +71,10 @@ if [ "$CONFIG" != playwright.attention.config.ts ]; then
     exec "${CONTAINER_RUN[@]}" \
         -e PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
         -e HERDR_WEB_ROOT="$WEB_ROOT" \
+        ${DEMO_ENV[@]+"${DEMO_ENV[@]}"} \
         -v "$FRONTEND_DIR:/work/frontend:ro" \
         -v "$REPO_DIR/web:/work/web:ro" \
+        -v "$REPO_DIR/contracts:/work/contracts:ro" \
         -w /work/frontend \
         "$IMAGE" \
         npx playwright test --config "$CONFIG" --project=webkit-mobile \

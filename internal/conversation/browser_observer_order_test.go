@@ -319,7 +319,7 @@ func TestBrowserSnapshotReadHookFiresBeforeInterestIsRenewed(t *testing.T) {
 		seenInterest, seenAccess = observation.job.lastInterest, observation.job.lastAccess
 		observation.job.mu.RUnlock()
 	})
-	page, err := b.readSnapshotPageAt(t.Context(), scope, 10, job, boundary)
+	page, err := b.readSnapshotPageAt(t.Context(), BrowseRequest{Scope: scope, Limit: 10}, job, boundary)
 	if err != nil || page.State != BrowseReady {
 		t.Fatalf("snapshot page = %#v, err = %v", page, err)
 	}

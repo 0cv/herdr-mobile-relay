@@ -1,28 +1,35 @@
 <script lang="ts">
-
+  import { tick } from 'svelte';
   import Button from '$components/ui/Button.svelte';
-  import { loadWorkspaceTree, loadWorkspaceFile, loadWorkspaceGitStatus, loadWorkspaceGitDiff } from '$lib/workspace-inspection';
+  import type { FileTarget } from '$lib/file-links';
+  import { loadWorkspaceTree, loadWorkspaceFile, loadWorkspaceGitStatus, loadWorkspaceGitDiff, type WorkspaceFileTarget } from '$lib/workspace-inspection';
   import type { Agent, WorkspaceFile, WorkspaceGitDiff, WorkspaceGitStatus, WorkspaceTree } from '$lib/types';
 
   let {
     open = $bindable(false),
     agent,
+    fileTarget,
   }: {
     open?: boolean;
     agent: Agent | null;
+    fileTarget: WorkspaceFileTarget | null;
   } = $props();
 
   let dialog = $state<HTMLDialogElement>();
+  let textarea = $state<HTMLTextAreaElement>();
   let query = $state('');
   let section = $state<'files' | 'changes'>('files');
   let tree = $state<WorkspaceTree | null>(null);
   let git = $state<WorkspaceGitStatus | null>(null);
   let preview = $state<WorkspaceFile | WorkspaceGitDiff | null>(null);
   let previewKind = $state<'file' | 'diff'>('file');
+  let previewLine = $state(0);
   let selectedPath = $state('');
   let loading = $state(false);
   let previewLoading = $state(false);
-  let error = $state('');
+  let treeError = $state('');
+  let previewError = $state('');
+  const error = $derived(previewError || (!fileTarget && section === 'files' ? treeError : ''));
   let gitReason = $state('');
   let workspaceGeneration = 0;
   let previewGeneration = 0;
@@ -51,6 +58,10 @@
 
   $effect(() => {
     const target = agent;
+    if (open && fileTarget && (!target || target.pane_id !== fileTarget.pane_id || target.cwd !== fileTarget.cwd)) {
+      close();
+      return;
+    }
     const identity = target ? `${target.pane_id}\u0000${String(target.cwd || '')}` : '';
     if (!open || !target) {
       loadedIdentity = '';
@@ -180,49 +191,48 @@
     const current = ++workspaceGeneration;
     previewGeneration += 1;
     query = '';
-    sidebarOpen = true;
+    sidebarOpen = !fileTarget;
     section = 'files';
     tree = null;
     git = null;
     preview = null;
+    previewLine = 0;
     previewLoading = false;
     selectedPath = '';
     resetDiffZoom();
-    error = '';
+    treeError = '';
+    previewError = '';
     gitReason = '';
     loading = true;
-    try {
-      const [treeResult, gitResult] = await Promise.allSettled([
-        loadWorkspaceTree(target),
-        loadWorkspaceGitStatus(target),
-      ]);
-      if (current !== workspaceGeneration) return;
-      if (treeResult.status === 'rejected') throw treeResult.reason;
-      tree = treeResult.value;
-      if (gitResult.status === 'fulfilled') {
-        git = gitResult.value;
-        if (!git.available) gitReason = 'This workspace is not inside a Git repository.';
-      } else {
-        git = { available: false, files: [] };
-        gitReason = gitResult.reason instanceof Error
-          ? gitResult.reason.message
-          : 'Git status could not be read.';
-      }
-    } catch (loadError) {
-      if (current === workspaceGeneration) error = (loadError as Error).message;
-    } finally {
-      if (current === workspaceGeneration) loading = false;
+    if (fileTarget) void showPreview(fileTarget.path, 'file', fileTarget);
+    const [treeResult, gitResult] = await Promise.allSettled([
+      loadWorkspaceTree(target),
+      loadWorkspaceGitStatus(target),
+    ]);
+    if (current !== workspaceGeneration) return;
+    if (treeResult.status === 'fulfilled') tree = treeResult.value;
+    else treeError = (treeResult.reason as Error).message;
+    if (gitResult.status === 'fulfilled') {
+      git = gitResult.value;
+      if (!git.available) gitReason = 'This workspace is not inside a Git repository.';
+    } else {
+      git = { available: false, files: [] };
+      gitReason = gitResult.reason instanceof Error
+        ? gitResult.reason.message
+        : 'Git status could not be read.';
     }
+    loading = false;
   }
 
-  async function showPreview(path: string, kind: 'file' | 'diff') {
+  async function showPreview(path: string, kind: 'file' | 'diff', link?: FileTarget) {
     if (!agent) return;
     const current = ++previewGeneration;
     selectedPath = path;
     preview = null;
+    previewLine = 0;
     previewKind = kind;
     resetDiffZoom();
-    error = '';
+    previewError = '';
     previewLoading = true;
     try {
       const next = await (kind === 'file'
@@ -230,10 +240,27 @@
         : loadWorkspaceGitDiff(agent, path));
       if (current === previewGeneration) preview = next;
     } catch (loadError) {
-      if (current === previewGeneration) error = (loadError as Error).message;
+      if (current === previewGeneration) {
+        const message = (loadError as Error).message;
+        previewError = link ? `Could not open ${path}: ${message}` : message;
+      }
     } finally {
       if (current === previewGeneration) previewLoading = false;
     }
+    if (!link?.line) return;
+    await tick();
+    if (current === previewGeneration && textarea) showLine(textarea, link.line);
+  }
+
+  function showLine(element: HTMLTextAreaElement, line: number) {
+    const lines = element.value.split('\n');
+    if (line > lines.length) return;
+    let start = 0;
+    for (let index = 0; index < line - 1; index += 1) start += lines[index].length + 1;
+    element.setSelectionRange(start, start + lines[line - 1].length);
+    const { paddingTop, lineHeight } = getComputedStyle(element);
+    element.scrollTop = parseFloat(paddingTop) + (line - 1) * parseFloat(lineHeight);
+    previewLine = line;
   }
 
   function selectSection(next: 'files' | 'changes') {
@@ -243,9 +270,10 @@
     section = next;
     sidebarOpen = true;
     preview = null;
+    previewLine = 0;
     selectedPath = '';
     resetDiffZoom();
-    error = '';
+    previewError = '';
   }
 
   function statusLabel(status: string): string {
@@ -313,6 +341,8 @@
         >
           {#if loading}
             <p class="workspace-message" role="status">Reading workspace…</p>
+          {:else if section === 'files' && fileTarget && treeError}
+            <p class="workspace-error" role="alert">{treeError}</p>
           {:else if section === 'files'}
             {#if tree?.truncated}<p class="workspace-notice">File list limited to the first 4,000 entries.</p>{/if}
             {#each filteredEntries as entry (entry.path)}
@@ -349,8 +379,8 @@
               <figcaption>{preview.path} · {Math.ceil(preview.size / 1024)} KB</figcaption>
             </figure>
           {:else if preview && 'kind' in preview}
-            <header class="preview-heading"><strong>{preview.path}</strong><span>{Math.ceil(preview.size / 1024)} KB</span></header>
-            <textarea class="workspace-code-preview" readonly wrap="off" spellcheck="false" aria-label={`Contents of ${preview.path}`} value={preview.text || ''}></textarea>
+            <header class="preview-heading"><strong>{preview.path}</strong><span>{#if previewLine}Line {previewLine} · {/if}{Math.ceil(preview.size / 1024)} KB</span></header>
+            <textarea bind:this={textarea} class="workspace-code-preview" readonly wrap="off" spellcheck="false" aria-label={`Contents of ${preview.path}`} value={preview.text || ''}></textarea>
           {:else if preview && 'diff' in preview}
             <header class="preview-heading">
               <strong>{preview.path}</strong>

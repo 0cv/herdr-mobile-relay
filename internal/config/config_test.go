@@ -33,6 +33,20 @@ func TestLoadDefaults(t *testing.T) {
 	}
 }
 
+func TestIdleQuestionProbeConfig(t *testing.T) {
+	isolateLoadEnvironment(t)
+	for value, want := range map[string]bool{"": true, "true": true, "1": true, "false": false, "0": false} {
+		t.Setenv("HERDR_RELAY_IDLE_QUESTION_PROBE", value)
+		cfg, err := Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.IdleQuestionProbe != want {
+			t.Errorf("idle question probe for %q = %t, want %t", value, cfg.IdleQuestionProbe, want)
+		}
+	}
+}
+
 func TestParseLogLevel(t *testing.T) {
 	for _, test := range []struct {
 		name  string

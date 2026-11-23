@@ -6,6 +6,7 @@ import { securityState } from '$lib/security';
 import ManualTerminalInput from '$components/ManualTerminalInput.svelte';
 import { TerminalInputDelivery } from '$lib/terminal-input-delivery.svelte';
 import unavailablePage from '../../../contracts/fixtures/conversation_unavailable.json';
+import editFixture from '../../../contracts/fixtures/conversation_edit_diff.json';
 import piCatalogFixture from '../../../contracts/fixtures/pi_command_catalog.json';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { makeRelayId } from '$lib/config';
@@ -132,6 +133,35 @@ describe('relay command store', () => {
     vi.useRealTimers();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  it('accepts edit previews in pages and batches only from the advertising target relay', async () => {
+    relayStore.addRelay({ label: 'Other', url: 'ws://127.0.0.1:8872', token: '' });
+    const [firstSocket, secondSocket] = MockWebSocket.instances.slice(-2);
+    const enabled = connectRelay({ capabilities: ['conversation_history', 'conversation_activity', 'conversation_edit_diffs'] }, firstSocket);
+    const other = connectRelay({ capabilities: ['conversation_history', 'conversation_activity'] }, secondSocket);
+    const [firstConfig, secondConfig] = get(relayStore.relayConfigs);
+    const entry = { id: 'edit', role: 'assistant', tools: [editFixture] };
+    for (const [config, socket, expected] of [[firstConfig, enabled, editFixture.diff], [secondConfig, other, undefined]] as const) {
+      const agent = preferenceAgent(config.id, 'w1:p1', 'terminal');
+      const awaitRequest = (type: string) => vi.waitFor(() => {
+        const sent = socket.messages().find(message => message.type === type);
+        expect(sent?.request_id).toBeTruthy();
+        return sent!.request_id;
+      });
+      const page = relayStore.getConversationHistory(agent);
+      socket.message({ type: 'command_result', request_id: await awaitRequest('get_conversation_history'), ok: true, phase: 'completed', data: {
+        available: true, has_more: false, state: 'ready', mode: 'recent', entries: [entry], provisional: [{ ...entry, id: 'live:edit' }],
+      } });
+      const normalized = await page;
+      expect(normalized.entries[0].tools![0].diff).toEqual(expected);
+      expect(normalized.provisional![0].tools![0].diff).toEqual(expected);
+      const updates = relayStore.getConversationUpdates(agent, 'r', 0, new AbortController().signal, 'sub');
+      socket.message({ type: 'command_result', request_id: await awaitRequest('get_conversation_updates'), ok: true, phase: 'completed', data: {
+        kind: 'batch', subscription_id: 'sub', source_revision: 'r', sequence: 1, entries: [entry], remove: [], state: 'ready',
+      } });
+      expect((await updates).entries[0].tools![0].diff).toEqual(expected);
+    }
   });
 
   it('retains authoritative unknown-kind agents without profiles, sessions or workspace records', () => {
@@ -938,6 +968,80 @@ describe('relay command store', () => {
     expect(MockWebSocket.instances[0].protocols).toBe('herdr-e2ee-v2');
   });
 
+  it.each([false, true])('imports a scanned link without touching the address (invitation: %s)', (invitation) => {
+    relayStore.destroy();
+    relayStore.relayConfigs.set([]);
+    MockWebSocket.instances = [];
+    const href = location.href;
+    const state = history.state;
+    history.replaceState({ view: 'settings' }, '', '/?view=all#settings');
+    const scannedFrom = location.href;
+    const replaceState = vi.spyOn(history, 'replaceState');
+    const relayUrl = 'wss://scanner.example';
+    const relayId = makeRelayId('Scanner', relayUrl);
+    const credentials = new BrowserDeviceCredentialStore(localStorage);
+    const link = {
+      hash: `#setup=${'D'.repeat(invitation ? 43 : 32)}&label=Scanner&relay=${encodeURIComponent(relayUrl)}`
+        + (invitation ? '&invite=invitation-scan01&invite_version=1&invite_expires=4102444800000' : ''),
+      protocol: 'https:',
+      host: 'phone.example',
+    };
+    try {
+      expect(relayStore.importSetupLink(link, true, false)).toBe(true);
+      expect(JSON.parse(localStorage.getItem('herdr_relays')!)).toMatchObject([{ id: relayId, url: relayUrl }]);
+      expect(MockWebSocket.instances).toHaveLength(1);
+      expect(MockWebSocket.instances[0].url).toContain(relayUrl);
+      if (invitation) expect(credentials.get(relayId)).toMatchObject({ kind: 'invitation', id: 'invitation-scan01' });
+      expect(location.href).toBe(scannedFrom);
+      expect(history.state).toEqual({ view: 'settings' });
+      expect(replaceState).not.toHaveBeenCalled();
+    } finally {
+      history.replaceState(state, '', href);
+    }
+  });
+
+  it('keeps the live connection when rescanning its redeemed invitation', async () => {
+    relayStore.destroy();
+    relayStore.relayConfigs.set([]);
+    const connect = vi.fn();
+    const close = vi.fn();
+    const transport = vi.fn<TransportFactory>(() => ({ kind: 'websocket', connect, close, send: () => true }));
+    transportHijack.current = transport;
+    const relayUrl = 'wss://scanner.example';
+    const relayId = makeRelayId('Scanner', relayUrl);
+    const link = {
+      hash: `#setup=${'D'.repeat(43)}&label=Scanner&relay=${encodeURIComponent(relayUrl)}`
+        + '&invite=invitation-scan01&invite_version=1&invite_expires=4102444800000',
+      protocol: 'https:',
+      host: 'phone.example',
+    };
+    expect(relayStore.importSetupLink(link, true, false)).toBe(true);
+    const [, handlers, authentication] = transport.mock.calls[0];
+    const presented = authentication!.getAuthentication!()!;
+    expect(presented).toMatchObject({ kind: 'invitation', id: 'invitation-scan01' });
+    await authentication!.onAuthenticated!(presented, {
+      deviceId: 'device-live', credentialId: 'credential-live', credentialVersion: 1,
+      credentialSecret: 'E'.repeat(43), role: 'reader', locale: 'en',
+    });
+    handlers.onStatus('connected', { path: 'websocket' });
+    const connection = relayStore.connection(relayId);
+    expect(connection?.status).toBe('connected');
+    const credentials = new BrowserDeviceCredentialStore(localStorage);
+    const credential = credentials.get(relayId);
+    expect(credential).toMatchObject({ kind: 'credential', id: 'credential-live', invitationId: 'invitation-scan01' });
+    const relays = get(relayStore.relayConfigs);
+    relayStore.toast.set(null);
+
+    expect(relayStore.importSetupLink(link, true, false)).toBe(true);
+    expect(relayStore.connection(relayId)).toBe(connection);
+    expect(get(relayStore.connections).get(relayId)?.status).toBe('connected');
+    expect(close).not.toHaveBeenCalled();
+    expect(connect).toHaveBeenCalledTimes(1);
+    expect(credentials.get(relayId)).toEqual(credential);
+    expect(get(relayStore.relayConfigs)).toEqual(relays);
+    expect(get(relayStore.toast)).toBeNull();
+  });
+
   it('replaces an enrolled credential only with an invitation minted after it', () => {
     relayStore.destroy();
     relayStore.relayConfigs.set([]);
@@ -1210,6 +1314,82 @@ describe('relay command store', () => {
     await expect(approval).resolves.toBe(true);
     await vi.advanceTimersByTimeAsync(500);
     expect(socket.sent.map((payload) => JSON.parse(payload)).filter((message) => message.type === 'read_pane')).toHaveLength(2);
+  });
+
+  it.each([
+    ['question', 'agent_update', 'done'],
+    ['approval', 'agents', 'idle'],
+    ['question', 'agents', 'working'],
+  ])('clears a promoted %s on one authoritative %s to %s', (kind, type, status) => {
+    const socket = connectRelay({ capabilities: ['attention_classification', 'idle_question_probe'] });
+    const target = { pane_id: 'w1:p1', ...exactAgentFields() };
+    const interaction = {
+      id: 'question-1', kind: 'single_select', question: 'Which fruit?',
+      options: [{ index: 0, label: 'Apple' }, { index: 1, label: 'Pear' }],
+    };
+    socket.message({
+      type: 'blocked', ...target, pane_revision: 12, event_id: 'wait-1', screen_attention: 'waiting',
+      attention_kind: kind,
+      ...(kind === 'question' ? { interaction } : { options: ['Allow', 'Deny'], approval_fingerprint: 'fp' }),
+    });
+    const agent = get(relayStore.agents)[0];
+    relayStore.markResponding(agent.pane_id);
+    relayStore.readPane(agent);
+    const request = socket.messages().findLast(message => message.type === 'read_pane')!;
+    expect(agent).toMatchObject({ status: 'blocked', screen_attention: 'waiting' });
+    expect(get(relayStore.responding).has(agent.pane_id)).toBe(true);
+    socket.message({ type: 'agent_update', ...target, pane_revision: 11, status, screen_attention: 'cleared' });
+    expect(get(relayStore.agents)[0]).toBe(agent);
+    const clear = { ...target, pane_revision: 13, status, screen_attention: 'cleared' };
+    socket.message(type === 'agents' ? { type, agents: [clear] } : { type, ...clear });
+    expect(get(relayStore.agents)[0]).toMatchObject({ status, interaction: null, screen_attention: 'cleared' });
+    expect(get(relayStore.agents)[0].options).toBeUndefined();
+    expect(get(relayStore.agents)[0].approval_fingerprint).toBeUndefined();
+    expect(get(relayStore.agents)[0].event_id).toBeUndefined();
+    expect(get(relayStore.responding).has(agent.pane_id)).toBe(false);
+    socket.message({
+      type: 'pane_content', request_id: request.request_id, pane_id: 'w1:p1',
+      target: request.target, format: 'ansi', content: 'old question', attention_kind: 'question', interaction,
+    });
+    expect(get(relayStore.agents)[0]).toMatchObject({ status, interaction: null });
+  });
+
+  it('drops the promoted controls and pending answer on a replacement generation', () => {
+    const socket = connectRelay({ capabilities: ['attention_classification', 'idle_question_probe'] });
+    const target = { pane_id: 'w1:p1', ...exactAgentFields() };
+    socket.message({
+      type: 'blocked', ...target, pane_revision: 18, event_id: 'wait-1', screen_attention: 'waiting',
+      attention_kind: 'question', interaction: { id: 'old-question', kind: 'single_select', question: 'Which?', options: [] },
+    });
+    relayStore.markResponding(get(relayStore.agents)[0].pane_id);
+    socket.message({ type: 'agents', agents: [{ ...target, status: 'idle', pane_revision: 19, generation: 2 }] });
+    const current = get(relayStore.agents)[0];
+    expect(current).toMatchObject({ status: 'idle', interaction: null, generation: 2 });
+    expect(current.screen_attention).toBeUndefined();
+    expect(current.event_id).toBeUndefined();
+    expect(get(relayStore.responding).has(current.pane_id)).toBe(false);
+  });
+
+  it.each([true, false])('stabilizes ordinary native waits (probe capability: %s)', (capable) => {
+    const capabilities = capable ? ['attention_classification', 'idle_question_probe'] : ['attention_classification'];
+    const socket = connectRelay({ capabilities });
+    const target = { pane_id: 'w1:p1', ...exactAgentFields() };
+    socket.message({ type: 'blocked', ...target, pane_revision: 1, attention_kind: 'approval', options: ['Allow', 'Deny'] });
+    const idle = { ...target, status: 'idle', pane_revision: 2, ...(capable ? {} : { screen_attention: 'cleared' }) };
+    socket.message({ type: 'agents', agents: [idle] });
+    expect(get(relayStore.agents)[0]).toMatchObject({ status: 'blocked', options: ['Allow', 'Deny'] });
+    socket.message({ type: 'agents', agents: [{ ...idle, pane_revision: 3 }] });
+    const agent = get(relayStore.agents)[0];
+    expect(agent).toMatchObject({ status: 'idle', interaction: null });
+    expect(agent.screen_attention).toBeUndefined();
+    relayStore.readPane(agent);
+    const request = socket.messages().findLast(message => message.type === 'read_pane')!;
+    socket.message({
+      type: 'pane_content', request_id: request.request_id, pane_id: 'w1:p1', target: request.target,
+      format: 'ansi', content: 'question frame', attention_kind: 'question',
+      interaction: { id: 'local-question', kind: 'single_select', question: 'Which?', options: [{ index: 0, label: 'Yes' }] },
+    });
+    expect(get(relayStore.agents)[0].status).toBe(capable ? 'idle' : 'blocked');
   });
 
   it('does not let an old pane generation suppress a replacement read', () => {

@@ -25,9 +25,21 @@
   let shiftArmed = $state(false);
   let altArmed = $state(false);
   let keyFeedback = $state('');
-  let keyFeedbackError = $state(false);
   const keySending = $derived(sending || blocked);
   const disabled = $derived(readOnly || blocked || !targetRefForAgent(agent));
+  const { connections } = relayStore;
+  const pagingKeys = $derived($connections.get(agent.relay_id)?.capabilities.includes('paging_keys'));
+  const NAVIGATION_KEYS: ({ key: string; text?: string; name?: string; paging?: boolean } | null)[] = [
+    { key: 'Home', paging: true },
+    { key: 'Up', text: '↑' },
+    { key: 'PageUp', text: 'PgUp', name: 'Page up', paging: true },
+    { key: 'Left', text: '←' },
+    null,
+    { key: 'Right', text: '→' },
+    { key: 'End', paging: true },
+    { key: 'Down', text: '↓' },
+    { key: 'PageDown', text: 'PgDn', name: 'Page down', paging: true },
+  ];
   const FUNCTION_KEYS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
   let componentMounted = true;
   let keyFeedbackTimer: ReturnType<typeof setTimeout> | undefined;
@@ -76,7 +88,9 @@
           activity_label: command.label,
         });
         command.resolve(true);
-        showKeyFeedback(keyResultMessage?.(result) || `${command.label} sent`);
+        const note = keyResultMessage?.(result);
+        if (note) relayStore.showToast(note);
+        showKeyFeedback(`${command.label} sent`);
         if (keyReadTimer) clearTimeout(keyReadTimer);
         keyReadTimer = setTimeout(() => {
           if (componentMounted && targetRefMatchesAgent(identity, agent)) relayStore.readPane(command.target);
@@ -84,7 +98,7 @@
       } catch (error) {
         command.resolve(false);
         const message = error instanceof Error ? error.message : 'Terminal keys could not be sent.';
-        showKeyFeedback('Key send failed', true);
+        showKeyFeedback('Key send failed');
         relayStore.showToast(message, true);
         for (const queued of keyQueue.splice(0)) queued.resolve(false);
       }
@@ -92,15 +106,25 @@
     sending = false;
   }
 
-  function showKeyFeedback(message: string, error = false) {
+  function showKeyFeedback(message: string) {
     if (!componentMounted) return;
     if (keyFeedbackTimer) clearTimeout(keyFeedbackTimer);
     keyFeedback = message;
-    keyFeedbackError = error;
     keyFeedbackTimer = setTimeout(() => {
       keyFeedback = '';
-      keyFeedbackError = false;
     }, 2_000);
+  }
+
+  function flashTappedKeys(node: HTMLElement) {
+    const flash = (event: MouseEvent) => {
+      const button = (event.target as Element).closest('button');
+      if (!button || button.hasAttribute('aria-pressed') || button.hasAttribute('aria-expanded')) return;
+      button.classList.remove('key-flash');
+      void button.offsetWidth;
+      button.classList.add('key-flash');
+    };
+    node.addEventListener('click', flash);
+    return { destroy: () => node.removeEventListener('click', flash) };
   }
 
   function toggleModifier(which: 'ctrl' | 'alt' | 'shift') {
@@ -130,7 +154,7 @@
     toggleModifier('shift');
   }
 
-  function modifierChord(key: string): { chord: string; label: string } | null {
+  function modifierChord(key: string, displayName?: string): { chord: string; label: string } | null {
     const parts: string[] = [];
     const labels: string[] = [];
     if (ctrlArmed) { parts.push('ctrl'); labels.push('Ctrl'); }
@@ -138,7 +162,7 @@
     if (shiftArmed) { parts.push('shift'); labels.push('Shift'); }
     if (!parts.length) return null;
     parts.push(key.toLocaleLowerCase());
-    labels.push(key.length === 1 ? key.toLocaleUpperCase() : key[0].toLocaleUpperCase() + key.slice(1).toLocaleLowerCase());
+    labels.push(displayName ?? (key.length === 1 ? key.toLocaleUpperCase() : key[0].toLocaleUpperCase() + key.slice(1).toLocaleLowerCase()));
     return { chord: parts.join('+'), label: labels.join('+') };
   }
 
@@ -157,9 +181,10 @@
     sendTerminalKey(character);
   }
 
-  function sendTerminalKey(key: string, plainLabel = key) {
-    const result = modifierChord(key);
-    void sendKeys([result?.chord || key], result?.label || plainLabel);
+  function sendTerminalKey(key: string, displayName?: string) {
+    const result = modifierChord(key, displayName);
+    const plainLabel = key === 'Escape' ? 'Cancelled prompt' : displayName ?? key;
+    void sendKeys([result?.chord ?? key], result?.label ?? plainLabel);
   }
 
   function sendTab() {
@@ -216,16 +241,20 @@
 
 {#snippet arrowPopup()}
   {#if arrowsOpen}
-    <div class="arrow-popup">
-      <span aria-hidden="true"></span>
-      <button disabled={disabled} aria-label="Up" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Up')}>↑</button>
-      <span aria-hidden="true"></span>
-      <button disabled={disabled} aria-label="Left" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Left')}>←</button>
-      <span aria-hidden="true"></span>
-      <button disabled={disabled} aria-label="Right" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Right')}>→</button>
-      <span aria-hidden="true"></span>
-      <button disabled={disabled} aria-label="Down" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Down')}>↓</button>
-      <span aria-hidden="true"></span>
+    <div class="arrow-popup" role="group" aria-label="Navigation keys">
+      {#each NAVIGATION_KEYS as cell (cell?.key)}
+        {#if cell && (!cell.paging || pagingKeys)}
+          <button
+            class:paging-key={cell.paging}
+            disabled={disabled}
+            aria-label={cell.name ?? cell.key}
+            onpointerdown={(event) => event.preventDefault()}
+            onclick={() => sendTerminalKey(cell.key, cell.name)}
+          >{cell.text ?? cell.key}</button>
+        {:else}
+          <span aria-hidden="true"></span>
+        {/if}
+      {/each}
     </div>
   {/if}
 {/snippet}
@@ -245,12 +274,10 @@
 {/snippet}
 
 
-<div>
-    {#if keyControlStatus}
-      <p class:error={keyFeedbackError} class="key-feedback" role="status" aria-live="polite">{keyControlStatus}</p>
-    {/if}
+<div use:flashTappedKeys>
+    <p class="sr-only" role="status" aria-live="polite">{keyControlStatus}</p>
     <div class="term-keys" aria-busy={keySending}>
-      <Button variant="secondary" size="sm" disabled={disabled} onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Escape', 'Cancelled prompt')}>Esc</Button>
+      <Button variant="secondary" size="sm" disabled={disabled} onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Escape')}>Esc</Button>
       <Button variant="secondary" size="sm" disabled={disabled} aria-label="Tab" title="Send Tab" onpointerdown={(event) => event.preventDefault()} onclick={sendTab}>{@render tabIcon()}</Button>
       <div class="modifier-menu">
         <input

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/coordinator"
 	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 	"github.com/0cv/herdr-mobile-relay/internal/push"
 	"github.com/0cv/herdr-mobile-relay/internal/transport"
@@ -76,7 +77,7 @@ func (s *Server) handlePushViewedPane(client *transport.ClientConn, inbound prot
 
 func (s *Server) handlePushOpenRef(client *transport.ClientConn, inbound protocol.Inbound, action string, identity transport.AuthenticatedIdentity) {
 	claims, verifyErr := s.pushM.VerifyEventReference(inbound.EventRef, time.Now().UTC())
-	if verifyErr != nil || claims.Key.DeviceID != identity.DeviceID || !s.pushTargetCurrent(claims.Key.Target()) {
+	if verifyErr != nil || claims.Key.DeviceID != identity.DeviceID || !s.pushEventCurrent(claims.Key) {
 		s.reply(client, inbound.RequestID, action, "").fail("Notification target is no longer available")
 		return
 	}
@@ -174,9 +175,16 @@ func pushPolicyResponse(policy push.DevicePolicy) map[string]any {
 	return result
 }
 
+func (s *Server) pushEventCurrent(key push.PushEventKey) bool {
+	if key.Category.Waiting() {
+		return s.state.WaitingRequestCurrent(key.Target(), key.EventID, key.InteractionRevision, key.Category == push.CategoryQuestion)
+	}
+	return s.pushTargetCurrent(key.Target())
+}
+
 func (s *Server) pushTargetCurrent(target protocol.TargetRef) bool {
 	agent, ok := s.state.Agent(target.PaneID)
-	return ok && targetMatchesAgent(target, agent)
+	return ok && coordinator.TargetMatchesAgent(target, agent, agent.Generation)
 }
 
 // reservePushTest rate limits delivery tests per device. Entries older than one
