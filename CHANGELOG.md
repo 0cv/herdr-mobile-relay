@@ -28,9 +28,10 @@ project follows [Semantic Versioning](https://semver.org/).
 - Tap an approval or question notification for up to 48 hours, as long as the
   original request is still current. The tap opens the agent without approving
   or replying.
-- Tapping a terminal key no longer shows a status line that pushed the
-  terminal up and back down. Armed modifiers stay highlighted, screen readers
-  still announce each key, and a failed send still shows a notification.
+- Tapping a terminal key briefly flashes it instead of showing a status line
+  that pushed the terminal up and back down. Armed modifiers stay highlighted,
+  screen readers still announce each key, and a failed send still shows a
+  notification.
 
 ### Fixed
 

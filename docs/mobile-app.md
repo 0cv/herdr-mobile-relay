@@ -639,8 +639,9 @@ once you update the relay. On the Herdr TUI relay, some full-screen programs may
 ignore **Home** and **End** without a modifier. **Shift** (`⇧`), **Ctrl** (`^`),
 and **Alt** can be combined, remain armed for repeated input, and apply to typed
 characters or any available terminal key — arm `^` and type `c` to interrupt.
-Armed modifiers stay highlighted, and screen readers announce the exact chord
-that was sent; a failed send shows a notification. Toggle the modifiers off or
+A tapped key briefly flashes, armed modifiers stay highlighted, and screen
+readers announce the exact chord that was sent; a failed send shows a
+notification. Toggle the modifiers off or
 move focus to the composer to disarm them.
 
 While the composer cannot send — the agent awaits an approval or question
