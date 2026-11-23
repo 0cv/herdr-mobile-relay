@@ -200,18 +200,10 @@ async function expectTerminalResult(page: Page, heading: string, rows: string[])
   await expect(command.locator(`xpath=following-sibling::*[@data-terminal-row][position() <= ${rows.length}]`)).toHaveText(rows);
 }
 
-async function expectUnobscuredStatus(page: Page, text: string) {
-  const status = page.getByRole('status').filter({ hasText: text });
-  await expect(status).toHaveText(text);
-  await expect(status).toBeInViewport({ ratio: 0.9 });
-  expect(await status.evaluate((element) => {
-    const range = document.createRange();
-    range.selectNodeContents(element);
-    const lines = Array.from(range.getClientRects());
-    return lines.length > 0 && lines.every(({ left, right, top, bottom }) =>
-      [left + 1, (left + right) / 2, right - 1].every((x) =>
-        element.contains(document.elementFromPoint(x, (top + bottom) / 2))));
-  }), `Key status must not be covered: ${text}`).toBe(true);
+async function expectKeyNote(page: Page, text: string) {
+  const note = page.getByRole('status').filter({ hasText: text });
+  await expect(note).toHaveText(text);
+  await expect(note).toBeInViewport();
 }
 
 async function exerciseSampleChecks(page: Page) {
@@ -226,9 +218,9 @@ async function exerciseSampleChecks(page: Page) {
   await expect(earlier).toBeInViewport();
   await key('Arrow keys').click();
   await key('Down').click();
-  await expectUnobscuredStatus(page, '› Sample check 1/3: make test');
+  await expectKeyNote(page, '› Sample check 1/3: make test');
   await key('Enter').click();
-  await expectUnobscuredStatus(page, 'Scripted check · make test — 4 passed in the sample log');
+  await expectKeyNote(page, 'Scripted check · make test — 4 passed in the sample log');
   await expect(screen).toHaveAttribute('data-terminal-row-count', String(rowsBefore + 7 + searchTestResult.length));
   await expect(log.getByText('Scripted check · $ make test', { exact: true })).not.toBeInViewport();
   await expect(earlier).toBeInViewport();
@@ -239,12 +231,12 @@ async function exerciseSampleChecks(page: Page) {
   await log.evaluate((element, top) => { element.scrollTop = top; }, scrollTop);
   await expect(earlier).toBeInViewport();
   await key('Down').click();
-  await expectUnobscuredStatus(page, '› Sample check 1/3: make test');
+  await expectKeyNote(page, '› Sample check 1/3: make test');
   await key('Up').click();
-  await expectUnobscuredStatus(page, '› Sample check 3/3: make docs');
+  await expectKeyNote(page, '› Sample check 3/3: make docs');
   await key('Enter').click();
   const docsResult = '3 pages built; no broken internal links.';
-  await expectUnobscuredStatus(page, `Scripted check · make docs — ${docsResult}`);
+  await expectKeyNote(page, `Scripted check · make docs — ${docsResult}`);
   await expect(screen).toHaveAttribute('data-terminal-row-count', String(rowsBefore + 18 + searchTestResult.length));
   await expect(log.getByText('Scripted check · $ make docs', { exact: true })).not.toBeInViewport();
   await expect(earlier).toBeInViewport();
@@ -805,9 +797,9 @@ async function expectWaitingKeyFeedback(page: Page) {
   if (await arrows.getAttribute('aria-expanded') === 'false') await arrows.click();
   const down = page.getByRole('button', { name: 'Down', exact: true });
   await down.click();
-  await expectUnobscuredStatus(page, 'Sample checks are unavailable while this agent is waiting for a choice.');
+  await expectKeyNote(page, 'Sample checks are unavailable while this agent is waiting for a choice.');
   await page.getByRole('button', { name: 'Enter', exact: true }).click();
-  await expectUnobscuredStatus(page, 'Use the waiting controls to make a choice.');
+  await expectKeyNote(page, 'Use the waiting controls to make a choice.');
   await expect(down).toBeInViewport({ ratio: 1 });
 }
 

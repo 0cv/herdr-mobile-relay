@@ -4,10 +4,6 @@
 .app-dialog .demo-label { background: var(--card); position: sticky; top: 0; z-index: 1; }
 .demo-interaction-hint { color: var(--muted); font-size: .68rem; margin: .2rem .55rem; }
 .demo-user-text { margin: 0; white-space: pre-wrap; }
-.terminal-bottom .arrow-menu, .question-only .arrow-menu { position: static; }
-.terminal-bottom .arrow-popup { bottom: calc(100% + .35rem); right: .55rem; }
-.question-only .term-keys:has(.arrow-popup) { margin-bottom: 9rem; position: relative; }
-.question-only .arrow-popup { bottom: auto; right: .55rem; top: calc(100% + .35rem); }
 #demo-startup { color: #eceff4; background: #2e3440; }
 
 @media (orientation: portrait) {
