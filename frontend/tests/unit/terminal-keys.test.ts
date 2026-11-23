@@ -63,6 +63,22 @@ describe('TerminalKeys', () => {
     }
   });
 
+  it('flashes a tapped key but not a modifier or menu toggle', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
+    vi.spyOn(relayStore, 'sendToAgent').mockResolvedValue(commandResult('flash-1'));
+    render(TerminalKeys, { agent });
+
+    await user.click(screen.getByRole('button', { name: 'Esc' }));
+    expect(screen.getByRole('button', { name: 'Esc' })).toHaveClass('key-flash');
+    await user.click(screen.getByRole('button', { name: 'Ctrl' }));
+    await user.click(screen.getByRole('button', { name: 'Arrow keys' }));
+    expect(screen.getByRole('button', { name: 'Ctrl' })).not.toHaveClass('key-flash');
+    expect(screen.getByRole('button', { name: 'Arrow keys' })).not.toHaveClass('key-flash');
+    await user.click(screen.getByRole('button', { name: 'Up' }));
+    expect(screen.getByRole('button', { name: 'Up' })).toHaveClass('key-flash');
+  });
+
   it('reports a rejected paging key and drops the next queued key', async () => {
     setPagingCapability();
     const user = userEvent.setup();

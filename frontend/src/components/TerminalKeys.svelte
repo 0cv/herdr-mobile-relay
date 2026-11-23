@@ -115,6 +115,18 @@
     }, 2_000);
   }
 
+  function flashTappedKeys(node: HTMLElement) {
+    const flash = (event: MouseEvent) => {
+      const button = (event.target as Element).closest('button');
+      if (!button || button.hasAttribute('aria-pressed') || button.hasAttribute('aria-expanded')) return;
+      button.classList.remove('key-flash');
+      void button.offsetWidth;
+      button.classList.add('key-flash');
+    };
+    node.addEventListener('click', flash);
+    return { destroy: () => node.removeEventListener('click', flash) };
+  }
+
   function toggleModifier(which: 'ctrl' | 'alt' | 'shift') {
     if (disabled) return;
     arrowsOpen = false;
@@ -262,7 +274,7 @@
 {/snippet}
 
 
-<div>
+<div use:flashTappedKeys>
     <p class="sr-only" role="status" aria-live="polite">{keyControlStatus}</p>
     <div class="term-keys" aria-busy={keySending}>
       <Button variant="secondary" size="sm" disabled={disabled} onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Escape')}>Esc</Button>
