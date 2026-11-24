@@ -1,0 +1,36 @@
+name: stale
+
+on:
+  schedule:
+    - cron: '17 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  stale:
+    name: Close inactive issues and pull requests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/stale@4391f3da665fdf50b6810c1a66712fb9ba21aa93 # v11.0.0
+        with:
+          days-before-stale: 23
+          days-before-close: 7
+          exempt-issue-labels: keep-open
+          exempt-pr-labels: keep-open
+          stale-issue-message: >-
+            This issue has had no activity for 23 days. It will be closed in 7 days
+            unless someone comments or updates it, or adds the `keep-open` label.
+          stale-pr-message: >-
+            This pull request has had no activity for 23 days. It will be closed in
+            7 days unless someone comments, pushes or updates it, or adds the
+            `keep-open` label.
+          close-issue-message: >-
+            Closed after 30 days without activity. Comment if it is still relevant
+            and it can be reopened.
+          close-pr-message: >-
+            Closed after 30 days without activity. Reopen it when work continues.
