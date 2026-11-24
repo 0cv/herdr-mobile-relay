@@ -186,6 +186,10 @@ sure `make check` passes first. `main` only receives merges of `dev` at release
 time, and a pull request into `main` from any other branch fails its check. See
 `AGENTS.md` for the full branch and release flow.
 
+Issues and pull requests without activity for 23 days are marked stale, and
+closed 7 days later unless someone comments, pushes or updates them
+(`.github/workflows/stale.yml`). Add the `keep-open` label to exempt one.
+
 ## Toolchains
 
 Backend development uses Go 1.27.3; frontend development uses Node.js
