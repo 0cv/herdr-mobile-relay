@@ -1,4 +1,5 @@
 import type { Activity } from './types';
+import type { StatusAppearance } from './status-marks';
 
 export function activityMatchesSearch(activity: Partial<Activity>, query: string): boolean {
   if (!query) return true;
@@ -23,10 +24,12 @@ export function activityForNotification<T extends Pick<Activity, 'details'>>(
     && (activity.details as { event_id?: string }).event_id === notificationId) || null;
 }
 
-export function activityTone(status: unknown): 'danger' | 'warning' | 'success' | 'muted' {
+export function activityMark(status: unknown): StatusAppearance {
   const value = String(status || '').toLowerCase();
-  if (value === 'failed') return 'danger';
-  if (['attention', 'unconfirmed', 'completed_with_warning'].includes(value)) return 'warning';
-  if (['confirmed', 'completed', 'working', 'idle', 'ready', 'done'].includes(value)) return 'success';
-  return 'muted';
+  if (value === 'failed') return { shape: 'square', tone: 'danger' };
+  if (['attention', 'unconfirmed', 'completed_with_warning', 'warning'].includes(value)) return { shape: 'triangle', tone: 'warning' };
+  if (value === 'working') return { shape: 'chevron', tone: 'warning' };
+  if (value === 'idle' || value === 'ready') return { shape: 'ring', tone: 'success' };
+  if (['confirmed', 'completed', 'done'].includes(value)) return { shape: 'check', tone: 'success' };
+  return { shape: 'dash', tone: 'muted' };
 }

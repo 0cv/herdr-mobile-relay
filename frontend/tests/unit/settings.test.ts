@@ -162,7 +162,7 @@ describe('settings relay status', () => {
 
     socket.open();
     relayStore.setPushStatus(get(relayStore.relayConfigs)[0].id, 'sent');
-    await waitFor(() => expect(screen.getByRole('img', { name: 'Fedora relay connected' })).toBeInTheDocument());
+    expect(await screen.findByText('Loading Herdr agent inventory…')).toHaveAttribute('role', 'status');
     expect(screen.getByText('Push: syncing…')).toBeInTheDocument();
 
     socket.message({ type: 'push_subscribed', ok: true });
@@ -572,7 +572,7 @@ describe('settings relay status', () => {
     render(SettingsView);
     const socket = MockWebSocket.instances[0];
     socket.open();
-    await waitFor(() => expect(screen.getByRole('img', { name: 'Fedora relay connected' })).toBeInTheDocument());
+    expect(await screen.findByText('Loading Herdr agent inventory…')).toHaveAttribute('role', 'status');
     socket.message({ type: 'push_config', protocol: 3, version: 'abc1234', vapid_public_key: 'test-key' });
 
     // One Notifications section owns the switch; categories, delays, and

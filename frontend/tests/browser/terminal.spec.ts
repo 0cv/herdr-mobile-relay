@@ -698,7 +698,7 @@ test('fits and sends paging keys in the arrow menu at 320px', async ({ page }) =
 
 test('refreshes agents on return home and preserves shared terminal behavior', async ({ page }) => {
   await openAgent(page, { pane_id: 'w1:p1', status: 'working', project: 'Terminal app', agent: 'opencode', server_session_id: 'session-1', terminal_id: 'terminal-1', generation: 1 });
-  await expect(page.getByRole('img', { name: 'Agent working' })).toBeVisible();
+  await expect(page.getByRole('img', { name: 'Working' })).toBeVisible();
   const attachFiles = page.getByRole('button', { name: 'Attach files' });
   const arrowKeys = page.getByRole('button', { name: 'Arrow keys' });
   const enterKey = page.getByRole('button', { name: 'Enter' });

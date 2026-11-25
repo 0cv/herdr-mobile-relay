@@ -112,10 +112,11 @@ data and scripted replies. No setup required.
 
 | Agents | Terminal | Pairing |
 | --- | --- | --- |
-| <img src="images/home.jpeg" alt="Atlas and Birch workspaces, including the fix/one worktree, below a pinned test approval and rollout question" width="260"> | <img src="images/terminal.jpeg" alt="OpenCode terminal showing sample file reads and test results above the prompt and terminal keys" width="260"> | <img src="images/devices-qr.jpeg" alt="Reader invitation preview with a QR code labelled Herdr demo, not a setup link" width="260"> |
+| <img src="images/home.jpeg" alt="Pinned test approval and rollout question above the Project workspace, with a check for Fixture checks and an open ring for idle Release notes" width="260"> | <img src="images/terminal.jpeg" alt="OpenCode terminal showing sample file reads and test results above the prompt and terminal keys" width="260"> | <img src="images/devices-qr.jpeg" alt="Reader invitation preview with a QR code labelled Herdr demo, not a setup link" width="260"> |
 
 - Monitor and control agents across several computers, grouped by status and
-  Herdr workspace, with agents that need input pinned on top.
+  Herdr workspace. Agents needing input are pinned on top, and new results
+  are labelled and counted separately from idle agents.
 - Answer approvals and structured plan questions from Codex, Claude Code,
   Hermes, Qoder, OpenCode, Oh My Pi, and Pi.
 - Send prompts, terminal keys, and slash commands, including discovered Cursor

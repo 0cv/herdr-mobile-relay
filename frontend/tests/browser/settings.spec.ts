@@ -2,6 +2,21 @@ import { expect, test } from '@playwright/test';
 import { saveDeviceCredential } from '../support/journey-device';
 import { boot, commands, commandsForSocket, connectFedora, fedora, handshake, lastCommand, reply, server, setAutoCommands, socketCount } from '../support/journey-relay';
 
+test('distinguishes loading inventory from a healthy relay', async ({ page }) => {
+  await connectFedora(page, { inventory: { state: 'starting' } });
+  const header = page.getByRole('banner');
+  await expect(header.getByRole('img', { name: /agent inventory loading/ })).toHaveClass(/status-chevron/);
+  await page.getByRole('button', { name: 'Settings' }).click();
+  const relay = page.locator('.relay-row').filter({ hasText: 'Fedora' });
+  await expect(relay.getByText('Loading Herdr agent inventory…')).toHaveAttribute('role', 'status');
+  await expect(relay.locator('.status-chevron')).toHaveAttribute('aria-hidden', 'true');
+  await expect(relay.getByRole('img')).toHaveCount(0);
+  await server(page, 0, { type: 'inventory_status', state: 'ready' });
+  await expect(page.getByRole('img', { name: 'Fedora relay connected', exact: true })).toHaveClass(/status-check/);
+  await expect(header.getByRole('img', { name: '1/1 relays connected', exact: true })).toHaveClass(/status-check/);
+  await expect(page.getByRole('img', { name: 'New result' })).toHaveCount(0);
+});
+
 test('downloads a missing relay speech voice from Settings', async ({ page }) => {
   await connectFedora(page, {
     capabilities: ['attention_classification', 'slash_commands', 'speech_voice_management'],

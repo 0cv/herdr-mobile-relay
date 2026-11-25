@@ -1,6 +1,10 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '@playwright/test';
+import { saveDeviceCredential } from '../support/journey-device';
 import { createProjectInventory } from '../../src/demo/scene';
-import { commands, connectFedora, server, socketCount } from '../support/journey-relay';
+import { boot, commands, connectFedora, fedora, handshake, server, socketCount } from '../support/journey-relay';
+
+const themes = ['dark', 'light', 'nord', 'solarized', 'rose', 'latte'];
+const useTheme = (page: Page, theme: string) => page.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
 
 test('manages workspace modals, grouped worktrees, and drag ordering', async ({ page }) => {
   await page.clock.install();
@@ -26,12 +30,11 @@ test('manages workspace modals, grouped worktrees, and drag ordering', async ({ 
   await expect(page.getByText('No agents are running in this workspace.')).toBeHidden();
   await page.locator('.workspace-card').filter({ hasText: 'Shell Only' }).locator('summary').click();
   await expect(page.getByText('No agents are running in this workspace.')).toBeVisible();
-  // The computer is named on the workspace card, once, and every row under it
-  // spends its width on the directory instead of repeating that name.
+  // The workspace keeps its directory; the agent row uses that space for activity.
   const projectWorkspace = page.locator('.workspace-card').filter({ hasText: 'Project' }).first();
   await expect(projectWorkspace.locator('summary .workspace-card-title .host-badge')).toHaveText('@Fedora');
   await expect(projectWorkspace.locator('summary .path-row')).toHaveText('/work/project');
-  await expect(projectWorkspace.locator('.compact-agent-card .agent-path')).toHaveText('/work/project');
+  await expect(projectWorkspace.locator('.compact-agent-card .agent-activity')).toHaveText('Working');
   await expect(projectWorkspace.locator('.compact-agent-card .host-badge')).toHaveCount(0);
   await expect(page.locator('.workspace-card').filter({ hasText: 'Shell Only' }).locator('summary .path-row'))
     .toHaveText('~/shell-only');
@@ -223,7 +226,7 @@ test('defaults to the mixed workspace layout and separates state sections on dem
   });
 
   // Default: one headingless mixed list, one card per workspace with a state
-  // dot, blocked stays on top.
+  // mark; blocked stays on top.
   await expect(page.locator('section.agent-section').first()).toContainText('Needs input');
   await expect(page.getByRole('region', { name: 'Workspaces' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Workspaces' })).toBeHidden();
@@ -231,13 +234,11 @@ test('defaults to the mixed workspace layout and separates state sections on dem
   await expect(page.getByRole('heading', { name: 'Working' })).toBeHidden();
   await expect(page.getByRole('heading', { name: 'Idle' })).toBeHidden();
   const card = (project: string) => page.locator('.workspace-card').filter({ hasText: project });
-  await expect(card('alpha').getByRole('img', { name: 'Has a done session' })).toBeVisible();
+  await expect(card('alpha').locator('summary')).toHaveAccessibleName(/1 new result/);
   await expect(card('beta').getByRole('img', { name: 'Has a working session' })).toBeVisible();
-  await expect(card('delta').getByRole('img', { name: 'All sessions idle and ready for input' })).toBeVisible();
-  // Idle-and-ready reads as a green ring, distinct from the filled unread-done
-  // dot and from the grey used only for unknown states.
-  await expect(card('delta').locator('.workspace-state-dot')).toHaveClass(/status-ready/);
-  await expect(card('alpha').locator('.workspace-state-dot')).toHaveClass(/status-success/);
+  await expect(card('delta').getByRole('img', { name: 'Has an idle session' })).toBeVisible();
+  await expect(card('delta').locator('.workspace-state-dot')).toHaveClass(/status-ring/);
+  await expect(card('alpha').locator('.workspace-state-dot')).toHaveClass(/status-check/);
   await expect(page.locator('.workspace-card summary strong')).toHaveText(['alpha', 'beta', 'delta']);
   // Active workspaces start expanded; idle-only cards stay collapsed.
   await expect(card('alpha')).toHaveAttribute('open', '');
@@ -249,9 +250,13 @@ test('defaults to the mixed workspace layout and separates state sections on dem
   await page.getByRole('button', { name: 'By State' }).click();
   await page.getByRole('button', { name: 'Back' }).click();
   const done = page.locator('.done-section');
-  await expect(done.getByRole('heading', { name: 'Done' })).toBeVisible();
+  await expect(done.getByRole('heading', { name: 'Done 1 new result' })).toBeVisible();
+  for (const theme of themes) {
+    await useTheme(page, theme);
+    await expectTextContrast(done.locator('.section-count'), `${theme}: Done count`);
+  }
   await expect(done.locator('summary strong')).toHaveText(['alpha']);
-  await expect(done.locator('.workspace-done-count')).toHaveText('1 done');
+  await expect(done.locator('.workspace-done-count')).toHaveText('1 new result');
   const stateWorking = page.locator('.working-section');
   await expect(stateWorking.locator('summary strong')).toHaveText(['beta']);
   await expect(page.getByRole('heading', { name: 'Idle' })).toBeVisible();
@@ -272,6 +277,10 @@ test('keeps activity cards inside the page and confirms permanent deletion', asy
     type: 'activity_history',
     activities: [
       {
+        id: 'activity-failure', timestamp: Date.now(), kind: 'action', summary: 'Could not send keys',
+        status: 'failed',
+      },
+      {
         id: 'activity-working', timestamp: Date.now(), kind: 'working', summary: 'omp working',
         pane_id: 'w1:p1', project: 'herdr-mobile-relay', agent: 'omp', status: 'working',
       },
@@ -288,6 +297,13 @@ test('keeps activity cards inside the page and confirms permanent deletion', asy
   await expect(page.locator('.activity-summary-metrics > div').filter({ hasText: 'Completed' })).toContainText('1');
   await expect(activity).toBeVisible();
   await expect(page.getByRole('button', { name: /omp working/ })).toHaveCount(0);
+  const failure = page.getByRole('button', { name: /Could not send keys.*failed/ });
+  await expect(failure.locator('.status-square')).toBeVisible();
+  await failure.click();
+  await expect(page.locator('.activity-detail-head .status-square')).toBeVisible();
+  await expect(page.locator('.activity-detail-meta')).toHaveText('Fedora · failed');
+  await page.getByRole('button', { name: 'Back' }).click();
+
   const headingBox = await page.getByRole('heading', { name: 'Activity', level: 2 }).boundingBox();
   const deleteBox = await page.getByRole('button', { name: 'Delete all' }).boundingBox();
   const box = await activity.boundingBox();
@@ -442,7 +458,7 @@ test('shows inventory failure instead of zero agents and recovers without reconn
 
   await expect(page.getByRole('status', { name: 'Fedora agent inventory unavailable' })).toContainText('changing too quickly');
   await expect(page.getByRole('button', { name: 'Open Existing relay on Fedora' })).toBeVisible();
-  await expect(page.getByRole('img', { name: /agent inventory unavailable/ })).toBeVisible();
+  await expect(page.getByRole('img', { name: /agent inventory unavailable/ })).toHaveClass(/status-triangle/);
 
   await server(page, 0, {
     type: 'inventory_status',
@@ -458,6 +474,335 @@ test('shows inventory failure instead of zero agents and recovers without reconn
   await expect(page.getByRole('status', { name: 'Fedora agent inventory unavailable' })).toBeHidden();
   await expect(page.getByRole('button', { name: 'Open Existing relay on Fedora' })).toBeVisible();
   expect(await socketCount(page)).toBe(1);
+});
+
+test('keeps a stale result when a controller tries to open it from jump', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await saveDeviceCredential(page, { id: 'credential-controller', deviceId: 'device-controller', secret: 'C'.repeat(43), role: 'controller' });
+  await handshake(page, 0, { capabilities: [] });
+  const { projectAgent } = createProjectInventory();
+  await server(page, 0, { type: 'agents', agents: [{ ...projectAgent, name: 'fix-bug', status: 'succeeded' }] });
+  const summary = page.locator('.workspace-card summary');
+  await expect(summary).toHaveAccessibleName(/1 new result/);
+  await server(page, 0, { type: 'inventory_status', state: 'error', stale: true });
+  const row = page.getByRole('button', { name: 'Open fix-bug on Fedora' });
+  await expect(row).toBeDisabled();
+
+  await page.getByRole('button', { name: 'Search all agents' }).click();
+  await page.getByRole('dialog', { name: 'Jump to agent' }).getByRole('button', { name: /New result.*fix-bug/ }).click();
+  await expect(page.getByRole('main', { name: 'Agent inventory unavailable' })).toBeVisible();
+  await page.getByRole('button', { name: 'Back to agents' }).click();
+  await expect(summary).toHaveAccessibleName(/1 new result/);
+  await expect(row).toHaveAccessibleDescription('New result');
+  expect((await commands(page)).filter(({ type }) => type === 'acknowledge_pane')).toHaveLength(0);
+});
+
+test('labels fresh inventory activity before the next minute tick', async ({ page }) => {
+  const mounted = new Date('2026-08-12T12:00:00Z');
+  await page.clock.setFixedTime(mounted);
+  await connectFedora(page, { capabilities: [] });
+  const working = { pane_id: 'w1:p1', name: 'fix-bug', agent: 'codex', status: 'working' };
+  const row = page.getByRole('button', { name: 'Open fix-bug on Fedora' });
+  await server(page, 0, { type: 'agents', agents: [working] });
+  await expect(row).toHaveAccessibleDescription('Working');
+
+  const now = mounted.getTime() + 10_000;
+  await page.clock.setFixedTime(now);
+  const done = { ...working, type: 'agent_update', status: 'succeeded' };
+  const summary = page.locator('.workspace-card summary');
+  const time = summary.locator('time');
+  await server(page, 0, { ...done, last_active_at: now });
+  await expect(row).toHaveAccessibleDescription('New result · last active just now');
+  await expect(time).toHaveText('now');
+  await expect(time).toHaveAttribute('datetime', new Date(now).toISOString());
+
+  await server(page, 0, { ...done, last_active_at: now + 10_000 });
+  await expect(row).toHaveAccessibleDescription('New result');
+  await expect(time).toHaveCount(0);
+
+  await server(page, 0, { ...done, last_active_at: now });
+  await expect(time).toHaveText('now');
+  await server(page, 0, { ...done, last_active_at: 1e16 });
+  await expect(row).toHaveAccessibleDescription('New result');
+  await expect(time).toHaveCount(0);
+});
+
+test('counts new results across a closed workspace and its linked worktree', async ({ page }) => {
+  const mac = { ...fedora, id: 'mac', label: 'Mac', url: 'ws://127.0.0.1:8872' };
+  await boot(page, [fedora, mac]);
+  await expect.poll(() => socketCount(page)).toBe(2);
+  await handshake(page, 0, { capabilities: [] });
+  await handshake(page, 1, { capabilities: [] });
+  const { project, linked, projectAgent } = createProjectInventory();
+  const first = { ...projectAgent, name: 'fix-bug', project: 'project', tab_label: 'main', tab_order: 1, status: 'working' };
+  const second = {
+    ...projectAgent, pane_id: 'w1:p2', tab_id: 'w1:t2', name: 'review-tests', project: 'project',
+    tab_label: 'review', tab_order: 2, status: 'idle',
+  };
+  const child = {
+    ...projectAgent, pane_id: 'w4:p1', tab_id: 'w4:t1', workspace_id: 'w4', cwd: linked.cwd,
+    name: 'linked-checks', tab_label: 'fix', status: 'done',
+  };
+  await server(page, 0, { type: 'workspaces', workspaces: [project, linked] });
+  await server(page, 0, { type: 'agents', agents: [first, second, child] });
+  await server(page, 1, { type: 'agents', agents: [{ ...first, name: 'other-result', status: 'done' }] });
+  await page.getByRole('button', { name: 'Mac', exact: true }).click();
+  const workspace = page.locator('details.workspace-card').filter({
+    has: page.locator('summary strong').filter({ hasText: /^Project$/ }),
+  });
+  const summary = workspace.locator('summary');
+  const fix = page.getByRole('button', { name: 'Open fix-bug on Fedora' });
+  const review = page.getByRole('button', { name: 'Open review-tests on Fedora' });
+  const assertTabOrder = () => expect(workspace.locator('.workspace-tab h3')).toHaveText(['main', 'review', 'fix']);
+  await expect(fix).toHaveAccessibleDescription('Working');
+  await expect(review).toHaveAccessibleDescription('Idle');
+  await expect(summary).toHaveAccessibleName(/1 new result\b/);
+  await assertTabOrder();
+  await server(page, 0, { type: 'agent_update', ...first, status: 'succeeded' });
+  await expect(fix).toHaveAccessibleDescription('New result');
+  await summary.click();
+  await expect(workspace).not.toHaveAttribute('open');
+  await expect(summary).toHaveAccessibleName(/2 new results.*1 worktree/);
+  await summary.click();
+  await assertTabOrder();
+  await expect(fix).toHaveAccessibleDescription('New result');
+  await expect(fix.locator('.status-check')).toBeVisible();
+  await expect(review.locator('.status-ring')).toBeVisible();
+  await expect(workspace.getByRole('button', { name: 'Open linked-checks on Fedora' }))
+    .toHaveAccessibleDescription('New result');
+
+  const layout = async (name: string) => {
+    await page.getByRole('button', { name: 'Settings' }).click();
+    await page.getByRole('button', { name, exact: true }).click();
+    await page.getByRole('button', { name: 'Back' }).click();
+  };
+  await layout('By State');
+  const doneHeading = page.locator('.done-section h2');
+  await expect(doneHeading).toHaveAccessibleName('Done 2 new results');
+  await expect(page.locator('.done-section summary')).toHaveAccessibleName(/2 new results/);
+  await expect(page.getByRole('button', { name: /Open other-result/ })).toHaveCount(0);
+  await fix.click();
+  await expect(page.getByRole('main', { name: 'Terminal for project' })).toBeVisible();
+  await expect.poll(async () => (await commands(page)).filter(({ type }) => type === 'acknowledge_pane'))
+    .toMatchObject([{ pane_id: first.pane_id }]);
+  await server(page, 0, { type: 'agent_update', ...first, status: 'idle' });
+  await page.getByRole('button', { name: 'Back' }).click();
+  await expect(doneHeading).toHaveAccessibleName('Done 1 new result');
+  await layout('Mixed');
+  await expect(fix).toHaveAccessibleDescription('Idle');
+  await page.getByRole('button', { name: 'Open linked-checks on Fedora' }).click();
+  await expect.poll(async () => (await commands(page)).filter(({ type }) => type === 'acknowledge_pane'))
+    .toMatchObject([{ pane_id: first.pane_id }, { pane_id: child.pane_id }]);
+  await server(page, 0, { type: 'agent_update', ...child, status: 'idle' });
+  await page.getByRole('button', { name: 'Back' }).click();
+  await expect(summary.locator('.workspace-done-count')).toHaveCount(0);
+  await assertTabOrder();
+  await layout('By State');
+  await expect(doneHeading).toHaveCount(0);
+});
+
+test('a reader finds the exact pane path in jump and sends no acknowledgement from Activity', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 720 });
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await saveDeviceCredential(page, { id: 'credential-reader', deviceId: 'device-reader', secret: 'R'.repeat(43), role: 'reader' });
+  await handshake(page, 0, { capabilities: [] });
+  const { project, projectAgent } = createProjectInventory();
+  const cwd = `/home/user/project/${'unbroken-path-segment'.repeat(4)}/a  b/test-fixtures`;
+  const fix = { ...projectAgent, cwd, name: 'fix-bug', project: 'project', tab_label: 'main', status: 'succeeded' };
+  await server(page, 0, { type: 'workspaces', workspaces: [project] });
+  await server(page, 0, { type: 'agents', agents: [fix] });
+  await expect(page.locator('.workspace-card summary .path-row')).toHaveText('/work/project');
+  await page.getByRole('button', { name: 'Search all agents' }).click();
+  const jump = page.getByRole('dialog', { name: 'Jump to agent' });
+  const search = jump.getByRole('searchbox');
+  await search.fill('fix-bug');
+  const result = jump.getByRole('button', { name: /New result.*fix-bug/ });
+  await result.focus();
+  await expect(result).toBeFocused();
+  await expect(result).toHaveAccessibleDescription(cwd.replace('  ', ' '));
+  const path = jump.locator('.jump-pane-path');
+  await expect(path).toBeVisible();
+  expect(await path.evaluate((element) => ({
+    fits: element.scrollWidth <= element.clientWidth,
+    selection: getComputedStyle(element).userSelect,
+    renderedPath: (element as HTMLElement).innerText,
+  }))).toEqual({ fits: true, selection: 'text', renderedPath: cwd });
+  await expect(page).toHaveURL(/\/$/);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(320);
+  await page.keyboard.press('Escape');
+
+  await server(page, 0, { type: 'activity_history', activities: [{
+    id: 'result', kind: 'finished', status: 'completed', summary: 'Fixture checks completed',
+    pane_id: fix.pane_id, timestamp: Date.now(),
+  }] });
+  await page.getByRole('button', { name: 'Activity history' }).click();
+  await page.getByRole('button', { name: /Fixture checks completed/ }).click();
+  await page.getByRole('button', { name: /Go to thread/ }).click();
+  await expect(page.getByRole('main', { name: 'Terminal for project' })).toBeVisible();
+  await expect(page.getByRole('banner').getByRole('img', { name: 'New result' })).toHaveClass(/status-check/);
+  for (const url of [/#activity=/, /#activity$/, /\/$/]) {
+    await page.getByRole('button', { name: 'Back' }).click();
+    await expect(page).toHaveURL(url);
+  }
+  const row = page.getByRole('button', { name: 'Open fix-bug on Fedora' });
+  await expect(row).toHaveAccessibleDescription('New result');
+  await expect(page.locator('.workspace-card summary')).toHaveAccessibleName(/1 new result/);
+  expect((await commands(page)).filter(({ type }) => type === 'acknowledge_pane')).toHaveLength(0);
+});
+
+async function markGeometry(mark: Locator) {
+  return mark.evaluate((element) => {
+    const { width, height } = element.getBoundingClientRect();
+    const ink = getComputedStyle(element, '::before');
+    return {
+      width, height, clip: ink.clipPath, top: ink.top, border: ink.borderTopWidth,
+      corner: ink.borderTopLeftRadius, animation: ink.animationName,
+    };
+  });
+}
+
+async function surfaceContrast(target: Locator, includeAncestors = false) {
+  return target.evaluate((element, includeAncestors) => {
+    const canvas = document.createElement('canvas');
+    const context = canvas.getContext('2d')!;
+    const fill = (color: string) => {
+      context.fillStyle = color;
+      context.fillRect(0, 0, 1, 1);
+    };
+    const luminance = () => {
+      const [r, g, b, a] = context.getImageData(0, 0, 1, 1).data;
+      const linear = [r, g, b].map((value) => value / 255)
+        .map((channel) => channel <= .04045 ? channel / 12.92 : ((channel + .055) / 1.055) ** 2.4);
+      return { light: .2126 * linear[0] + .7152 * linear[1] + .0722 * linear[2], a };
+    };
+    const backgrounds = [];
+    let undimmed = true;
+    for (let surface: Element | null = element; surface; surface = includeAncestors ? surface.parentElement : null) {
+      const style = getComputedStyle(surface);
+      backgrounds.push(style.backgroundColor);
+      undimmed &&= style.opacity === '1';
+    }
+    backgrounds.reverse().forEach(fill);
+    const backing = luminance();
+    fill(getComputedStyle(element).color);
+    const ink = luminance();
+    const [dark, light] = [ink.light, backing.light].sort((a, b) => a - b);
+    return { contrast: (light + .05) / (dark + .05), opaque: backing.a === 255, undimmed };
+  }, includeAncestors);
+}
+
+async function expectTextContrast(text: Locator, label: string) {
+  await expect(text).toBeVisible();
+  const { contrast, opaque, undimmed } = await surfaceContrast(text, true);
+  expect({ opaque, undimmed }, `${label} is undimmed on an opaque backing`).toEqual({ opaque: true, undimmed: true });
+  expect.soft(contrast, `${label} text contrast`).toBeGreaterThanOrEqual(4.5);
+}
+
+test('keeps a truncated terminal hyperlink out of Home and its accessible description', async ({ page }) => {
+  await connectFedora(page, { capabilities: ['attention_classification'] });
+  await server(page, 0, { type: 'agents', agents: [{
+    pane_id: 'w1:p1', name: 'approve', agent: 'codex', status: 'blocked', attention_kind: 'approval',
+    command: 'view \x1b]8;;https://example.test/?token=sample',
+  }] });
+  const row = page.getByRole('button', { name: 'Open approve on Fedora' });
+  await expect(row.locator('.prompt-preview')).toHaveText('view');
+  await expect(row).toHaveAccessibleDescription('Needs input view');
+});
+
+test('keeps static 12px marks, activity and counts legible in six themes at 320px and in the rail', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 820 });
+  await connectFedora(page, { capabilities: ['attention_classification'] });
+  const states = [
+    ['approve', 'blocked', 'approval', 'Needs input', 'square'],
+    ['inspect', 'blocked', 'unknown', 'Needs inspection', 'triangle'],
+    ['work', 'working', undefined, 'Working', 'chevron'],
+    ['result', 'succeeded', undefined, 'New result', 'check'],
+    ['idle', 'idle', undefined, 'Idle', 'ring'],
+    ['unknown', 'exited', undefined, 'Status unknown', 'dash'],
+  ] as const;
+  const command = 'printf "<a>&|"; ' + 'long-unbroken-command-argument'.repeat(20);
+  const age = Date.now() - 330_000;
+  const cwd = '/home/test/' + 'a-long-workspace-name-'.repeat(10);
+  await server(page, 0, { type: 'agents', agents: states.map(([name, status, attention_kind], index) => ({
+    pane_id: `w1:p${index + 1}`, workspace_id: 'w1', agent: 'codex', project: 'Status sample',
+    name, cwd, status, attention_kind, ...(name === 'approve' ? { command } : {}),
+    last_active_at: name === 'work' ? age : undefined,
+  })) });
+  const row = (name: string) => page.getByRole('button', { name: `Open ${name} on Fedora`, exact: true });
+  const resultCount = page.locator('.workspace-done-count');
+  await expect(resultCount).toHaveText('1 new result');
+  await expect(row('work')).toHaveAccessibleDescription('Working · last active 5m ago');
+  const preview = row('approve').locator('.prompt-preview');
+  await expect(row('approve')).toHaveAccessibleDescription(/^Needs input printf "<a>&\|"; .*…$/);
+  expect([...(await preview.textContent())!]).toHaveLength(400);
+  for (const theme of themes) {
+    await useTheme(page, theme);
+    await expectTextContrast(row('result').getByText('New result', { exact: true }), `${theme}: New result`);
+    await expectTextContrast(row('idle').getByText('Idle', { exact: true }), `${theme}: Idle`);
+    await expectTextContrast(resultCount, `${theme}: workspace count`);
+  }
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  const geometries = [];
+  for (const theme of themes) {
+    await useTheme(page, theme);
+    const current = [];
+    for (const [name, , , label, shape] of states) {
+      const mark = row(name).locator(`.agent-identity .status-${shape}`);
+      await expect(row(name).locator('.agent-activity')).toContainText(label);
+      const geometry = await markGeometry(mark);
+      expect(geometry).toMatchObject({ width: 12, height: 12, animation: 'none' });
+      const contrast = await surfaceContrast(mark);
+      expect(contrast.opaque).toBe(true);
+      expect(contrast.contrast).toBeGreaterThanOrEqual(3);
+      current.push(geometry);
+    }
+    geometries.push(current);
+    for (const text of [resultCount, row('work').locator('.agent-activity'), preview]) {
+      expect(await text.evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        const card = element.closest('article, details')!.getBoundingClientRect();
+        return rect.left >= card.left && rect.right <= card.right && element.scrollWidth <= element.clientWidth;
+      })).toBe(true);
+    }
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(320);
+  }
+  expect(new Set(geometries[0].map((shape) => JSON.stringify(shape))).size).toBe(6);
+  for (const theme of geometries) expect(theme).toEqual(geometries[0]);
+  expect(geometries[0][0]).toMatchObject({ top: '1px', clip: 'none' });
+  expect(geometries[0][1].clip).toContain('polygon(50%');
+  expect(geometries[0][2].clip).toContain('80% 50%');
+  expect(geometries[0][3].clip).toContain('40% 63%');
+  expect(geometries[0][4]).toMatchObject({ border: '2px', corner: '50%' });
+  expect(geometries[0][5]).toMatchObject({ top: '5px', clip: 'none' });
+
+  await page.getByRole('button', { name: 'Search all agents' }).click();
+  const jump = page.getByRole('dialog', { name: 'Jump to agent' });
+  await expect(jump.getByRole('button', { name: /New result.*result/ }).locator('.status-check')).toBeVisible();
+  await expect(jump.getByRole('button', { name: /Idle.*idle/ }).locator('.status-ring')).toBeVisible();
+  await page.keyboard.press('Escape');
+
+  await row('work').click();
+  const rail = page.getByRole('complementary', { name: 'Agent navigation' });
+  await expect(rail).toBeHidden();
+  for (const [theme, index] of themes.map((theme, index) => [theme, index] as const)) {
+    await page.setViewportSize({ width: index % 2 ? 1024 : 900, height: 820 });
+    await useTheme(page, theme);
+    await expect(rail).toBeVisible();
+    const active = rail.getByRole('button', { name: /Working.*work/ });
+    await expect(active).toHaveAttribute('aria-current', 'page');
+    const selectedMark = active.locator('.status-chevron');
+    expect(await markGeometry(selectedMark)).toEqual(geometries[0][2]);
+    const { contrast, opaque } = await surfaceContrast(selectedMark);
+    expect(opaque).toBe(true);
+    expect(contrast).toBeGreaterThanOrEqual(3);
+    expect(await selectedMark.evaluate((mark) =>
+      getComputedStyle(mark).backgroundColor === getComputedStyle(mark.closest('button')!).backgroundColor)).toBe(true);
+    await expect(rail.getByRole('button', { name: /New result.*result/ }).locator('.status-check')).toBeVisible();
+    await expect(rail.getByRole('button', { name: /Idle.*idle/ }).locator('.status-ring')).toBeVisible();
+    await expect(rail.locator('.agent-activity')).toHaveCount(0);
+  }
 });
 
 test('uses a workspace agent rail in a tablet terminal', async ({ page }) => {

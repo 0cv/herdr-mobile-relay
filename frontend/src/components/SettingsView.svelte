@@ -6,6 +6,8 @@
   import NotificationSettings from '$components/NotificationSettings.svelte';
   import PairDeferredRelay from '$components/PairDeferredRelay.svelte';
   import ScanSetupCode from '$components/ScanSetupCode.svelte';
+  import StatusMark from '$components/StatusMark.svelte';
+  import { connectionMarks, relayStatusMark } from '$lib/status-marks';
   import AppDialog from '$components/ui/AppDialog.svelte';
   import AppSwitch from '$components/ui/AppSwitch.svelte';
   import Button from '$components/ui/Button.svelte';
@@ -196,8 +198,10 @@
   const heightLeaseSupported = $derived([...$connections.values()].some((connection) =>
     connection.status === 'connected' && connection.capabilities.includes('pane_size_opt_in_rows')));
   const degradedCount = $derived([...$connections.values()].filter(
-    (connection) => connection.status === 'connected' && connection.inventory.state !== 'ready',
+    (connection) => connection.status === 'connected' && connection.inventory.state === 'error',
   ).length);
+  const loading = $derived([...$connections.values()].some((connection) =>
+    connection.status === 'connecting' || (connection.status === 'connected' && connection.inventory.state === 'starting')));
   const relaysWithoutVoice = $derived(relayRows
     .filter(({ connection }) => connection?.status === 'connected'
       && !connection.speechLanguages.includes($speechLanguage))
@@ -523,6 +527,8 @@
       {#if !$relays.length}<p class="hint">No relays configured.</p>{/if}
       {#each relayRows as { relay, connection } (relay.id)}
         {@const connectionStatus = connection?.status || 'disconnected'}
+        {@const inventoryPending = connectionStatus === 'connected' && connection?.inventory.state !== 'ready'}
+        {@const mark = relayStatusMark(connection)}
         {@const version = relayVersionMeta(connection)}
         {@const update = relayUpdateMeta(connection)}
         {@const manualUpdate = Boolean(connection && relayNeedsManualBootstrap(connection))}
@@ -532,11 +538,7 @@
         {@const herdr = connection?.herdrStatus}
         {@const herdrFeatureWarnings = herdrWarnings(herdr?.features)}
         <article class="relay-row">
-          <span
-            class={`status-dot status-${connectionStatus === 'connected' && connection?.inventory.state === 'ready' ? 'success' : connectionStatus === 'connecting' || connectionStatus === 'connected' ? 'warning' : 'danger'}`}
-            role="img"
-            aria-label={`${relay.label} relay ${connectionStatus}`}
-          ></span>
+          <StatusMark {...mark} label={inventoryPending ? undefined : `${relay.label} relay ${mark.label}`} />
           <div class="relay-info">
             <strong>{relay.label}</strong>
             {#if connectionPath}<small>Connection: {connectionPath}</small>{/if}
@@ -567,7 +569,7 @@
               </small>
               <PairDeferredRelay relayId={relay.id} onPair={(id) => relayStore.pairDeferredRelay(id)} />
             {/if}
-            {#if connectionStatus === 'connected' && connection?.inventory.state !== 'ready'}
+            {#if inventoryPending}
               <small class="warning" role="status">
                 {connection?.inventory.state === 'error'
                   ? connection.inventory.message || 'Herdr agent inventory unavailable.'
@@ -821,7 +823,10 @@
 
   <Card>
     <h3>Status</h3>
-    <p><span class={`status-dot status-${degradedCount ? 'warning' : connectedCount ? 'success' : 'danger'}`}></span> {connectedCount}/{$relays.length} relays connected · {$agents.length} agents</p>
+    <p>
+      <StatusMark {...connectionMarks[degradedCount ? 'degraded' : loading ? 'loading' : connectedCount ? 'connected' : 'disconnected']} />
+      {connectedCount}/{$relays.length} relays connected · {$agents.length} agents{#if loading} · Connecting or loading inventory{/if}
+    </p>
     {#if degradedCount}<p class="warning" role="status">{degradedCount} connected {degradedCount === 1 ? 'relay has' : 'relays have'} unavailable agent inventory.</p>{/if}
   </Card>
 

@@ -6,7 +6,7 @@ import { safeExternalUrl } from '$lib/rich-output';
 import { detectTerminalMenu, terminalTextInputMode } from '$lib/terminal-menu';
 import { escapeHtml, linkifyTerminalText, renderTerminalContent } from '$lib/terminal';
 import type { Activity, Agent, RelayWorkspace } from '$lib/types';
-import { homeRelativePath, informativePath, relayWorkspaceTrees, workspaceGroups, workspaceRecordsFor, workspaceProvenance, workspaceStateTone } from '$lib/workspaces';
+import { homeRelativePath, informativePath, relayWorkspaceTrees, workspaceGroups, workspaceRecordsFor, workspaceProvenance, workspaceStatusGroup } from '$lib/workspaces';
 
 function agent(overrides: Partial<Agent>): Agent {
   return {
@@ -210,10 +210,10 @@ describe('workspace navigation', () => {
     ]);
     expect(group).toMatchObject({ doneCount: 1, workingCount: 1, readyCount: 1 });
     // done > working > ready (idle) > unknown
-    expect(workspaceStateTone(group)).toBe('success');
-    expect(workspaceStateTone({ ...group, doneCount: 0 })).toBe('warning');
-    expect(workspaceStateTone({ ...group, doneCount: 0, workingCount: 0 })).toBe('ready');
-    expect(workspaceStateTone({ ...group, doneCount: 0, workingCount: 0, readyCount: 0 })).toBe('muted');
+    expect(workspaceStatusGroup(group)).toBe('done');
+    expect(workspaceStatusGroup({ ...group, doneCount: 0 })).toBe('working');
+    expect(workspaceStatusGroup({ ...group, doneCount: 0, workingCount: 0 })).toBe('ready');
+    expect(workspaceStatusGroup({ ...group, doneCount: 0, workingCount: 0, readyCount: 0 })).toBe('other');
   });
 });
 

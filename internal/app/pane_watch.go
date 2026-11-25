@@ -211,7 +211,7 @@ func (s *Server) pollPaneWatch(watch *paneWatch) {
 }
 
 func (s *Server) readPaneWatchFrame(watch *paneWatch) (map[string]any, *paneWatchFrame) {
-	request := s.paneReadRequest(watch.client.ID(), protocol.Inbound{PaneID: watch.paneID, Format: watch.format, Lines: &watch.lines})
+	request := s.paneReadRequest(watch.client, protocol.Inbound{PaneID: watch.paneID, Format: watch.format, Lines: &watch.lines})
 	response := s.preparePaneResponse(request, s.dispatcher.HandleReadPane(watch.ctx, request))
 	response["target"] = watch.target
 	content, ok := successfulPaneContent(response)
@@ -292,12 +292,14 @@ func requestedPaneWatchInterval(milliseconds int) time.Duration {
 // that itself holds an active lease on the pane reads it at the leased size
 // (the viewport-only read path); every other client, including readers and
 // controllers with Resize Session off, reads the pane at Herdr's own size.
-func (s *Server) paneReadRequest(clientID string, inbound protocol.Inbound) coordinator.PaneReadRequest {
+func (s *Server) paneReadRequest(client *transport.ClientConn, inbound protocol.Inbound) coordinator.PaneReadRequest {
+	action, known := protocol.ClassifyAction("acknowledge_pane")
 	request := coordinator.PaneReadRequest{
-		PaneID:    inbound.PaneID,
-		RequestID: inbound.RequestID,
-		Format:    inbound.Format,
-		Lines:     30,
+		PaneID:      inbound.PaneID,
+		RequestID:   inbound.RequestID,
+		Format:      inbound.Format,
+		Lines:       30,
+		Acknowledge: known && s.authorizeDeviceAction(client, action, "") == nil,
 	}
 	if inbound.Lines != nil {
 		request.Lines = *inbound.Lines
@@ -305,7 +307,7 @@ func (s *Server) paneReadRequest(clientID string, inbound protocol.Inbound) coor
 	if s.paneSizeM == nil {
 		return request
 	}
-	if columns, rows, ok := s.paneSizeM.ReadGeometry(clientID, inbound.PaneID); ok {
+	if columns, rows, ok := s.paneSizeM.ReadGeometry(client.ID(), inbound.PaneID); ok {
 		request.Columns = columns
 		request.Rows = rows
 	}

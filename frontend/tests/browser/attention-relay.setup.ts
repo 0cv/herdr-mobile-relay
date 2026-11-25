@@ -3,6 +3,9 @@ import { createServer } from 'node:net';
 import { access, appendFile, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { parseArgs } from 'node:util';
+import type { FullConfig } from '@playwright/test';
+import { readerResultPane } from './attention-relay-fixture';
 
 const repoRoot = resolve(import.meta.dirname, '../../..');
 const captureRoot = join(repoRoot, 'internal/question/testdata/attention');
@@ -66,6 +69,7 @@ interface PaneRow {
   content: string;
   session?: string;
   cwd?: string;
+  workspace?: string;
 }
 
 const attentionCaptures: [name: string, agent: string, capture: string][] = [
@@ -89,7 +93,7 @@ const attentionCaptures: [name: string, agent: string, capture: string][] = [
   ['omp-partial-ask', 'omp', 'omp-partial-ask'],
 ];
 
-export default async function setup() {
+export default async function setup(config: FullConfig) {
   const runtime = await mkdtemp(join(tmpdir(), 'herdr-attention-browser-'));
   const cache = process.env.GOCACHE || join(runtime, 'go-cache');
   const fakeBin = join(runtime, 'fake-herdr');
@@ -104,19 +108,32 @@ export default async function setup() {
   await writeFile(metadataPath, '{}', { mode: 0o600 });
   const webRoot = join(runtime, 'web');
   const conversationRoot = join(runtime, 'claude');
-  const conversationSession = '123e4567-e89b-12d3-a456-426614174000';
-  const conversationPath = join(conversationRoot, 'projects', '-tmp-conversation', `${conversationSession}.jsonl`);
+  // Playwright applies the CLI repeat override after global setup.
+  const { values: { 'repeat-each': repeatOverride } } = parseArgs({
+    options: { 'repeat-each': { type: 'string' } }, strict: false, allowPositionals: true,
+  });
+  const readerResults = config.projects.flatMap(({ name, repeatEach, retries }) =>
+    Array.from({ length: repeatOverride === undefined ? repeatEach : Number(repeatOverride) }, (_, repeat) =>
+      Array.from({ length: retries + 1 }, (_, retry) => readerResultPane(name, repeat, retry)),
+    ).flat(),
+  ).map((name, index) => ({
+    name, workspace: name, agent: 'claude', status: 'succeeded', content: 'Fixture result',
+    session: `123e4567-e89b-12d3-a456-${426614174003 + index}`, cwd: '/tmp/conversation',
+  }));
   await Promise.all([mkdir(cache, { recursive: true }), mkdir(webRoot), mkdir(barrierDir), mkdir(join(conversationRoot, 'projects', '-tmp-conversation'), { recursive: true })]);
   await writeFile(join(webRoot, 'index.html'), '<html>test</html>\n');
-  await writeFile(conversationPath, [
+  const history = [
     JSON.stringify({ type: 'user', uuid: 'history-user-1', timestamp: '2026-09-02T10:00:00Z', message: { content: 'history question' } }),
     JSON.stringify({ type: 'assistant', uuid: 'history-assistant-1', timestamp: '2026-09-02T10:00:01Z', message: { content: [{ type: 'text', text: 'history answer' }] } }),
-  ].join('\n') + '\n');
+  ].join('\n') + '\n';
+  await Promise.all(readerResults.map(({ session }) =>
+    writeFile(join(conversationRoot, 'projects', '-tmp-conversation', `${session}.jsonl`), history),
+  ));
 
   for (const [project, session] of [['arbitrary-dialog', '123e4567-e89b-12d3-a456-426614174001'], ['orchestration-dialog', '123e4567-e89b-12d3-a456-426614174002'], ['same-target-new-directory', '123e4567-e89b-12d3-a456-426614174001']]) {
     const directory = join(conversationRoot, 'projects', `-tmp-${project}`);
     await mkdir(directory, { recursive: true });
-    await writeFile(join(directory, `${session}.jsonl`), await readFile(conversationPath, 'utf8'));
+    await writeFile(join(directory, `${session}.jsonl`), history);
   }
 
   // The literal-input dialogs have no input prompt line, so the relay cannot classify them: they need
@@ -134,23 +151,29 @@ export default async function setup() {
     ...await Promise.all(attentionCaptures.map(async ([name, agent, capture]) => ({
       name, agent, status: 'blocked', content: await readFile(join(captureRoot, `${capture}.ansi`), 'utf8'),
     }))),
-    { name: 'conversation-history', agent: 'claude', status: 'working', content: 'conversation history fixture', session: conversationSession, cwd: '/tmp/conversation' },
+    ...readerResults,
   ];
   const scenario = {
+    socket_read_panes: readerResults.map(({ name }) => name),
     responses: Object.fromEntries([30, 100, 500, 1_000, 10_000].flatMap(lines =>
       ['visible', 'recent', 'recent-unwrapped'].map(source => [
         ['pane', 'read', 'arbitrary-dialog', '--lines', String(lines), '--source', source, '--format', 'ansi'].join('\0'),
         literalDialog.split('\n').slice(-lines).join('\n'),
       ]))),
     focused_workspace_id: 'workspace-1',
-    workspaces: [{ workspace_id: 'workspace-1', number: 1, label: 'Captured', pane_count: rows.length, tab_count: rows.length, cwd: '/tmp' }],
-    panes: rows.map(({ name, agent, status, session, cwd }) => ({
+    workspaces: [
+      { workspace_id: 'workspace-1', number: 1, label: 'Captured', pane_count: rows.length - readerResults.length, tab_count: rows.length - readerResults.length, cwd: '/tmp' },
+      ...readerResults.map(({ workspace, cwd }, index) => ({
+        workspace_id: workspace, number: index + 2, label: `Result fixture ${workspace}`, pane_count: 1, tab_count: 1, cwd,
+      })),
+    ],
+    panes: rows.map(({ name, agent, status, session, cwd, workspace }) => ({
       pane_id: name, terminal_id: `terminal-${name}`, agent, name, agent_status: status, tab_id: `${name}-tab`,
-      workspace_id: 'workspace-1', cwd: cwd ?? `/tmp/${name}`, revision: 1,
+      workspace_id: workspace ?? 'workspace-1', cwd: cwd ?? `/tmp/${name}`, revision: 1,
       ...(session ? { agent_session: { value: session, kind: 'uuid' } } : {}),
     })),
-    tabs: rows.map(({ name, cwd }, index) => ({
-      tab_id: `${name}-tab`, workspace_id: 'workspace-1', label: name, number: index + 1, cwd: cwd ?? `/tmp/${name}`,
+    tabs: rows.map(({ name, cwd, workspace }, index) => ({
+      tab_id: `${name}-tab`, workspace_id: workspace ?? 'workspace-1', label: name, number: workspace ? 1 : index + 1, cwd: cwd ?? `/tmp/${name}`,
     })),
     content: Object.fromEntries(rows.map(({ name, content }) => [name, content])),
   };
@@ -206,6 +229,8 @@ export default async function setup() {
       FAKE_HERDR_SCENARIO: scenarioPath,
       FAKE_HERDR_OPERATIONS: operationsPath,
       FAKE_HERDR_BARRIER_DIR: barrierDir,
+      HOME: runtime,
+      PI_CODING_AGENT_DIR: join(runtime, 'pi'),
       XDG_CONFIG_HOME: join(runtime, 'config'),
       XDG_CACHE_HOME: join(runtime, 'cache'),
       XDG_DATA_HOME: join(runtime, 'data'),

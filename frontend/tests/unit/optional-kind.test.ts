@@ -23,7 +23,7 @@ it('includes the unknown-kind row in an expanded synthetic workspace without Git
   const group = view.container.querySelector<HTMLDetailsElement>('details.workspace-card')!;
   group.open = true;
   await fireEvent(group, new Event('toggle'));
-  await fireEvent.click(screen.getByRole('button', { name: 'Open Development on Laptop' }));
+  await fireEvent.click(screen.getByRole('button', { name: 'Open Named agent on Laptop' }));
   expect(onopen).toHaveBeenCalledWith(agent);
   expect(view.container.querySelector('.agent-logo')).toBeTruthy();
 });
@@ -31,7 +31,7 @@ it('includes the unknown-kind row in an expanded synthetic workspace without Git
 it('keeps blank-query Jump inclusive and chooses Terminal rather than guessing native history', async () => {
   const onselect = vi.fn();
   render(GlobalJump, { open: true, agents: [agent], onselect });
-  const option = screen.getByRole('button', { name: /Development/ });
+  const option = screen.getByRole('button', { name: /Named agent/ });
   await fireEvent.click(option);
   expect(onselect).toHaveBeenCalledWith(agent);
   expect(agentOpeningView(agent, connection, 'conversation', {})).toMatchObject({ view: 'terminal', paneId: agent.pane_id });

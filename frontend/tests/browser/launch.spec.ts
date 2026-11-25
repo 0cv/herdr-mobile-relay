@@ -109,7 +109,7 @@ test('keeps a newly launched agent open when its native session is discovered', 
   };
   await server(page, 0, { type: 'agents', agents: [launched] });
   await reply(page, launch, { pane_id: launched.pane_id, name: launched.name, cwd: launched.cwd });
-  await page.getByRole('button', { name: 'Open project on Fedora', exact: true }).click();
+  await page.getByRole('button', { name: 'Open project-pi on Fedora', exact: true }).click();
   await expect(page.getByRole('main', { name: 'Terminal for project' })).toBeVisible();
   await server(page, 0, { type: 'agents', agents: [{ ...launched, generation: 2, agent_session_id: 'native-session' }] });
   await expect(page.getByRole('main', { name: 'Terminal for project' })).toBeVisible();
@@ -188,7 +188,7 @@ test('launches and manages agent lifecycle commands', async ({ page }) => {
       session: 'Current Session Review',
     }],
   });
-  await page.getByRole('button', { name: 'Open relay on Fedora', exact: true }).click();
+  await page.getByRole('button', { name: 'Open relay-codex on Fedora', exact: true }).click();
   await expect(page.getByRole('main', { name: 'Terminal for relay' })).toBeVisible();
   await expect.poll(() => page.evaluate(() => location.hash))
     .toBe('#pane=r3.WzMsImZlZG9yYSIsInByaW1hcnkiLCJ3MTpwMiIsInRlcm1pbmFsLXcxOnAyIiwxLCIiXQ');

@@ -17,7 +17,7 @@ import (
 )
 
 func (s *Server) handleReadPane(ctx context.Context, client *transport.ClientConn, inbound protocol.Inbound) {
-	request := s.paneReadRequest(client.ID(), inbound)
+	request := s.paneReadRequest(client, inbound)
 	s.stopPaneWatch(client.ID(), inbound.PaneID)
 	resp := s.preparePaneResponse(request, s.dispatcher.HandleReadPane(ctx, request))
 	resp["request_id"] = inbound.RequestID

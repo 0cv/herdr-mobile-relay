@@ -1,6 +1,7 @@
 <script lang="ts">
   import AgentLogo from '$components/AgentLogo.svelte';
-  import { agentStatusTone, displayName, hostLabel, tabName } from '$lib/agents';
+  import StatusMark from '$components/StatusMark.svelte';
+  import { agentStatusGroup, agentStatusMarks, displayName, hostLabel, tabName } from '$lib/agents';
   import type { Agent } from '$lib/types';
   import { workspaceGroups } from '$lib/workspaces';
 
@@ -32,7 +33,7 @@
           <button class:active={agent.pane_id === active.pane_id} type="button" aria-current={agent.pane_id === active.pane_id ? 'page' : undefined} onclick={() => onopen(agent)}>
             <span class="agent-identity">
               <AgentLogo agent={agent.agent} />
-              <span class={`status-dot status-${agentStatusTone(agent)}`} aria-hidden="true"></span>
+              <StatusMark {...agentStatusMarks[agentStatusGroup(agent)]} />
             </span>
             <span>
               <strong>{displayName(agent)}</strong>

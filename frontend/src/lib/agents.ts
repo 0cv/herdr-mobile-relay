@@ -1,7 +1,7 @@
 import type { Agent, AttentionKind, QuestionInteraction } from './types';
-import { stripAnsi } from './terminal';
 import { pathBase } from './paths';
 import { agentTargetsDiffer } from './resource-id';
+import type { StatusAppearance } from './status-marks';
 
 export type AgentKind = 'agy' | 'claude' | 'codex' | 'cursor' | 'grok' | 'hermes' | 'kimi' | 'omo' | 'omp' | 'opencode' | 'pi' | 'qoder';
 
@@ -53,7 +53,9 @@ export function agentNeedsInspection(agent: Partial<Agent> | null | undefined): 
   return rawBlocked(agent) && !['approval', 'question', 'chat'].includes(kind);
 }
 
-export function agentStatusGroup(agent: Partial<Agent> | null | undefined): 'attention' | 'blocked' | 'working' | 'done' | 'ready' | 'other' {
+type AgentStatusGroup = keyof typeof agentStatusMarks;
+
+export function agentStatusGroup(agent: Partial<Agent> | null | undefined): AgentStatusGroup {
   const status = String(agent?.status || 'unknown').trim().toLowerCase().replace(/[_-]+/g, ' ');
   if (status.includes('blocked')) {
     const kind = attentionKind(agent);
@@ -62,25 +64,19 @@ export function agentStatusGroup(agent: Partial<Agent> | null | undefined): 'att
     return 'attention';
   }
   if (/(working|running|progress|busy)/.test(status)) return 'working';
-  if (/(done|complete|finish|success|unread)/.test(status)) return 'done';
+  if (/(done|complete|finish|success|succeeded|unread)/.test(status)) return 'done';
   if (status === 'idle' || status === 'ready') return 'ready';
   return 'other';
 }
 
-/**
- * Indicator tone for one agent. `success` (filled green) marks a finished turn
- * the phone has not opened yet; `ready` (green ring) marks an idle agent that
- * is waiting for input and has no unread result; `muted` is only for states
- * the relay cannot classify.
- */
-export function agentStatusTone(agent: Partial<Agent> | null | undefined): 'danger' | 'warning' | 'success' | 'ready' | 'muted' {
-  const group = agentStatusGroup(agent);
-  if (group === 'blocked') return 'danger';
-  if (group === 'attention' || group === 'working') return 'warning';
-  if (group === 'done') return 'success';
-  if (group === 'ready') return 'ready';
-  return 'muted';
-}
+export const agentStatusMarks = {
+  blocked: { shape: 'square', tone: 'danger', label: 'Needs input' },
+  attention: { shape: 'triangle', tone: 'warning', label: 'Needs inspection' },
+  working: { shape: 'chevron', tone: 'warning', label: 'Working' },
+  done: { shape: 'check', tone: 'success', label: 'New result' },
+  ready: { shape: 'ring', tone: 'success', label: 'Idle' },
+  other: { shape: 'dash', tone: 'muted', label: 'Status unknown' },
+} as const satisfies Record<string, StatusAppearance & { label: string }>;
 
 export function hostLabel(agent: Partial<Agent>): string {
   return String(agent.relay_label || agent.host || 'relay');
@@ -111,6 +107,10 @@ export function agentContextLabel(agent: Partial<Agent>): string {
 
 export function displayName(agent: Partial<Agent>): string {
   return String(agent.project || agent.name || agent.tab_label || agent.agent || 'agent');
+}
+
+export function homeAgentLabel(agent: Partial<Agent>): string {
+  return String(agent.name || '').trim() || displayName(agent);
 }
 
 export function agentUpdatedAt(agent: Partial<Agent> | null | undefined): number {
@@ -178,19 +178,33 @@ export function approvalButtonVariant(option: string, index: number, total: numb
   return tone === 'deny' ? 'danger' : tone === 'trust' ? 'trust' : 'default';
 }
 
+function stripPreviewControls(text: unknown): string {
+  return String(text ?? '')
+    .replace(/(?:\x1b\]|\x9d).*?(?:\x07|\x1b\\|\x9c|$)|(?:\x1b[PX^_]|[\x90\x98\x9e\x9f]).*?(?:\x1b\\|\x9c|$)|(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]?|\x1b[ -/]*[0-~]/gs, '')
+    .replace(/[\x00-\x08\x0e-\x1f\x7f-\x9f]/g, '');
+}
+
 export function approvalPromptPreview(agent: Partial<Agent> | null | undefined): string {
-  const command = normalizeInlineText(agent?.command);
+  const command = normalizeInlineText(stripPreviewControls(agent?.command));
   if (command) return command;
   let commandFallback = '';
   let fallback = '';
-  for (const rawLine of String(agent?.prompt || '').split(/\r?\n/)) {
-    const line = normalizeInlineText(stripAnsi(rawLine).replace(/^[│|]\s*/, '').replace(/\s*[│|]$/, ''));
+  for (const rawLine of stripPreviewControls(agent?.prompt).split(/\r?\n/)) {
+    const line = normalizeInlineText(rawLine.replace(/^[│|]\s*/, '').replace(/\s*[│|]$/, ''));
     if (!line || MENU_LINE_RE.test(line) || PROMPT_SKIP_RE.test(line)) continue;
     const match = COMMAND_LINE_RE.exec(line);
     if (match) commandFallback = match[1].trim();
     else fallback = line;
   }
   return commandFallback || fallback;
+}
+
+export function waitingPreview(agent: Agent, interaction: QuestionInteraction | null): string {
+  const plain = interaction?.question
+    ? normalizeInlineText(stripPreviewControls(interaction.question))
+    : approvalPromptPreview(agent);
+  const characters = [...plain];
+  return characters.length > 400 ? characters.slice(0, 399).join('') + '…' : plain;
 }
 
 export function questionInteraction(agent: Partial<Agent> | null | undefined): QuestionInteraction | null {

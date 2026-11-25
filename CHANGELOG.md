@@ -5,6 +5,18 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Home names each pane and shows its activity instead of repeating its path.
+  Status words, distinct shapes, and workspace counts make new results easy to
+  tell apart from idle agents. Search by the pane name to see its exact path.
+  These changes work with existing Herdr TUI and herdr-core relays.
+
+### Fixed
+
+- With an updated relay, opening Conversation or Terminal as a reader no longer
+  clears a new result for other devices. Controllers still clear it by opening it.
+
 ## [0.27.0] - 2026-11-23
 
 ### Added

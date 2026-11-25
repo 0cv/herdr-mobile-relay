@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/svelte';
+import { render, screen, within } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import AgentList from '$components/AgentList.svelte';
@@ -74,7 +74,8 @@ describe('adopted navigation and terminal controls', () => {
     expect(workspace?.open).toBe(true);
     expect(workspace?.querySelector('.workspace-tab h3')?.textContent).toBe('Review');
     expect(workspace?.querySelector('.agent-meta')?.textContent || '').not.toContain('Review');
-    expect(workspace?.querySelector('.agent-age')?.textContent).toBe('2h');
+    expect(screen.getByRole('button', { name: 'Open mobile on Laptop' }))
+      .toHaveAccessibleDescription('Idle · last active 2h ago');
     await view.rerender({
       agents: [{ ...primary, activity_seq: 2 }, { ...secondary }],
       relays: [],
@@ -85,74 +86,59 @@ describe('adopted navigation and terminal controls', () => {
     expect(workspace?.open).toBe(true);
   });
 
-  it('names the computer once per workspace and gives every agent its directory', () => {
-    const working = agent({
-      status: 'working',
-      tab_id: 'tab-1',
-      tab_label: 'Review',
-      cwd: '/home/dev/code/app',
+  it('shows pane names and activity on Home and the exact pane path in jump', async () => {
+    const cwd = '/home/user/project';
+    const fix = agent({ name: '  fix-bug  ', project: 'project', tab_label: 'main', cwd, status: 'working' });
+    const review = agent({
+      ...fix, name: 'review-tests', pane_id: 'relay-a::pane-2', raw_pane_id: 'pane-2', status: 'idle',
     });
-    const blocked = agent({
-      raw_pane_id: 'pane-2',
-      pane_id: 'relay-a::pane-2',
-      workspace_id: 'workspace-2',
-      project: 'docs',
-      cwd: '/srv/docs',
-      status: 'blocked',
-      prompt: 'Run make check?',
-      options: ['Approve once'],
-      attention_kind: 'approval',
-    });
-    const outsideHome = agent({
-      raw_pane_id: 'pane-3',
-      pane_id: 'relay-a::pane-3',
-      workspace_id: 'workspace-3',
-      project: 'srv-docs',
-      cwd: '/srv/docs',
-    });
-    const withoutCwd = agent({
-      raw_pane_id: 'pane-4',
-      pane_id: 'relay-a::pane-4',
-      status: 'working',
-      tab_id: 'tab-4',
-      tab_label: 'No directory',
-      cwd: '',
-    });
+    const unnamed = agent({ ...fix, name: ' ', pane_id: 'relay-a::pane-3', raw_pane_id: 'pane-3', status: 'unknown' });
+    const onselect = vi.fn();
     const connections = new Map([['relay-a', {
-      status: 'connected', home: '/home/dev', inventory: { state: 'ready' }, capabilities: [],
+      status: 'connected', home: '/home/user', inventory: { state: 'ready' }, capabilities: [],
     } as unknown as RelayConnectionView]]);
-    render(AgentList, {
-      agents: [working, blocked, outsideHome, withoutCwd],
-      relays: [],
-      connections,
-      responding: new Set<string>(),
-      onopen: vi.fn(),
+    render(AgentList, { agents: [fix, review, unnamed], relays: [], connections, responding: new Set<string>(), onopen: vi.fn() });
+    const card = screen.getByText('project', { selector: 'summary strong' }).closest('details')!;
+    expect(card.querySelector('summary .path-row')).toHaveTextContent('~/project');
+    expect(card.querySelector('summary .host-badge')).toHaveTextContent('@Laptop');
+    for (const [label, status] of [['fix-bug', 'Working'], ['review-tests', 'Idle'], ['project', 'Status unknown']]) {
+      const row = screen.getByRole('button', { name: `Open ${label} on Laptop` });
+      expect(row.querySelector('.agent-project')).toHaveTextContent(label);
+      expect(row).toHaveAccessibleDescription(status);
+      expect(row).not.toHaveTextContent(cwd);
+      expect(row.querySelector('.host-badge')).toBeNull();
+    }
+
+    render(GlobalJump, { agents: [fix, review], open: true, onselect });
+    const user = userEvent.setup();
+    await user.type(screen.getByRole('searchbox'), 'fix-bug');
+    const match = screen.getByRole('button', { name: /Working.*fix-bug/ });
+    expect(match).toHaveAccessibleDescription(cwd);
+    expect(screen.getByText(cwd, { selector: '.jump-pane-path' })).toBeVisible();
+    expect(within(screen.getByRole('dialog')).queryByRole('button', { name: /review-tests/ })).toBeNull();
+    expect(onselect).not.toHaveBeenCalled();
+  });
+
+  it('describes the full quick question once and submits its original interaction', async () => {
+    const question = 'Which option should we use when publishing the new search page?';
+    const interaction = {
+      id: 'question', kind: 'single_select' as const, question,
+      options: [{ index: 0, label: 'Preview' }, { index: 1, label: 'Publish' }],
+    };
+    const waiting = agent({
+      status: 'blocked', attention_kind: 'question', attention_capable: true,
+      interaction, prompt: question, last_active_at: Date.now() - 3 * 60_000,
     });
-
-    const card = screen.getByText('mobile', { selector: 'summary strong' }).closest('details')!;
-    expect(card.querySelector('summary .workspace-card-title .host-badge')).toHaveTextContent('@Laptop');
-    expect(card.querySelector('summary .path-row')).toHaveTextContent('~/code/app');
-    // A working session opens its card, so the agent row is already visible.
-    expect(card.querySelector('.compact-agent-card .agent-path')).toHaveTextContent('~/code/app');
-    expect(card.querySelector('.compact-agent-card .host-badge')).toBeNull();
-    // An agent that reports no directory keeps its name, still without the
-    // computer its card already names.
-    const nameOnly = card.querySelector('.workspace-tab[aria-label="No directory tab"] .agent-project')!;
-    expect(nameOnly).toHaveTextContent('mobile');
-    expect(nameOnly.querySelector('.host-badge')).toBeNull();
-    // The computer stays in the accessible name even where the row drops it.
-    expect(screen.getAllByRole('button', { name: 'Open mobile on Laptop' })).toHaveLength(2);
-
-    // A directory outside the relay's home directory keeps its absolute path.
-    const outside = screen.getByText('srv-docs', { selector: 'summary strong' }).closest('details')!;
-    expect(outside.querySelector('summary .path-row')).toHaveTextContent('/srv/docs');
-    expect(outside.querySelector('.compact-agent-card .agent-path')).toHaveTextContent('/srv/docs');
-
-    // Agents needing input are listed outside any workspace card, so their
-    // rows still have to name the computer.
-    const attention = screen.getByRole('heading', { name: 'Needs input' }).closest('section')!;
-    expect(attention.querySelector('.host-badge')).toHaveTextContent('@Laptop');
-    expect(attention.querySelector('.agent-path')).toBeNull();
+    const answer = vi.spyOn(relayStore, 'answerQuestion').mockResolvedValue({ phase: 'confirmed' } as never);
+    const view = render(AgentList, { agents: [waiting], relays: [], responding: new Set<string>(), onopen: vi.fn() });
+    const row = screen.getByRole('button', { name: 'Open mobile on Laptop' });
+    expect(row).toHaveAccessibleDescription(`Needs input · last active 3m ago ${question}`);
+    expect(screen.getAllByText(question)).toHaveLength(1);
+    expect(view.container.querySelector('.prompt-full')).toHaveTextContent(question);
+    await userEvent.click(screen.getByRole('button', { name: 'Preview' }));
+    expect(answer).toHaveBeenCalledWith(waiting, interaction, {
+      selected: new Set([0]), otherSelected: false, otherText: '',
+    });
   });
 
   it('sends a detected terminal menu action through the serialized key path', async () => {

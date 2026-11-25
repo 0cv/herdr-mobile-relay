@@ -1,8 +1,9 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import AgentLogo from '$components/AgentLogo.svelte';
+  import StatusMark from '$components/StatusMark.svelte';
   import AppDialog from '$components/ui/AppDialog.svelte';
-  import { agentStatusTone, displayName, hostLabel, tabName } from '$lib/agents';
+  import { agentStatusGroup, agentStatusMarks, homeAgentLabel, hostLabel, tabName } from '$lib/agents';
   import type { Agent } from '$lib/types';
   import {
     agentSearchText,
@@ -21,6 +22,7 @@
     onselect: (agent: Agent) => void;
   } = $props();
 
+  const pathId = $props.id();
   let query = $state('');
   let input = $state<HTMLInputElement>();
   const groups = $derived(workspaceGroups(agents));
@@ -63,16 +65,20 @@
               <span>{group.cwd || `@${group.host}`}</span>
             </header>
             {#each visible as agent (agent.pane_id)}
-              <button type="button" onclick={() => choose(agent)}>
-                <span class="agent-identity">
-                  <AgentLogo agent={agent.agent} />
-                  <span class={`status-dot status-${agentStatusTone(agent)}`} aria-hidden="true"></span>
-                </span>
-                <span>
-                  <strong>{displayName(agent)}</strong>
-                  <small>{[tabName(agent), agent.session, `@${hostLabel(agent)}`].filter(Boolean).join(' · ')}</small>
-                </span>
-              </button>
+              {@const description = `${pathId}-${encodeURIComponent(agent.pane_id)}`}
+              <div class="jump-result">
+                <button type="button" aria-describedby={agent.cwd ? description : undefined} onclick={() => choose(agent)}>
+                  <span class="agent-identity">
+                    <AgentLogo agent={agent.agent} />
+                    <StatusMark {...agentStatusMarks[agentStatusGroup(agent)]} />
+                  </span>
+                  <span>
+                    <strong>{homeAgentLabel(agent)}</strong>
+                    <small>{[tabName(agent), agent.session, `@${hostLabel(agent)}`].filter(Boolean).join(' · ')}</small>
+                  </span>
+                </button>
+                {#if agent.cwd}<small class="jump-pane-path" id={description}>{agent.cwd}</small>{/if}
+              </div>
             {/each}
           </section>
         {/if}
