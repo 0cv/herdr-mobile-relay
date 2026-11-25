@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '@playwright/test';
 import { scrollConversationToBottom, showOlderConversationEntry } from '../support/journey-conversation';
 import { captureClipboard, copiedText, distanceFromBottom, saveDeviceCredential } from '../support/journey-device';
 import { boot, closeSocket, commands, composerTarget, connectFedora, fedora, handshake, lastCommand, reply, server, setAutoCommands, setConversationFixture, socketCount, type ConversationFixture } from '../support/journey-relay';
@@ -330,6 +330,116 @@ test('a reader reviews edit previews by keyboard only on the advertising relay',
   await expect(card.locator('.workspace-diff-line')).toHaveCount(0);
   const readCommands = new Set(['refresh_agents', 'get_conversation_history', 'get_conversation_updates', 'unwatch_conversation', 'read_pane', 'push_viewed_pane']);
   expect((await commands(page)).filter(command => !readCommands.has(String(command.type)))).toEqual([]);
+});
+
+test('keeps code and timestamps readable at phone and desktop widths', async ({ page }) => {
+  const externalRequests: string[] = [];
+  page.on('request', request => {
+    const url = new URL(request.url());
+    if ((url.protocol === 'http:' || url.protocol === 'https:') && url.hostname !== '127.0.0.1') externalRequests.push(url.origin);
+  });
+  await page.setViewportSize({ width: 320, height: 740 });
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  const started = '2026-08-10T12:01:00Z';
+  const entry = (id: string, text: string, tools?: Record<string, unknown>[], role = 'assistant') => ({ id, text, role, timestamp: started, tools });
+  const diff = (path: string) => ({
+    kind: 'edit', path, text: '-  const before = "past"; // old\n+  const after = "present"; // new\n+++ const line = 21;', added: 2, removed: 1, truncated: false,
+  });
+  const source = 'const data = "x"; const longValue = "' + 'x'.repeat(400) + '";';
+  await connectFedora(page, { capabilities: ['conversation_history', 'conversation_activity', 'conversation_edit_diffs', 'workspace_inspection'] });
+  await setConversationFixture(page, { total: 3, entries: [
+    entry('user', 'Update the sample file', [], 'user'),
+    entry('edit', '', [{ name: 'Edit', state: 'completed', diff: diff('src/main.ts') }]),
+    entry('prose', `Here is the example.\n\n\`\`\`ts\n${source}\n\`\`\``),
+  ] });
+  await server(page, 0, { type: 'agents', agents: [{ ...composerTarget, status: 'working', project: 'Reading', agent: 'pi', cwd: '/work/mobile', conversation_history_available: true }] });
+  await page.getByRole('button', { name: 'Open Reading on Fedora' }).click();
+  const list = page.locator('.conversation-list');
+  const prose = list.locator('[data-conversation-entry-id="prose"]');
+  const code = prose.locator('pre code');
+  const replyPresentation = async (width: number) => {
+    await expect(prose).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
+    await expect(prose).toHaveCSS('border-top-width', '0px');
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+  };
+  await expect(code.locator('.syntax-keyword')).toHaveCount(2);
+  await replyPresentation(320);
+  await page.getByRole('button', { name: 'Full history' }).click();
+  await replyPresentation(320);
+  const readingContrast = () => page.evaluate(() => {
+    const themes = ['dark', 'light', 'nord', 'solarized', 'rose', 'latte'];
+    const root = document.documentElement;
+    const context = document.createElement('canvas').getContext('2d')!;
+    const luminance = (color: string) => {
+      context.fillStyle = color;
+      context.fillRect(0, 0, 1, 1);
+      const [r, g, b] = Array.from(context.getImageData(0, 0, 1, 1).data).map(channel => {
+        const component = channel / 255;
+        return component <= .04045 ? component / 12.92 : ((component + .055) / 1.055) ** 2.4;
+      });
+      return .2126 * r + .7152 * g + .0722 * b;
+    };
+    const contrast = (text: Element, background: Element) => {
+      const a = luminance(getComputedStyle(text).color);
+      const b = luminance(getComputedStyle(background).backgroundColor);
+      return (Math.max(a, b) + .05) / (Math.min(a, b) + .05);
+    };
+    return themes.map(theme => {
+      root.dataset.theme = theme;
+      const ratios = [...document.querySelectorAll('pre [class^="syntax-"]')].map(token =>
+        contrast(token, token.closest('.diff-deletion, .diff-addition, pre')!));
+      for (const row of document.querySelectorAll('pre .diff-addition, pre .diff-deletion')) ratios.push(contrast(row, row));
+      const userTime = document.querySelector('[data-conversation-entry-id="user"] time')!;
+      const agentTime = document.querySelector('[data-conversation-entry-id="prose"] time')!;
+      return [theme, Math.min(...ratios, contrast(userTime, userTime.closest('article')!), contrast(agentTime, document.body))] as const;
+    });
+  });
+  const card = list.locator('[data-conversation-entry-id="edit"] details');
+  const summary = card.locator('summary');
+  await expect(summary).toHaveAccessibleName('Edit main.ts 2 lines added, 1 line removed completed');
+  await summary.focus();
+  await summary.press('Enter');
+  const preview = card.getByLabel('Requested change');
+  await expect(preview.locator('.diff-addition')).toHaveText(['+  const after = "present"; // new', '+++ const line = 21;']);
+  await expect(preview.locator('.diff-deletion .syntax-string')).toHaveText('"past"');
+  await expect(preview.locator('.diff-addition .syntax-number')).toHaveText('21');
+
+  await page.setViewportSize({ width: 940, height: 740 });
+  await replyPresentation(940);
+  const ratios = await readingContrast();
+  for (const [theme, ratio] of ratios) expect(ratio, theme).toBeGreaterThanOrEqual(4.5);
+  await page.getByRole('button', { name: 'Conversation', exact: true }).click();
+  await expect(code.locator('.syntax-keyword')).toHaveCount(2);
+  await replyPresentation(940);
+  expect((await commands(page)).filter(command => command.type === 'workspace_file' || command.type === 'workspace_git_diff')).toEqual([]);
+  await page.getByRole('button', { name: 'Terminal view' }).click();
+  const rail = page.getByRole('complementary', { name: 'Agent navigation' });
+  await expect(rail).toBeVisible();
+  await setAutoCommands(page, false);
+  await page.getByRole('button', { name: 'Inspect workspace' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Workspace', exact: true });
+  await reply(page, await lastCommand(page, 'workspace_tree'), { root: '/work/mobile', entries: [] });
+  await reply(page, await lastCommand(page, 'workspace_git_status'), { available: true, files: [{ path: 'src/main.ts', status: ' M' }] });
+  await dialog.getByRole('tab', { name: /^Changes/ }).click();
+  await dialog.getByRole('button', { name: /src\/main.ts Modified/ }).click();
+  await reply(page, await lastCommand(page, 'workspace_git_diff'), {
+    path: 'src/main.ts',
+    diff: 'diff --git a/src/main.ts b/src/main.ts\n--- a/src/main.ts\n+++ b/src/main.ts\n@@ -1,2 +1,3 @@\n const context = 1;\n--- const before = "past";\n+  const after = "present";\n+++ const line = 21;\n\\ No newline at end of file',
+  });
+  const git = dialog.getByLabel('Diff for src/main.ts');
+  await expect(git.locator('.diff-file')).toHaveText(['--- a/src/main.ts', '+++ b/src/main.ts']);
+  await expect(git.locator('.diff-file [class^="syntax-"], .diff-hunk [class^="syntax-"], .diff-note [class^="syntax-"]')).toHaveCount(0);
+  await expect(git.locator('.diff-deletion')).toHaveText('--- const before = "past";');
+  await expect(git.locator('.diff-deletion .syntax-string')).toHaveText('"past"');
+  await expect(git.locator('.diff-context .syntax-keyword')).toHaveText('const');
+  const zoom = dialog.getByRole('button', { name: 'Zoom in diff' });
+  await zoom.click();
+  const zoomed = await git.evaluate(node => getComputedStyle(node).fontSize);
+  await expect(git.locator('.diff-deletion .syntax-string')).toHaveCSS('font-size', zoomed);
+  await expect(dialog.getByRole('button', { name: 'Reset diff zoom' })).toHaveText('115%');
+  await dialog.getByRole('button', { name: 'Close workspace inspector' }).click();
+  await expect(rail).toBeVisible();
+  expect(externalRequests).toEqual([]);
 });
 
 test('opens a long conversation at its newest turn and holds the pin', async ({ page }) => {
@@ -719,6 +829,160 @@ async function openFileLinkConversation(page: Page, conversation: string | Conve
   await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
 }
 
+const scannerRoute = /\/assets\/syntax-colours-\d+\.js(?:\?|$)/u;
+
+test('colours a saved list fence without replacing selected prose or a focused file link', async ({ page }) => {
+  const code = '  const preview = "<b>src/ignored.ts</b>";';
+  let resume = () => {};
+  const blocked = new Promise<void>(resolve => { resume = resolve; });
+  await page.route(scannerRoute, async route => { await blocked; await route.continue(); });
+  const requested = page.waitForRequest(scannerRoute);
+  const markdown = `Read src/main.ts:2 before changing it.\n\n- Example:\n  \`\`\`TS\n  ${code}\n  \`\`\`\n\n\`\`\`js\nconst unfinished = 1;`;
+  await captureClipboard(page);
+  await openFileLinkConversation(page, markdown);
+  await requested;
+  const message = page.locator('.conversation-markdown');
+  const fence = message.locator('li pre code');
+  const link = page.getByRole('button', { name: 'src/main.ts:2', exact: true });
+  const sameLink = await link.elementHandle();
+  await page.getByRole('searchbox', { name: 'Search loaded conversation' }).focus();
+  await page.keyboard.press('Tab');
+  // Message controls precede the body in the reading order.
+  for (let index = 0; index < 5 && !await link.evaluate(element => element === document.activeElement); index++) {
+    await page.keyboard.press('Tab');
+  }
+  await expect(link).toBeFocused();
+  const select = await fence.evaluate(element => {
+    const selection = window.getSelection()!;
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    return selection.toString();
+  });
+  expect(select).toBe(code);
+  const response = page.waitForResponse(scannerRoute);
+  resume();
+  await response;
+  await expect(fence.locator('.syntax-keyword')).toHaveCount(0);
+  expect(await page.evaluate(() => window.getSelection()?.toString())).toBe(code);
+  await page.evaluate(() => window.getSelection()?.removeAllRanges());
+  await expect(fence.locator('.syntax-keyword')).toHaveText('const');
+  await expect(fence.locator('.syntax-string')).toHaveText('"<b>src/ignored.ts</b>"');
+  expect(await fence.textContent()).toBe(code);
+  await expect(fence.locator('a, b')).toHaveCount(0);
+  await expect(message.locator('pre').last().locator('[class^="syntax-"]')).toHaveCount(0);
+  expect(await sameLink?.evaluate(element => element === document.activeElement)).toBe(true);
+  expect((await commands(page)).filter(command => command.type === 'workspace_file')).toEqual([]);
+  await page.keyboard.press('Enter');
+  const dialog = page.getByRole('dialog', { name: 'Workspace', exact: true });
+  await expect(dialog.locator('.preview-heading')).toContainText('Line 2');
+  await dialog.getByRole('button', { name: 'Close workspace inspector' }).click();
+  const search = page.getByRole('searchbox', { name: 'Search loaded conversation' });
+  await search.fill('const preview');
+  await expect(fence.locator('mark')).toHaveText('const preview');
+  await expect(fence.locator('.syntax-keyword')).toHaveCount(0);
+  await search.clear();
+  await expect(fence.locator('.syntax-keyword')).toHaveText('const');
+  await page.getByRole('button', { name: 'Copy File links message as Markdown' }).click();
+  expect(await copiedText(page)).toBe(markdown);
+  await page.getByRole('button', { name: 'Copy code from File links message' }).click();
+  expect(await copiedText(page)).toBe('  ' + code);
+});
+
+test('defers colouring Git diff rows while the reader has selected their signed text', async ({ page }) => {
+  let resume = () => {};
+  const blocked = new Promise<void>(resolve => { resume = resolve; });
+  await page.route(scannerRoute, async route => { await blocked; await route.continue(); });
+  const requested = page.waitForRequest(scannerRoute);
+  await openFileLinkConversation(page, 'Check the workspace change.');
+  await setAutoCommands(page, false);
+  await page.getByRole('button', { name: 'Inspect workspace' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Workspace', exact: true });
+  await reply(page, await lastCommand(page, 'workspace_tree'), { root: '/work/mobile', entries: [] });
+  await reply(page, await lastCommand(page, 'workspace_git_status'), { available: true, files: [{ path: 'src/main.ts', status: ' M' }] });
+  await dialog.getByRole('tab', { name: /^Changes/ }).click();
+  await dialog.getByRole('button', { name: 'src/main.ts Modified' }).click();
+  const added = '+const label = "<example>";';
+  await reply(page, await lastCommand(page, 'workspace_git_diff'), { path: 'src/main.ts', diff: `@@ -1,2 +1,2 @@\n\n-const label = "old";\n${added}` });
+  const row = dialog.locator('.diff-addition');
+  await requested;
+  await row.evaluate(node => {
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    window.getSelection()?.removeAllRanges();
+    window.getSelection()?.addRange(range);
+  });
+  const response = page.waitForResponse(scannerRoute);
+  resume();
+  await response;
+  await expect(row.locator('.syntax-keyword')).toHaveCount(0);
+  expect(await page.evaluate(() => window.getSelection()?.toString())).toBe(added);
+  await page.evaluate(() => window.getSelection()?.removeAllRanges());
+  await expect(row.locator('.syntax-keyword')).toHaveText('const');
+  expect(await row.textContent()).toBe(added);
+  await expect(dialog.locator('.diff-deletion .syntax-keyword')).toHaveText('const');
+});
+
+test('keeps the selected linked line on a missing scanner without another workspace read', async ({ page }) => {
+  await page.route(scannerRoute, route => route.fulfill({ status: 404, body: 'missing' }));
+  await openFileLinkConversation(page, 'See src/long.ts:42.');
+  const response = page.waitForResponse(scannerRoute);
+  await page.getByRole('button', { name: 'src/long.ts:42', exact: true }).tap();
+  expect((await response).status()).toBe(404);
+  const dialog = page.getByRole('dialog', { name: 'Workspace', exact: true });
+  const textarea = dialog.getByRole('textbox', { name: 'Contents of src/long.ts' });
+  await expect(textarea).toBeVisible();
+  await expect(dialog.locator('.workspace-code-mirror')).toHaveCount(0);
+  expect(await textarea.evaluate((node: HTMLTextAreaElement) => node.value.slice(node.selectionStart, node.selectionEnd))).toBe('// Line 42');
+  expect((await commands(page)).filter(command => command.type === 'workspace_file')).toHaveLength(1);
+  await expect(dialog.locator('.preview-heading')).toContainText('Line 42');
+});
+
+test('mirrors an eligible file across both scroll axes and leaves oversized files plain', async ({ page, browserName }) => {
+  await openFileLinkConversation(page, 'See src/main.ts:42 and src/big.py');
+  await setAutoCommands(page, false);
+  const text = Array.from({ length: 60 }, (_, index) => `\tconst value${index + 1} = "${'x'.repeat(150)}";`).join('\n');
+  const dialog = page.getByRole('dialog', { name: 'Workspace', exact: true });
+  await page.getByRole('button', { name: 'src/main.ts:42', exact: true }).tap();
+  await reply(page, await lastCommand(page, 'workspace_file'), { path: 'src/main.ts', kind: 'text', text, size: text.length });
+  const box = dialog.getByRole('textbox', { name: 'Contents of src/main.ts' });
+  const mirror = dialog.locator('.workspace-code-mirror');
+  await expect(mirror).toHaveAttribute('aria-hidden', 'true');
+  await expect(box).toHaveValue(text);
+  expect(await mirror.textContent()).toBe(text);
+  await expect(mirror.locator('.syntax-keyword')).toHaveCount(60);
+  const focusPreview = async (preview: Locator) => {
+    await dialog.getByRole('button', { name: 'Show file list' }).focus();
+    for (let i = 0; i < 5 && !await preview.evaluate(node => node === document.activeElement); i++) {
+      await page.keyboard.press('Tab');
+    }
+    await expect(preview).toBeFocused();
+    await expect(preview).toHaveCSS('outline-width', '2px');
+    await expect(preview).toHaveCSS('outline-offset', '-2px');
+  };
+  const selected = await box.evaluate((node: HTMLTextAreaElement) => node.value.slice(node.selectionStart, node.selectionEnd));
+  expect(selected).toBe(text.split('\n')[41]);
+  const left = await box.evaluate(node => { node.scrollLeft = 100; node.scrollTop = 200; return [node.scrollLeft, node.scrollTop]; });
+  expect(left).toEqual([100, 200]);
+  await expect.poll(() => mirror.evaluate(node => getComputedStyle(node).transform)).toBe('matrix(1, 0, 0, 1, -100, -200)');
+  await focusPreview(box);
+  if (browserName === 'chromium') {
+    await page.emulateMedia({ forcedColors: 'active' });
+    await expect(mirror).toBeHidden();
+    expect(await box.evaluate(node => getComputedStyle(node).color)).not.toBe('rgba(0, 0, 0, 0)');
+    await page.emulateMedia({ forcedColors: 'none' });
+  }
+  await dialog.getByRole('button', { name: 'Close workspace inspector' }).click();
+  const big = 'return ' + 'x'.repeat(17 * 1024);
+  await page.getByRole('button', { name: 'src/big.py', exact: true }).tap();
+  await reply(page, await lastCommand(page, 'workspace_file'), { path: 'src/big.py', kind: 'text', text: big, size: big.length });
+  const plain = dialog.getByRole('textbox', { name: 'Contents of src/big.py' });
+  await expect(plain).toHaveValue(big);
+  await expect(mirror).toHaveCount(0);
+  await focusPreview(plain);
+});
+
 test('opens a Conversation file link by touch and keyboard, without changing the toolbar inspector', async ({ page }) => {
   await openFileLinkConversation(page, 'Updated src/main.ts');
   const link = page.getByRole('button', { name: 'src/main.ts', exact: true });
@@ -745,6 +1009,10 @@ test('opens a Conversation file link by touch and keyboard, without changing the
 
 test('closes a linked file preview without issuing new reads when the working directory changes', async ({ page }) => {
   const path = '/work/mobile/src/main.ts';
+  let resume = () => {};
+  const blocked = new Promise<void>(resolve => { resume = resolve; });
+  await page.route(scannerRoute, async route => { await blocked; await route.continue(); });
+  const requested = page.waitForRequest(scannerRoute);
   await openFileLinkConversation(page, `Updated ${path}`);
   const link = page.getByRole('button', { name: path, exact: true });
   await link.tap();
@@ -753,9 +1021,13 @@ test('closes a linked file preview without issuing new reads when the working di
   const workspaceReads = async () => (await commands(page)).filter(({ type }) => String(type).startsWith('workspace_'));
   const reads = await workspaceReads();
   expect(reads.find(({ type }) => type === 'workspace_file')).toMatchObject({ pane_id: 'w1:p1', path: 'src/main.ts' });
+  await requested;
 
   await server(page, 0, { type: 'agents', agents: [{ ...composerTarget, status: 'idle', project: 'File links', agent: 'codex', cwd: '/work/other', conversation_history_available: true }] });
   await expect(dialog).toBeHidden();
+  const response = page.waitForResponse(scannerRoute);
+  resume();
+  await response;
   await expect(page.getByText(`Updated ${path}`, { exact: true })).toBeVisible();
   await expect(link).toHaveCount(0);
   expect(await workspaceReads()).toEqual(reads);
@@ -764,6 +1036,7 @@ test('closes a linked file preview without issuing new reads when the working di
   await expect(dialog.getByText('/work/other', { exact: true })).toBeVisible();
   await expect(dialog.getByRole('complementary', { name: 'Workspace files' })).toBeVisible();
   await expect(dialog.getByText('Choose a file to preview it.')).toBeVisible();
+  await expect(dialog.locator('.workspace-code-mirror')).toHaveCount(0);
 });
 
 test('scrolls a file link preview to its line, clamps near the end, and ignores unavailable lines', async ({ page }) => {
@@ -803,6 +1076,23 @@ test('scrolls a file link preview to its line, clamps near the end, and ignores 
   await expect(image).toBeVisible();
   await expect.poll(() => image.evaluate((element: HTMLImageElement) => element.naturalWidth)).toBe(1);
   await expect(dialog).not.toContainText('Line 3');
+});
+
+test('previews an empty workspace file but rejects non-string text', async ({ page }) => {
+  await openFileLinkConversation(page, 'See src/main.ts and src/other.ts');
+  await setAutoCommands(page, false);
+  const dialog = page.getByRole('dialog', { name: 'Workspace', exact: true });
+  await page.getByRole('button', { name: 'src/main.ts', exact: true }).tap();
+  await reply(page, await lastCommand(page, 'workspace_file'), { path: 'src/main.ts', kind: 'text', text: 42, size: 0 });
+  await expect(dialog.getByRole('alert')).toHaveText('Could not open src/main.ts: Relay returned an invalid workspace preview.');
+  await expect(dialog.locator('textarea, .workspace-code-mirror')).toHaveCount(0);
+  await dialog.getByRole('button', { name: 'Close workspace inspector' }).click();
+  await page.getByRole('button', { name: 'src/other.ts', exact: true }).tap();
+  await reply(page, await lastCommand(page, 'workspace_file'), { path: 'src/other.ts', media_type: 'text/plain', kind: 'text', size: 0 });
+  const preview = dialog.getByRole('textbox', { name: 'Contents of src/other.ts' });
+  await expect(preview).toBeVisible();
+  await expect(preview).toHaveValue('');
+  await expect(dialog.getByRole('alert')).toHaveCount(0);
 });
 
 test('names a missing file and lets the reader choose another file from the list', async ({ page }) => {

@@ -1,6 +1,7 @@
 <script lang="ts">
   import ToolPayload from '$components/ToolPayload.svelte';
   import ConversationToolCard from '$components/ConversationToolCard.svelte';
+  import { fenceLanguage, fitsSyntaxBudget, loadCodeColours, type LoadSyntax } from '$lib/code-reading';
   import { isChosenOption, parseAskUserQuestion } from '$lib/conversation';
   import type { FileLinkContext } from '$lib/file-links';
   import { safeMarkdownHtml } from '$lib/markdown';
@@ -23,7 +24,7 @@
       }
     };
     const observer = new MutationObserver(bind);
-    observer.observe(node, { childList: true, subtree: true });
+    observer.observe(node, { childList: true });
     bind();
     return {
       update(next: ConversationMessageViewState) {
@@ -43,6 +44,8 @@
     role,
     viewState,
     tools = [],
+    provisional = false,
+    loadSyntax,
     showDiffs = true,
     highlight = '',
     fileLinks,
@@ -52,17 +55,45 @@
     role?: string;
     viewState: ConversationMessageViewState;
     tools?: ConversationTool[];
+    provisional?: boolean;
+    loadSyntax?: LoadSyntax;
     showDiffs?: boolean;
     highlight?: string;
     fileLinks?: FileLinkContext | null;
     awaiting?: 'below' | 'elsewhere' | null;
   } = $props();
 
-  const markdown = $derived(safeMarkdownHtml(text, highlight, fileLinks, role));
+  let markdownNode = $state<HTMLElement>();
+  const markdown = $derived(safeMarkdownHtml(text, highlight, fileLinks, role, Boolean(loadSyntax) && !provisional && !highlight));
+  $effect(() => {
+    const node = markdownNode;
+    if (!node || !markdown || !loadSyntax || provisional || highlight) return;
+    const fences = [...node.querySelectorAll<HTMLElement>('pre > code[data-fence]')].flatMap((code) => {
+      const language = fenceLanguage(code.dataset.fence || '');
+      const text = code.textContent || '';
+      return language && text && fitsSyntaxBudget(text) ? [{ code, text, language }] : [];
+    });
+    if (!fences.length) return;
+    return loadCodeColours(node, loadSyntax, scan => {
+      for (const { code, text, language } of fences) {
+        if (!node.contains(code)) continue;
+        const fragment = document.createDocumentFragment();
+        for (const token of scan(text, language)) {
+          if (token.kind) {
+            const span = document.createElement('span');
+            span.className = `syntax-${token.kind}`;
+            span.textContent = token.text;
+            fragment.append(span);
+          } else fragment.append(token.text);
+        }
+        code.replaceChildren(fragment);
+      }
+    });
+  });
 </script>
 
 {#if text}
-  <div class="conversation-markdown" use:preserveTableScroll={viewState}>{@html markdown}</div>
+  <div class="conversation-markdown" bind:this={markdownNode} use:preserveTableScroll={viewState}>{@html markdown}</div>
 {/if}
 
 {#if tools.length}
@@ -101,7 +132,7 @@
           {#if tool.truncated}<p>Tool detail was truncated by the relay.</p>{/if}
         </section>
       {:else}
-        <ConversationToolCard {tool} diff={showDiffs ? tool.diff : undefined} {viewState} cardKey={`${tool.id || tool.name}:${index}`} />
+        <ConversationToolCard {tool} diff={showDiffs ? tool.diff : undefined} {viewState} {provisional} {loadSyntax} cardKey={`${tool.id || tool.name}:${index}`} />
       {/if}
     {/each}
   </div>

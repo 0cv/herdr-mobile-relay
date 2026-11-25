@@ -18,10 +18,13 @@ const release = JSON.parse(readFileSync(resolve(process.env.HERDR_WEB_ROOT || 'd
 };
 const demoLoader = '/assets/demo-loader.js';
 const demoScript = '/assets/demo.js';
+const demoSyntax = '/assets/demo-syntax.js';
+const sampleCode = 'const previewUrl = "/search?preview=1";';
 const demoAssets = new Map([
   ['/', 'document'],
   [demoLoader, 'script'],
   [demoScript, 'script'],
+  [demoSyntax, 'script'],
   ['/assets/demo.css', 'stylesheet'],
   ['/fonts/nerd-symbols-mono-v3.4.0.woff2', 'font'],
 ]);
@@ -31,6 +34,7 @@ async function watchDemo(page: Page, options: { block?: string; initialSearch?: 
   const storage: string[] = [];
   const permissions: string[] = [];
   const blocked: string[] = [];
+  const scripts: string[] = [];
   page.on('pageerror', (error) => unexpected.push(error.message));
   page.on('websocket', (socket) => unexpected.push(socket.url()));
   page.on('filechooser', () => unexpected.push('file chooser'));
@@ -49,6 +53,7 @@ async function watchDemo(page: Page, options: { block?: string; initialSearch?: 
       unexpected.push(`${request.method()} ${request.url()}`);
       return route.abort();
     }
+    if (type === 'script') scripts.push(url.pathname);
     if (url.pathname !== options.block) return route.continue();
     blocked.push(url.pathname);
     return route.abort();
@@ -107,7 +112,7 @@ async function watchDemo(page: Page, options: { block?: string; initialSearch?: 
       construct: () => unexpected('new Notification'),
     }) });
   }, options.simulatedPermission);
-  return { unexpected, storage, permissions, blocked };
+  return { unexpected, storage, permissions, blocked, scripts };
 }
 
 async function expectCleanDemoOrigin(page: Page) {
@@ -352,7 +357,7 @@ test('git status agrees with the workspace inspector on a linked worktree', asyn
   await expect(output(page).getByText('On branch main', { exact: true })).toHaveCount(0);
   await page.getByRole('button', { name: 'Inspect workspace' }).click();
   const workspace = page.getByRole('dialog', { name: 'Workspace', exact: true });
-  await workspace.getByRole('tab', { name: /^Changes\s*\(2\)$/ }).click();
+  await workspace.getByRole('tab', { name: /^Changes\s*\(3\)$/ }).click();
   await expect(workspace.getByTitle('Git branch')).toHaveText('fix/one');
   await expectCleanDemoOrigin(page);
   expect(observation.unexpected).toEqual([]);
@@ -371,7 +376,8 @@ async function openSampleConversation(page: Page, expectedEntries = 6) {
   await expect(history.getByText(/Let’s start with a preview group/)).toBeVisible();
   await expect(history.getByText(/I added the preview-first rollout note/)).toBeVisible();
   await expect(history.getByText(/preview flag and fallback checks passed/)).toBeVisible();
-  await expect(history.locator('pre code')).toHaveText('/search?preview=1');
+  await expect(history.locator('pre code')).toHaveText(sampleCode);
+  await expect(history.locator('pre code .syntax-keyword')).toHaveText('const');
   for (const [index, tool] of ['Read', 'Edit', 'Bash'].entries()) {
     await expect(entries.nth(index * 2 + 1).locator('summary')).toContainText(new RegExp(`${tool}.*completed`, 'i'));
   }
@@ -538,7 +544,10 @@ async function exerciseInspector(page: Page) {
   await expect(workspace.getByLabel('Contents of docs/release-notes.md')).toHaveValue(/Start with the search preview group/);
   await files.getByRole('button', { name: 'Results.svelte', exact: true }).click();
   await expect(workspace.getByLabel('Contents of src/search/Results.svelte')).toHaveValue(/searchBox\?\.focus\(\)/);
-  const changes = workspace.getByRole('tab', { name: /^Changes\s*\(2\)$/ });
+  await files.getByRole('button', { name: 'search.test.ts', exact: true }).click();
+  await expect(workspace.getByRole('textbox', { name: 'Contents of tests/search.test.ts' })).toHaveValue(/const preview = "\/search\?preview=1"/);
+  await expect(workspace.locator('.workspace-code-mirror .syntax-string')).not.toHaveCount(0);
+  const changes = workspace.getByRole('tab', { name: /^Changes\s*\(3\)$/ });
   await changes.click();
   await expect(changes).toHaveAttribute('aria-selected', 'true');
   for (const [path, hunks, removed, added] of [
@@ -553,6 +562,10 @@ async function exerciseInspector(page: Page) {
       await expect(row).toBeInViewport({ ratio: 1 });
     }
   }
+  await workspace.getByRole('button', { name: 'tests/search.test.ts Modified', exact: true }).click();
+  const codeDiff = workspace.getByLabel('Diff for tests/search.test.ts', { exact: true });
+  await expect(codeDiff.locator('.diff-addition .syntax-keyword')).toHaveText('const');
+  await expect(codeDiff.locator('.diff-deletion .syntax-string')).toHaveText('"/search"');
   await expect(workspace.getByRole('button', { name: /Copy|Download|Edit/ })).toHaveCount(0);
   await workspace.getByRole('button', { name: 'Close workspace inspector' }).click();
   await expect(workspace).toHaveCount(0);
@@ -696,6 +709,7 @@ for (const permission of ['granted', 'denied'] as const) {
     const observation = await watchDemo(demo, { simulatedPermission });
     await demo.goto(demoOrigin);
     await expectSampleHome(demo);
+    expect(observation.scripts).not.toContain(demoSyntax);
     await expect(demo).toHaveURL(`${demoOrigin}/`);
     const root = demo.locator('html');
     await expect(root).toHaveAttribute('data-theme', 'nord');
@@ -727,6 +741,7 @@ for (const permission of ['granted', 'denied'] as const) {
 
     await exerciseTerminal(demo);
     await exerciseConversation(demo);
+    expect(observation.scripts).toContain(demoSyntax);
     await exerciseInspector(demo);
     await exerciseLaunch(demo);
     await exerciseSettings(demo);
@@ -905,13 +920,14 @@ test('shows five workspaces and activity relative to the visit', async ({ page }
   expect(observation.unexpected).toEqual([]);
 });
 
-test('finds waiting input and opens the new result without relying on color', async ({ page }) => {
+test('finds input, opens the new result and reads an exact code sample at 320 px in grayscale', async ({ page, browserName }) => {
+  await page.setViewportSize({ width: 320, height: 740 });
   const observation = await watchDemo(page);
   await page.goto(demoOrigin);
+  await page.locator('html').evaluate(element => { element.style.filter = 'grayscale(1)'; });
   const waiting = page.getByRole('region', { name: 'Needs input', exact: true });
   await expect(waiting.getByRole('button', { name: 'Open Patch review on Atlas' }))
     .toHaveAccessibleDescription(/^Needs input.*make test$/);
-  await page.locator('.agent-list').evaluate((element) => { (element as HTMLElement).style.filter = 'grayscale(1)'; });
   const result = demoAgent(page, 'Fixture checks');
   const idle = demoAgent(page, 'Release notes');
   const project = page.locator('.workspace-card > summary').filter({ has: page.getByText('Project', { exact: true }) });
@@ -922,7 +938,8 @@ test('finds waiting input and opens the new result without relying on color', as
   await expect(project).toHaveAccessibleName(/1 new result/);
   await result.focus();
   await result.press('Enter');
-  await expect(output(page)).toContainText('Pi · Fixture checks');
+  await expect(page.getByRole('banner').getByText('Fixture checks', { exact: true })).toBeVisible();
+  await expect(output(page)).toContainText('Fixture review complete.');
   await expect(page.getByRole('banner').getByRole('img', { name: 'Idle' })).toBeVisible();
   await back(page);
   await expect(result).toHaveAccessibleDescription(/^Idle · last active /);
@@ -930,6 +947,28 @@ test('finds waiting input and opens the new result without relying on color', as
   await page.reload();
   await expect(result).toHaveAccessibleDescription(/^New result · last active /);
   await expect(project).toHaveAccessibleName(/1 new result/);
+  await page.locator('html').evaluate(element => { element.style.filter = 'grayscale(1)'; });
+  const history = await openSampleConversation(page);
+  const code = history.locator('pre code');
+  const article = history.getByRole('article').filter({ hasText: /I added the preview-first rollout note/ });
+  await expect(article).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
+  await expect(article).toHaveCSS('border-top-width', '0px');
+  await expect(code.locator('.syntax-string')).toHaveText('"/search?preview=1"');
+  const selected = await code.evaluate(element => {
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    const selection = window.getSelection()!;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    return selection.toString();
+  });
+  expect(selected).toBe(sampleCode);
+  if (browserName === 'chromium') {
+    await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], { origin: demoOrigin });
+    const copied = await page.evaluate(() => document.execCommand('copy') ? navigator.clipboard.readText() : null);
+    expect(copied).toBe(sampleCode);
+  }
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(320);
   await expectCleanDemoOrigin(page);
   expect(observation.unexpected).toEqual([]);
 });

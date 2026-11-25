@@ -56,7 +56,10 @@
   import type { Agent, ConversationPage, NotificationTarget } from '$lib/types';
   import type { ViewState } from '$lib/router';
   import type { WorkspaceFileTarget } from '$lib/workspace-inspection';
+  import type { LoadSyntax } from '$lib/code-reading';
 
+  let syntaxRequest: ReturnType<LoadSyntax> | undefined;
+  const loadSyntax: LoadSyntax = () => syntaxRequest ??= import('$lib/syntax-colours').then(module => module.scanCode, () => null);
   const relays = relayStore.relayConfigs;
   const connections = relayStore.connections;
   const agents = relayStore.agents;
@@ -495,6 +498,7 @@
           readOnly={activeReadOnly}
           frame={$frames.get(activeAgent.pane_id)}
           responding={$responding}
+          {loadSyntax}
           onInitialPage={openingRoute.fallbackToTerminalOnInitialUnavailable
             ? makeInitialPageHandler(openingRoute)
             : undefined}
@@ -552,6 +556,6 @@
 <UpdateProgressDialog {readOnlyRelayIds} />
 <ManageDialog bind:open={manageOpen} agent={activeAgent} readOnly={activeReadOnly} />
 <GlobalJump bind:open={jumpOpen} agents={$agents} onselect={openAgent} />
-<WorkspaceInspector bind:open={workspaceOpen} agent={activeAgent} fileTarget={workspaceFileTarget} />
+<WorkspaceInspector bind:open={workspaceOpen} agent={activeAgent} fileTarget={workspaceFileTarget} {loadSyntax} />
 <LockScreen />
 <Toast />

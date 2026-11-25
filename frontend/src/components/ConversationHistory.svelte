@@ -25,6 +25,7 @@
     putConversationPreview,
   } from '$lib/conversation-cache';
   import { ConversationLiveReader, LIVE_MAX_BYTES, type LiveReaderState } from '$lib/conversation-live';
+  import type { LoadSyntax } from '$lib/code-reading';
   import { ConversationMessageStateStore } from '$lib/conversation-message-state';
   import { CommandError } from '$lib/command-error';
   import { fileLinkContext } from '$lib/file-links';
@@ -39,7 +40,8 @@
     frame,
     responding = new Set<string>(),
     onInitialPage,
-  }: { agent: Agent; readOnly?: boolean; frame?: TerminalFrame; responding?: Set<string>; onInitialPage?: (page: ConversationPage) => void } = $props();
+    loadSyntax,
+  }: { agent: Agent; readOnly?: boolean; frame?: TerminalFrame; responding?: Set<string>; onInitialPage?: (page: ConversationPage) => void; loadSyntax?: LoadSyntax } = $props();
 
   const connections = relayStore.connections;
   const fileLinks = $derived(fileLinkContext(agent, $connections.get(agent.relay_id)));
@@ -712,6 +714,7 @@
           <article
             class:conversation-user={entry.role === 'user'}
             class:conversation-notice={entry.kind === 'notice'}
+            class:conversation-reply={entry.role === 'assistant' && !entry.kind && entry.text.trim()}
             class="conversation-entry"
             data-conversation-entry-id={entry.id}
           >
@@ -722,7 +725,7 @@
                 <ConversationMessageActions {entry} {agent} {agentName} />
               </span>
             </header>
-            <ConversationMessage role={entry.role} viewState={messageStates.get(entry.id)} text={entry.text} tools={entry.tools} {showDiffs} highlight={query.trim()} {fileLinks} awaiting={entry.id === waitingQuestionEntryId ? (questionFormShown ? 'below' : 'elsewhere') : null} />
+            <ConversationMessage role={entry.role} viewState={messageStates.get(entry.id)} text={entry.text} tools={entry.tools} {showDiffs} {loadSyntax} provisional={entry.id.startsWith('live:')} highlight={query.trim()} {fileLinks} awaiting={entry.id === waitingQuestionEntryId ? (questionFormShown ? 'below' : 'elsewhere') : null} />
             {#if entry.id.startsWith('live:')}<small>Live · not saved yet</small>{/if}
             {#if entry.truncated}<small>Long turn truncated by the relay.</small>{/if}
           </article>

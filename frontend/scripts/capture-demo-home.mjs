@@ -165,6 +165,7 @@ const scenes = {
     await visible(history.getByText(/Let’s start with a preview group/));
     await visible(history.getByText(/I added the preview-first rollout note/));
     await visible(history.getByText(/preview flag and fallback checks passed/));
+    await visible(history.locator('pre code .syntax-keyword'));
     for (const tool of ['Read', 'Edit', 'Bash']) {
       await visible(history.locator('summary').filter({ hasText: new RegExp(`${tool}.*completed`, 'i') }));
     }
@@ -174,7 +175,7 @@ const scenes = {
     await openAgent(page, 'Release notes');
     await button(page, 'Inspect workspace').click();
     const workspace = page.getByRole('dialog', { name: 'Workspace', exact: true });
-    const changes = workspace.getByRole('tab', { name: /^Changes\s*\(2\)$/ });
+    const changes = workspace.getByRole('tab', { name: /^Changes\s*\(3\)$/ });
     await changes.click();
     await expect(changes).toHaveAttribute('aria-selected', 'true');
     await visible(changes);
@@ -188,6 +189,7 @@ const scenes = {
     await visible(text(workspace, 'Unified diff'));
     await visible(notes);
     await visible(workspace.getByRole('button', { name: /^src\/search\/Results\.svelte\s*Modified$/ }));
+    await visible(workspace.getByRole('button', { name: /^tests\/search\.test\.ts\s*Modified$/ }));
     await visible(diff.locator('.diff-meta').first());
     const hunks = diff.locator('.diff-hunk');
     await expect(hunks).toHaveCount(3);

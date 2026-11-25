@@ -48,6 +48,12 @@ afterAll(() => {
   if (root) rmSync(root, { recursive: true, force: true });
 });
 
+function checkLazyScript(source: string, scriptName: string, standalone: boolean) {
+  expect(source).not.toContain('./app.js');
+  if (!standalone) expect(source).toContain(`./${scriptName}`);
+  for (const match of source.matchAll(/\.\/app-[a-f0-9]+\.js/g)) expect(match[0]).toBe(`./${scriptName}`);
+}
+
 describe('finished release directory', () => {
   it('names the script and stylesheet after the SHA-256 of their bytes', () => {
     const assets = readdirSync(join(root, 'assets'));
@@ -105,15 +111,24 @@ describe('finished release directory', () => {
     expect(entry).not.toContain('assets/app.css');
   });
 
-  it('makes every lazy chunk import the final script and nothing import ./app.js', () => {
+  it('imports the versioned scanner and keeps the hashed app references in lazy chunks', () => {
     const descriptor = readJson('release.json');
     const scriptName = descriptor.files.javascript.path.replace('assets/', '');
-    const lazy = readdirSync(join(root, 'assets')).filter((name) => name.endsWith(`-${descriptor.assets}.js`));
-    expect(lazy.length).toBeGreaterThan(0);
-    for (const name of lazy) expect(read(`assets/${name}`).toString('utf8'), name).toContain(`./${scriptName}`);
-    for (const name of readdirSync(join(root, 'assets')).filter((item) => item.endsWith('.js'))) {
-      expect(read(`assets/${name}`).toString('utf8'), name).not.toContain('./app.js');
+    const scanner = `syntax-colours-${descriptor.assets}.js`;
+    const allScripts = listFiles(root).filter(name => name.endsWith('.js'));
+    expect(allScripts).toContain(`assets/${scanner}`);
+    expect(read(descriptor.files.javascript.path).toString('utf8').match(/import\([`'"].*?syntax-colours-\d+\.js[`'"]\)/u)?.[0]).toContain(`./${scanner}`);
+    for (const name of allScripts) {
+      const standalone = !name.endsWith(`-${descriptor.assets}.js`);
+      checkLazyScript(read(name).toString('utf8'), scriptName, standalone);
     }
+  });
+
+  it('rejects a stale app reference even in the scanner', () => {
+    const app = `app-${'1'.repeat(64)}.js`;
+    expect(() => checkLazyScript('export function scan() {}', app, true)).not.toThrow();
+    expect(() => checkLazyScript('import "./app.js";', app, true)).toThrow();
+    expect(() => checkLazyScript(`import "./app-${'2'.repeat(64)}.js";`, app, true)).toThrow();
   });
 
   it('writes a Brotli sidecar that decompresses to each listed file', () => {

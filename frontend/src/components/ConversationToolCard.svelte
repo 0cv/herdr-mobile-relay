@@ -1,13 +1,17 @@
 <script lang="ts">
+  import CodeTokens from '$components/CodeTokens.svelte';
+  import { fileLanguage, fitsSyntaxBudget, loadCodeColours, type LoadSyntax, type ScanCode } from '$lib/code-reading';
   import ToolPayload from '$components/ToolPayload.svelte';
   import type { ConversationMessageViewState } from '$lib/conversation-message-state';
   import type { ConversationEditDiff, ConversationTool } from '$lib/types';
 
-  let { tool, diff, viewState, cardKey }: {
+  let { tool, diff, viewState, cardKey, provisional, loadSyntax }: {
     tool: ConversationTool;
     diff?: ConversationEditDiff;
     viewState: ConversationMessageViewState;
     cardKey: string;
+    provisional: boolean;
+    loadSyntax?: LoadSyntax;
   } = $props();
 
   let open = $state(false);
@@ -32,9 +36,20 @@
     };
   }
 
-  function rowTone(row: string): string {
-    return row[0] === '+' ? 'diff-addition' : row[0] === '-' ? 'diff-deletion' : 'diff-hunk';
-  }
+  let scanner = $state<ScanCode | null>(null);
+  let preview = $state<HTMLElement>();
+  const language = $derived(open && !provisional && tool.state !== 'running' && diff?.text
+    && !diff.truncated && fitsSyntaxBudget(diff.text) ? fileLanguage(diff.path) : undefined);
+  $effect(() => {
+    if (!language || !preview || !loadSyntax || scanner) return;
+    return loadCodeColours(preview, loadSyntax, scan => { scanner = scan; });
+  });
+  const rows = $derived(open && diff?.text ? diff.text.split('\n').map(row => {
+    const sign = row[0];
+    const tone = sign === '+' ? 'diff-addition' : sign === '-' ? 'diff-deletion' : 'diff-hunk';
+    const tokens = language && scanner && (sign === '+' || sign === '-') ? scanner(row.slice(1), language) : null;
+    return { row, sign, tone, tokens };
+  }) : []);
 </script>
 
 <details class:error={tool.error} use:preserveToolState={{ state: viewState, key: cardKey }}>
@@ -55,7 +70,7 @@
         <section>
           <p class="edit-path">{diff.path}</p>
           <h4>{label}</h4>
-          <pre aria-label={label}>{#if diff.text}{#each diff.text.split('\n') as row, index (index)}<span class={`workspace-diff-line ${rowTone(row)}`}>{row}</span>{/each}{/if}</pre>
+          <pre aria-label={label} bind:this={preview}>{#each rows as { row, sign, tone, tokens }, index (index)}<span class={`workspace-diff-line ${tone}`}>{#if tokens}{sign}<CodeTokens {tokens} />{:else}{row}{/if}</span>{/each}</pre>
           {#if diff.truncated}<p>Diff truncated</p>{/if}
         </section>
       {/if}

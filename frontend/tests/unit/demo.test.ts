@@ -629,16 +629,17 @@ describe('demo responder', () => {
     const code = 'src/search/Results.svelte';
     expect(relay.respond({ ...target, type: 'workspace_tree' })).toMatchObject([{
       ok: true, request_id: target.request_id, data: { root: '/home/demo/project', entries: [
-        ...['docs', 'src', 'src/search'].map((path) => ({ path, kind: 'directory' })),
-        ...['README.md', path, code].map((path) => ({ path, kind: 'file' })),
+        ...['docs', 'src', 'src/search', 'tests'].map((path) => ({ path, kind: 'directory' })),
+        ...['README.md', path, code, 'tests/search.test.ts'].map((path) => ({ path, kind: 'file' })),
       ] },
     }]);
     expect(relay.respond({ ...target, type: 'workspace_git_status' })).toMatchObject([{ ok: true, data: {
-      available: true, branch: 'main', files: [{ path, status: ' M' }, { path: code, status: ' M' }],
+      available: true, branch: 'main', files: [path, code, 'tests/search.test.ts'].map(path => ({ path, status: ' M' })),
     } }]);
     for (const [file, mediaType, hunks, before, after] of [
       [path, 'text/markdown', 3, '-Roll out to everyone.', '+Start with the search preview group.'],
       [code, 'text/plain', 2, '-  <p>No results.</p>', '+    searchBox?.focus();'],
+      ['tests/search.test.ts', 'text/plain', 1, '-  expect(searchUrl).toBe("/search");', '+  const preview = "/search?preview=1";'],
     ] as const) {
       const [preview] = relay.respond({ ...target, type: 'workspace_file', path: file });
       const [change] = relay.respond({ ...target, type: 'workspace_git_diff', path: file });

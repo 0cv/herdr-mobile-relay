@@ -38,18 +38,20 @@ const variants = new Map(Object.entries({
   'components/TerminalResponseActions.svelte': 'NoResponseActions.svelte',
 }).map(([original, variant]) => [join(frontend, 'src', original), join(frontend, 'src/demo', variant)]));
 
+const syntaxEntry = join(frontend, 'src/lib/syntax-colours.ts');
 const demoModules = {
   name: 'demo-modules',
   enforce: 'pre',
   async resolveId(source, importer, options) {
     if (!importer || !source.startsWith('.') && !source.startsWith('/') && !source.startsWith('$')) return;
     const original = await this.resolve(source, importer, { ...options, skipSelf: true });
+    if (original?.id === syntaxEntry) return { id: '/assets/demo-syntax.js', external: true };
     const variant = variants.get(original?.id);
     if (variant && variant !== importer) return variant;
   },
 };
 
-function buildEntry(input, name, { external, ...config } = {}) {
+function buildEntry(input, name, { external, keepExports = false, ...config } = {}) {
   return build({
     configFile: false,
     root: frontend,
@@ -62,6 +64,7 @@ function buildEntry(input, name, { external, ...config } = {}) {
       modulePreload: false,
       rolldownOptions: {
         external,
+        preserveEntrySignatures: keepExports ? 'strict' : false,
         input: join(frontend, input),
         output: {
           codeSplitting: false,
@@ -77,6 +80,7 @@ function buildEntry(input, name, { external, ...config } = {}) {
 const loader = await buildEntry('src/demo/main.ts', 'demo-loader', {
   external: ['/assets/demo.js'],
 });
+const syntax = await buildEntry('src/lib/syntax-colours.ts', 'demo-syntax', { keepExports: true });
 const app = await buildEntry('src/demo/app.ts', 'demo', {
   plugins: [demoModules, svelte()],
   resolve: {
@@ -93,7 +97,7 @@ const app = await buildEntry('src/demo/app.ts', 'demo', {
     __SERVICE_WORKER_URL__: '""',
   },
 });
-const outputFiles = [...loader.output, ...app.output];
+const outputFiles = [...loader.output, ...app.output, ...syntax.output];
 const stylesheets = outputFiles.filter((file) => file.type === 'asset' && file.fileName.endsWith('.css'));
 if (!stylesheets.length) throw new Error('Demo stylesheet was not built.');
 const policy = "default-src 'self'; connect-src 'none'; worker-src 'none'; style-src-attr 'unsafe-inline'; img-src 'self' data:";

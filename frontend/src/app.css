@@ -31,6 +31,10 @@
   --trust: #a178df;
   --terminal: #080808;
   --terminal-text: #e5e5e5;
+  --syntax-keyword: #c8b0ef;
+  --syntax-string: #a3cde3;
+  --syntax-number: #edc49b;
+  --syntax-comment: #a8afbc;
   --terminal-link: #80bfff;
   --terminal-link-visited: #c8a2ff;
 }
@@ -53,6 +57,10 @@
   --trust: #7041a0;
   --terminal: #151515;
   --terminal-text: #f0f0f0;
+  --syntax-keyword: #c4b4f2;
+  --syntax-string: #9ed4e1;
+  --syntax-number: #eec6a7;
+  --syntax-comment: #a9b5bf;
 }
 
 :root[data-theme='nord'] {
@@ -73,6 +81,10 @@
   --trust: #b48ead;
   --terminal: #242933;
   --terminal-text: #eceff4;
+  --syntax-keyword: #dfb9df;
+  --syntax-string: #a6d1e6;
+  --syntax-number: #ebcb8b;
+  --syntax-comment: #abb9ce;
 }
 
 :root[data-theme='solarized'] {
@@ -93,6 +105,10 @@
   --trust: #6c71c4;
   --terminal: #001f27;
   --terminal-text: #eee8d5;
+  --syntax-keyword: #bcbaff;
+  --syntax-string: #96d2d4;
+  --syntax-number: #ebc68f;
+  --syntax-comment: #a4b7bd;
 }
 
 :root[data-theme='rose'] {
@@ -113,6 +129,10 @@
   --trust: #c4a7e7;
   --terminal: #12101c;
   --terminal-text: #e0def4;
+  --syntax-keyword: #c4a7e7;
+  --syntax-string: #9ccfd8;
+  --syntax-number: #edc89d;
+  --syntax-comment: #a9a4bf;
 }
 
 /* Catppuccin Latte: the one theme whose terminal pane is light as well, so a
@@ -135,6 +155,10 @@
   --trust: #8839ef;
   --terminal: #eff1f5;
   --terminal-text: #4c4f69;
+  --syntax-keyword: #65339a;
+  --syntax-string: #205c70;
+  --syntax-number: #774613;
+  --syntax-comment: #4e566b;
   --terminal-link: #1e66f5;
   --terminal-link-visited: #8839ef;
 }
@@ -426,10 +450,13 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .conversation-stream { display: flex; flex-direction: column; gap: .55rem; }
 .conversation-entry { align-self: flex-start; background: var(--card); border: 1px solid var(--border); border-radius: .75rem; max-width: min(94%, 42rem); padding: .72rem .78rem; }
 .conversation-entry.conversation-user { align-self: flex-end; background: color-mix(in srgb, var(--primary) 12%, var(--card)); border-color: color-mix(in srgb, var(--primary) 38%, var(--border)); }
-.conversation-entry > header { align-items: center; display: flex; gap: .5rem; justify-content: space-between; margin-bottom: .35rem; }
-.conversation-entry > header strong { flex: 1 1 auto; font-size: .72rem; min-width: 0; }
-.conversation-entry > header time, .conversation-entry > small { color: var(--muted); font-size: .62rem; }
-.conversation-entry-actions { align-items: center; display: flex; flex: 0 0 auto; gap: .25rem; }
+.conversation-entry.conversation-reply { background: transparent; border: 0; max-width: 100%; width: min(100%, 42rem); }
+.conversation-entry > header { align-items: center; display: flex; flex-wrap: wrap; gap: .35rem .5rem; justify-content: space-between; margin-bottom: .35rem; }
+.conversation-entry > header strong { flex: 1 1 auto; font-size: .72rem; min-width: 0; overflow-wrap: anywhere; }
+.conversation-entry > header time { color: color-mix(in srgb, var(--foreground) 65%, var(--muted)); font-size: .62rem; }
+.conversation-entry > small { color: var(--muted); font-size: .62rem; }
+.conversation-reply > small { color: var(--foreground); }
+.conversation-entry-actions { align-items: center; display: flex; flex-wrap: wrap; gap: .25rem; max-width: 100%; }
 .copy-conversation-markdown { color: var(--muted); height: 1.7rem; min-height: 1.7rem; opacity: .72; width: 1.7rem; }
 .copy-conversation-markdown:hover, .copy-conversation-markdown:focus-visible { opacity: 1; }
 .conversation-entry > small { display: block; margin-top: .4rem; }
@@ -440,7 +467,11 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .conversation-markdown { font-size: .8rem; line-height: 1.55; overflow-wrap: anywhere; }
 .conversation-markdown > :first-child { margin-top: 0; }
 .conversation-markdown > :last-child { margin-bottom: 0; }
-.conversation-markdown p { margin: .55rem 0; }
+.conversation-markdown p { margin: .68rem 0; }
+.syntax-keyword { color: var(--syntax-keyword); }
+.syntax-string { color: var(--syntax-string); }
+.syntax-number { color: var(--syntax-number); }
+.syntax-comment { color: var(--syntax-comment); }
 .conversation-markdown :is(h3, h4, h5, h6) { font-size: .86rem; line-height: 1.35; margin: .85rem 0 .4rem; }
 .conversation-markdown :is(ul, ol) { margin: .5rem 0; padding-left: 1.35rem; }
 .conversation-markdown li + li { margin-top: .25rem; }
@@ -967,11 +998,22 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .workspace-body > aside > button > em { color: var(--muted); flex: 0 0 auto; font-size: .58rem; font-style: normal; margin-left: .4rem; }
 .workspace-body > main { background: var(--terminal); color: var(--terminal-text); display: flex; flex-direction: column; min-width: 0; overflow: auto; }
 .workspace-code-preview { background: transparent; border: 0; box-sizing: border-box; color: inherit; flex: 1 1 auto; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .7rem; line-height: 1.5; margin: 0; min-height: 0; min-width: 100%; overflow: auto; padding: .8rem; resize: none; tab-size: 2; white-space: pre; width: 100%; }
+.workspace-file-text { display: flex; flex: 1 1 auto; min-height: 0; overflow: hidden; position: relative; }
+.workspace-file-text > textarea { font-variant-ligatures: none; position: relative; }
+.workspace-file-text > textarea:focus-visible { outline-offset: -2px; }
+.workspace-code-mirror { font-variant-ligatures: none; inset: 0; overflow: visible; pointer-events: none; position: absolute; user-select: none; }
+.workspace-file-text.coloured > textarea { color: transparent; caret-color: var(--terminal-text); }
+.workspace-file-text > textarea::selection { background: Highlight; color: HighlightText; }
+@media (forced-colors: active) {
+  .workspace-code-mirror { display: none; }
+  .workspace-file-text.coloured > textarea { color: CanvasText; }
+}
 .workspace-diff { box-sizing: border-box; flex: 0 0 auto; font-size: calc(.7rem * var(--diff-zoom, 1)); min-height: calc(100% - 2.5rem); min-width: 100%; overflow: visible; padding: .35rem 0; touch-action: pan-x pan-y; width: max-content; }
 .workspace-diff-line { display: block; min-height: 1.5em; padding: 0 .8rem; }
 .workspace-diff-line.diff-meta, .workspace-diff-line.diff-file { color: color-mix(in srgb, var(--primary) 72%, var(--terminal-text)); font-weight: 650; }
 .workspace-diff-line.diff-hunk { background: color-mix(in srgb, var(--primary) 18%, var(--terminal)); color: color-mix(in srgb, var(--primary) 68%, var(--terminal-text)); }
 .workspace-diff-line.diff-addition { background: color-mix(in srgb, var(--success) 16%, var(--terminal)); color: color-mix(in srgb, var(--success) 64%, var(--terminal-text)); }
+:root[data-theme='latte'] .workspace-diff-line.diff-addition { color: color-mix(in srgb, var(--success) 30%, var(--terminal-text)); }
 .workspace-diff-line.diff-deletion { background: color-mix(in srgb, var(--danger) 16%, var(--terminal)); color: color-mix(in srgb, var(--danger) 64%, var(--terminal-text)); }
 .workspace-diff-line.diff-note { color: color-mix(in srgb, var(--warning) 70%, var(--terminal-text)); font-style: italic; }
 .workspace-body > main figure { align-items: center; display: flex; flex-direction: column; gap: .7rem; margin: 0; min-height: 100%; padding: 1rem; }

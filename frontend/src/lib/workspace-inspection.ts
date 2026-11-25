@@ -29,7 +29,9 @@ export async function loadWorkspaceFile(agent: Agent, path: string): Promise<Wor
   workspaceInspectionAvailable(agent);
   const result = await relayStore.sendToAgent(agent, { type: 'workspace_file', path }, 20_000);
   const data = result.data as unknown as WorkspaceFile;
-  if (!data || data.path !== path || !['text', 'image'].includes(data.kind)) {
+  if (!data || data.path !== path || (data.kind === 'text'
+    ? typeof data.text !== 'string' && !(data.text === undefined && data.size === 0)
+    : data.kind !== 'image')) {
     throw new CommandError('Relay returned an invalid workspace preview.');
   }
   return data;
