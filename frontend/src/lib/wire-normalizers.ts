@@ -128,6 +128,8 @@ export function normalizePushPolicy(value: unknown): DevicePushPolicy | null {
   return policy;
 }
 
+export const SLASH_COMMAND_NAME = /^\/[A-Za-z0-9][A-Za-z0-9._:-]*(?:\/[A-Za-z0-9][A-Za-z0-9._:-]*)*$/;
+
 export function normalizeSlashCommandCatalog(data: Record<string, any>): SlashCommandCatalog {
   const rawCommands = data.commands;
   const commandsList = Array.isArray(rawCommands) ? rawCommands : [];
@@ -150,7 +152,7 @@ export function normalizeSlashCommandCatalog(data: Record<string, any>): SlashCo
   };
   const validCommands = commandsList
     .filter((entry: Record<string, unknown>) => typeof entry?.command === 'string'
-      && entry.command.length <= 121 && /^\/[A-Za-z0-9][A-Za-z0-9._:-]*(?:\/[A-Za-z0-9][A-Za-z0-9._:-]*)*$/.test(entry.command));
+      && entry.command.length <= 121 && SLASH_COMMAND_NAME.test(entry.command));
   const commands = validCommands
     .slice(0, SLASH_COMMAND_MAX_ENTRIES)
     .map((entry: Record<string, unknown>): SlashCommand => ({

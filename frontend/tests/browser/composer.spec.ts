@@ -3,6 +3,107 @@ import { chooseMore } from '../support/journey-chrome';
 import { APP_METADATA, emulateStandalone, saveDeviceCredential } from '../support/journey-device';
 import { boot, closeSocket, commands, composerTarget, connectFedora, fedora, handshake, lastCommand, openAgent, openSharedComposer, reply, replyToPaneRead, server, setAutoCommands, setConversationFixture, socketCount } from '../support/journey-relay';
 
+test('explains Send only for a verified working agent', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 740 });
+  const codex = { ...composerTarget, project: 'Codex app', agent: 'codex', status: 'idle' };
+  const claude = { pane_id: 'w1:p2', project: 'Claude app', agent: 'claude', status: 'working' };
+  const inventory = (status: string) => server(page, 0, { type: 'agents', agents: [{ ...codex, status }, claude] });
+  const prompt = page.getByRole('combobox', { name: 'Prompt', exact: true });
+  const send = page.getByRole('button', { name: 'Send prompt', exact: true });
+  const toast = page.locator('.toast');
+  const defaultWording = async () => {
+    await expect(prompt).toHaveAttribute('placeholder', 'Type a reply…');
+    await expect(prompt).toHaveAccessibleDescription('');
+  };
+
+  await openAgent(page, codex);
+  await defaultWording();
+  await prompt.fill('Start the task');
+  await send.click();
+  await expect(toast).toHaveText('Prompt sent.');
+
+  await inventory('working');
+  const description = 'Codex is working. Send adds this to its current task.';
+  await expect(prompt).toHaveValue('');
+  await expect(prompt).toHaveAttribute('placeholder', 'Joins this task');
+  await expect(prompt).toHaveAccessibleDescription(description);
+  await setAutoCommands(page, false);
+  await page.locator('input[type=file][accept="image/*"]').setInputFiles({ name: 'pending.png', mimeType: 'image/png', buffer: Buffer.from('png') });
+  const upload = await lastCommand(page, 'upload_begin');
+  await defaultWording();
+  await prompt.fill('Wait for the upload');
+  await expect(send).toBeDisabled();
+  await server(page, 0, { type: 'upload_begin_result', request_id: upload.request_id, error: { code: 'attachment_upload_expired' } });
+  await expect(prompt).toHaveAccessibleDescription(description);
+
+  await setAutoCommands(page, true);
+  await prompt.fill('/new');
+  await defaultWording();
+  await send.click();
+  await expect(prompt).toHaveValue('');
+  await expect(toast).toHaveText('Prompt sent.');
+  expect(await lastCommand(page, 'submit_prompt')).toMatchObject({ pane_id: 'w1:p1', text: '/new' });
+
+  await setAutoCommands(page, false);
+  await prompt.fill('// TODO: handle EOF');
+  await expect(prompt).toHaveAccessibleDescription(description);
+  await send.click();
+  const sent = await lastCommand(page, 'submit_prompt');
+  expect(sent).toMatchObject({ pane_id: 'w1:p1', text: '// TODO: handle EOF' });
+  await inventory('idle');
+  await defaultWording();
+  await reply(page, sent, {}, { phase: 'confirmed' });
+  await expect(toast).toHaveText('Sent. Codex will read it during its current task.');
+
+  await setAutoCommands(page, true);
+  await page.getByRole('button', { name: 'Back', exact: true }).click();
+  await page.getByRole('button', { name: 'Open Claude app on Fedora' }).click();
+  await defaultWording();
+  await prompt.fill('A follow-up');
+  await send.click();
+  await expect(toast).toHaveText('Prompt sent.');
+});
+
+test('fits the busy-send hint on one line at 320 px with Large selected', async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 320, height: 740 });
+  const prompt = await openSharedComposer(page, 'Conversation');
+  await chooseMore(page, /^Settings\b/);
+  await page.getByRole('group', { name: 'Interface Size' }).getByRole('button', { name: 'Large' }).click();
+  await page.getByRole('button', { name: 'Back', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
+  await expect(page.locator('html')).toHaveAttribute('data-interface-size', 'large');
+  expect(await page.evaluate(() => innerWidth)).toBe(320);
+
+  for (const view of ['Conversation', 'Terminal']) {
+    if (view === 'Terminal') {
+      await page.getByRole('button', { name: 'Terminal view', exact: true }).click();
+      await replyToPaneRead(page);
+    }
+    await expect(prompt).toHaveAttribute('placeholder', 'Type a reply…');
+    const idleHeight = await prompt.evaluate(element => element.clientHeight);
+    await server(page, 0, { ...composerTarget, type: 'agent_update', status: 'working' });
+    await expect(prompt).toHaveAttribute('placeholder', 'Joins this task');
+    await expect(prompt).toHaveValue('');
+    const { height, scrollHeight, availableWidth, textWidth } = await prompt.evaluate(async (element: HTMLTextAreaElement) => {
+      await document.fonts.ready;
+      const style = getComputedStyle(element);
+      const context = document.createElement('canvas').getContext('2d')!;
+      context.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+      return {
+        height: element.clientHeight,
+        scrollHeight: element.scrollHeight,
+        availableWidth: element.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight),
+        textWidth: context.measureText(element.placeholder).width,
+      };
+    });
+    console.log(`${testInfo.project.name} ${view} placeholder: ${textWidth.toFixed(2)} / ${availableWidth.toFixed(2)} CSS px`);
+    expect(textWidth).toBeLessThanOrEqual(availableWidth);
+    expect({ height, scrollHeight }).toEqual({ height: idleHeight, scrollHeight: idleHeight });
+    await server(page, 0, { ...composerTarget, type: 'agent_update', status: 'idle' });
+    await expect(prompt).toHaveAttribute('placeholder', 'Type a reply…');
+  }
+});
+
 test('discovers slash commands per terminal and fills them before sending', async ({ page }) => {
   await connectFedora(page);
   await server(page, 0, {
@@ -61,6 +162,7 @@ test('discovers slash commands per terminal and fills them before sending', asyn
   expect((await commands(page)).find((command) => command.type === 'submit_prompt')).toMatchObject({
     pane_id: 'w1:p1', text: '/plan Review the release',
   });
+  await expect(page.locator('.toast')).toHaveText('Prompt sent.');
 
   await page.getByRole('button', { name: 'Back' }).click();
   await chooseMore(page, 'Search all agents');

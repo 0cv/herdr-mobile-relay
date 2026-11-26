@@ -506,6 +506,14 @@ header light indicates activity. Send-button busy state, actionable failures and
 pending or uncertain delivery warnings remain. Reader devices cannot use input,
 upload, hidden-value or response controls.
 
+While Codex, Pi, Oh My Pi or OpenCode is working, an empty prompt field shows
+**Joins this task** when the phone can send to that pane. The field's accessible
+description explains that Send adds the prompt to the agent's current task.
+After a successful send, the phone says the agent will read it during that
+task. The guidance is hidden while an attachment uploads and for slash commands
+such as `/new`, which keep the usual **Prompt sent.** confirmation. Other agents
+decide how to handle prompts sent while they work; the relay does not queue them.
+
 Visible Pi extension notices appear in both modes, including recent, older and
 live history. Only text from explicit `display:true` custom messages is shown;
 hidden messages and private details are excluded. For a blocked Pi pane with
