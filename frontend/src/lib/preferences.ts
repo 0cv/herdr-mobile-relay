@@ -8,6 +8,7 @@ import {
   HOME_LAYOUTS,
   INTERFACE_SIZE_KEY,
   INTERFACE_SIZES,
+  TERMINAL_KEY_ROW_KEY,
   TERMINAL_HISTORY_KEY,
   TERMINAL_HISTORY_OPTIONS,
   TERMINAL_HEIGHT_LEASE_KEY,
@@ -26,6 +27,7 @@ import {
   type TerminalRefreshInterval,
   type Theme,
 } from './config';
+import { defaultKeyRow, isDefaultKeyRow, validKeyRow } from './terminal-key-row';
 import { setTerminalScheme } from './terminal';
 import type { Agent } from './types';
 import {
@@ -94,6 +96,25 @@ function persistedPreference<T>(
       store.set(value);
     },
   };
+}
+
+function readTerminalKeyRow(): readonly string[] {
+  try {
+    const value: unknown = JSON.parse(localStorage.getItem(TERMINAL_KEY_ROW_KEY) ?? 'null');
+    if (validKeyRow(value)) return value;
+  } catch {
+    return defaultKeyRow;
+  }
+  return defaultKeyRow;
+}
+
+const keyRowPreference = persistedPreference(TERMINAL_KEY_ROW_KEY, readTerminalKeyRow(),
+  (row) => isDefaultKeyRow(row) ? null : JSON.stringify(row));
+export const terminalKeyRow = keyRowPreference.store;
+
+export function setTerminalKeyRow(row: readonly string[]): void {
+  if (!validKeyRow(row)) throw new Error('Invalid terminal key row.');
+  keyRowPreference.set([...row]);
 }
 
 const defaultAgentViewPreference = persistedPreference(DEFAULT_AGENT_VIEW_KEY, readDefaultAgentView());

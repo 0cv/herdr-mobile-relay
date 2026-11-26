@@ -10,8 +10,10 @@
 </script>
 
 <script lang="ts">
-  import { onDestroy, untrack, type Snippet } from 'svelte';
+  import { onDestroy, tick, untrack, type Snippet } from 'svelte';
   import Button from '$components/ui/Button.svelte';
+  import { terminalKeyRow } from '$lib/preferences';
+  import { isDefaultKeyRow, keyRowLabel } from '$lib/terminal-key-row';
   import { targetRefForAgent, targetRefMatchesAgent } from '$lib/resource-id';
   import { relayStore } from '$lib/store';
   import { keyResultMessage } from '$lib/terminal-key-messages';
@@ -19,11 +21,52 @@
   let { agent, readOnly = false, blocked = false, sending = $bindable(false), extra, queue }:
     { agent: Agent; readOnly?: boolean; blocked?: boolean; sending?: boolean; extra?: Snippet; queue?: QueuedKeyCommand[] } = $props();
   let modifierInputElement = $state<HTMLInputElement>(null!);
-  let arrowsOpen = $state(false);
-  let fkeysOpen = $state(false);
-  let ctrlArmed = $state(false);
-  let shiftArmed = $state(false);
-  let altArmed = $state(false);
+  const modifiers = ['ctrl', 'alt', 'shift'] as const;
+  const armed = $state({ ctrl: false, alt: false, shift: false });
+  let menu = $state('');
+  let trigger: HTMLButtonElement;
+  let row: HTMLDivElement;
+  let scrolling = $state(false);
+  const defaultOrder = $derived(isDefaultKeyRow($terminalKeyRow));
+  const inlineExtra = $derived(defaultOrder && !scrolling);
+  const controls = $derived.by(() => {
+    const entries = $terminalKeyRow.slice();
+    entries.splice(defaultOrder ? 2 : 0, 0, '');
+    return entries;
+  });
+
+  const keyboard = () => row?.querySelector<HTMLButtonElement>('.manual-input-trigger button');
+
+  $effect.pre(() => {
+    void inlineExtra;
+    menu = '';
+    for (const id of modifiers) if (!$terminalKeyRow.includes(id)) armed[id] = false;
+    if (keyboard()?.matches(':focus')) void tick().then(() => keyboard()?.focus());
+  });
+
+  $effect(() => {
+    if (!armedModifierLabel) modifierInputElement?.blur();
+  });
+
+  function alignPopup() {
+    const bounds = row.getBoundingClientRect();
+    const end = Math.min(bounds.right, trigger.getBoundingClientRect().right) - bounds.left;
+    row.style.setProperty('--key-end', `${end}px`);
+  }
+
+  function observeStrip(strip: HTMLElement) {
+    if (typeof ResizeObserver === 'undefined') return;
+    const entries = strip.firstElementChild!;
+    function measure() {
+      scrolling = entries.getBoundingClientRect().width > strip.getBoundingClientRect().width + .1;
+      if (menu) alignPopup();
+    }
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(strip);
+    observer.observe(entries);
+    return { destroy: () => observer.disconnect() };
+  }
   let keyFeedback = $state('');
   const keySending = $derived(sending || blocked);
   const disabled = $derived(readOnly || blocked || !targetRefForAgent(agent));
@@ -47,11 +90,8 @@
   // A queue owned by the parent survives replacement of this row.
   const sharedQueue = untrack(() => queue);
   const keyQueue: QueuedKeyCommand[] = sharedQueue ?? [];
-  const armedModifierLabel = $derived([
-    ctrlArmed ? 'Ctrl' : '',
-    altArmed ? 'Alt' : '',
-    shiftArmed ? 'Shift' : '',
-  ].filter(Boolean).join('+'));
+  const armedModifiers = $derived(modifiers.filter((id) => armed[id]));
+  const armedModifierLabel = $derived(armedModifiers.map(keyRowLabel).join('+'));
   const keyControlStatus = $derived(armedModifierLabel
     ? `${armedModifierLabel} armed${keyFeedback ? ` · ${keyFeedback}` : ' — choose a key or type a character'}`
     : keyFeedback);
@@ -127,50 +167,37 @@
     return { destroy: () => node.removeEventListener('click', flash) };
   }
 
-  function toggleModifier(which: 'ctrl' | 'alt' | 'shift') {
-    if (disabled) return;
-    arrowsOpen = false;
-    fkeysOpen = false;
-    if (which === 'ctrl') ctrlArmed = !ctrlArmed;
-    else if (which === 'alt') altArmed = !altArmed;
-    else shiftArmed = !shiftArmed;
-    if (ctrlArmed || altArmed || shiftArmed) {
-      modifierInputElement.value = '';
-      modifierInputElement.focus();
+  function activate(id: string, modifier: typeof modifiers[number] | undefined, button: HTMLButtonElement) {
+    if (modifier) {
+      menu = '';
+      armed[modifier] = !armed[modifier];
+      if (armedModifierLabel) {
+        modifierInputElement.value = '';
+        modifierInputElement.focus();
+      }
+    } else if (id === 'arrows' || id === 'fkeys') {
+      trigger = button;
+      menu = menu === id ? '' : id;
+      if (menu) alignPopup();
+    } else if (id.includes('+')) {
+      void sendKeys([id], keyRowLabel(id));
     } else {
-      modifierInputElement.blur();
+      sendTerminalKey(id);
     }
   }
 
-  function toggleCtrl() {
-    toggleModifier('ctrl');
-  }
-
-  function toggleAlt() {
-    toggleModifier('alt');
-  }
-
-  function toggleShift() {
-    toggleModifier('shift');
+  function keepFocus(event: MouseEvent) {
+    event.preventDefault();
   }
 
   function modifierChord(key: string, displayName?: string): { chord: string; label: string } | null {
-    const parts: string[] = [];
-    const labels: string[] = [];
-    if (ctrlArmed) { parts.push('ctrl'); labels.push('Ctrl'); }
-    if (altArmed) { parts.push('alt'); labels.push('Alt'); }
-    if (shiftArmed) { parts.push('shift'); labels.push('Shift'); }
-    if (!parts.length) return null;
-    parts.push(key.toLocaleLowerCase());
-    labels.push(displayName ?? (key.length === 1 ? key.toLocaleUpperCase() : key[0].toLocaleUpperCase() + key.slice(1).toLocaleLowerCase()));
-    return { chord: parts.join('+'), label: labels.join('+') };
+    if (!armedModifierLabel) return null;
+    const name = displayName ?? key[0].toLocaleUpperCase() + key.slice(1).toLocaleLowerCase();
+    return { chord: `${armedModifiers.join('+')}+${key.toLocaleLowerCase()}`, label: `${armedModifierLabel}+${name}` };
   }
 
   function disarmModifiers() {
-    ctrlArmed = false;
-    altArmed = false;
-    shiftArmed = false;
-    modifierInputElement.blur();
+    for (const id of modifiers) armed[id] = false;
   }
 
   function modifierInput(event: Event) {
@@ -187,12 +214,8 @@
     void sendKeys([result?.chord ?? key], result?.label ?? plainLabel);
   }
 
-  function sendTab() {
-    sendTerminalKey('Tab');
-  }
-
   function sendFunctionKey(number: number) {
-    fkeysOpen = false;
+    menu = '';
     sendTerminalKey(`f${number}`, `F${number}`);
   }
 
@@ -204,11 +227,7 @@
 
   function modifierBlur() {
     setTimeout(() => {
-      if (document.activeElement !== modifierInputElement) {
-        ctrlArmed = false;
-        altArmed = false;
-        shiftArmed = false;
-      }
+      if (document.activeElement !== modifierInputElement) disarmModifiers();
     });
   }
 
@@ -240,7 +259,7 @@
 {/snippet}
 
 {#snippet arrowPopup()}
-  {#if arrowsOpen}
+  {#if menu === 'arrows'}
     <div class="arrow-popup" role="group" aria-label="Navigation keys">
       {#each NAVIGATION_KEYS as cell (cell?.key)}
         {#if cell && (!cell.paging || pagingKeys)}
@@ -248,7 +267,7 @@
             class:paging-key={cell.paging}
             disabled={disabled}
             aria-label={cell.name ?? cell.key}
-            onpointerdown={(event) => event.preventDefault()}
+            onmousedown={keepFocus}
             onclick={() => sendTerminalKey(cell.key, cell.name)}
           >{cell.text ?? cell.key}</button>
         {:else}
@@ -260,12 +279,12 @@
 {/snippet}
 
 {#snippet fkeyPopup()}
-  {#if fkeysOpen}
+  {#if menu === 'fkeys'}
     <div class="fkey-popup" role="group" aria-label="Function keys">
       {#each FUNCTION_KEYS as number (number)}
         <button
           disabled={disabled}
-          onpointerdown={(event) => event.preventDefault()}
+          onmousedown={keepFocus}
           onclick={() => sendFunctionKey(number)}
         >F{number}</button>
       {/each}
@@ -275,90 +294,60 @@
 
 
 <div use:flashTappedKeys>
-    <p class="sr-only" role="status" aria-live="polite">{keyControlStatus}</p>
-    <div class="term-keys" aria-busy={keySending}>
-      <Button variant="secondary" size="sm" disabled={disabled} onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Escape')}>Esc</Button>
-      <Button variant="secondary" size="sm" disabled={disabled} aria-label="Tab" title="Send Tab" onpointerdown={(event) => event.preventDefault()} onclick={sendTab}>{@render tabIcon()}</Button>
-      <div class="modifier-menu">
-        <input
-          id="modifier-key-input"
-          class="modifier-key-input"
-          bind:this={modifierInputElement}
-          disabled={disabled}
-          aria-label="Modifier shortcut character"
-          aria-hidden={!armedModifierLabel}
-          tabindex={armedModifierLabel ? 0 : -1}
-          autocomplete="off"
-          autocapitalize="none"
-          maxlength="1"
-          spellcheck="false"
-          oninput={modifierInput}
-          onkeydown={modifierKeydown}
-          onblur={modifierBlur}
-        />
-        <Button
-          variant="secondary"
-          size="sm"
-          disabled={disabled}
-          aria-controls="modifier-key-input"
-          aria-pressed={shiftArmed}
-          aria-label="Shift"
-          title="Arm Shift; combine it with Ctrl or Alt"
-          onpointerdown={(event) => event.preventDefault()}
-          onclick={toggleShift}
-        >{@render shiftIcon()}</Button>
-        <Button
-          variant="secondary"
-          size="sm"
-          disabled={disabled}
-          aria-controls="modifier-key-input"
-          aria-pressed={ctrlArmed}
-          aria-label="Ctrl"
-          title="Arm Ctrl; combine it with Shift or Alt"
-          onpointerdown={(event) => event.preventDefault()}
-          onclick={toggleCtrl}
-        ><span class="key-caret">^</span></Button>
-        <Button
-          variant="secondary"
-          size="sm"
-          disabled={disabled}
-          aria-controls="modifier-key-input"
-          aria-pressed={altArmed}
-          title="Arm Alt; combine it with Ctrl or Shift"
-          onpointerdown={(event) => event.preventDefault()}
-          onclick={toggleAlt}
-        >Alt</Button>
+  <p class="sr-only" role="status" aria-live="polite">{keyControlStatus}</p>
+  <div class="term-keys" class:scrolling bind:this={row} aria-busy={keySending}>
+    <div class="key-strip" use:observeStrip onscroll={() => { menu = ''; }}>
+      <div class="key-entries">
+        {#each controls as id (id)}
+          {#if !id}
+            <input
+              id="modifier-key-input"
+              class="modifier-key-input"
+              bind:this={modifierInputElement}
+              disabled={disabled}
+              aria-label="Modifier shortcut character"
+              aria-hidden={!armedModifierLabel}
+              tabindex={armedModifierLabel ? 0 : -1}
+              autocomplete="off"
+              autocapitalize="none"
+              maxlength="1"
+              spellcheck="false"
+              oninput={modifierInput}
+              onkeydown={modifierKeydown}
+              onblur={modifierBlur}
+            />
+          {:else}
+            {@const modifier = modifiers.find((name) => name === id)}
+            {@const isMenu = id === 'arrows' || id === 'fkeys'}
+            {@const label = keyRowLabel(id)}
+            {#if defaultOrder && id === 'fkeys'}
+              <span class="spacer"></span>
+              {#if inlineExtra}{@render extra?.()}{/if}
+            {/if}
+            <Button
+              variant="secondary"
+              size="sm"
+              {disabled}
+              aria-label={id === 'fkeys' ? 'Function keys' : label}
+              aria-controls={modifier ? 'modifier-key-input' : undefined}
+              aria-pressed={modifier ? armed[modifier] : undefined}
+              aria-expanded={isMenu ? menu === id : undefined}
+              title={modifier ? `Arm ${label}; combine it with other modifiers` : id === 'Tab' ? 'Send Tab' : undefined}
+              onmousedown={keepFocus}
+              onclick={(event) => activate(id, modifier, event.currentTarget)}
+            >
+              {#if id === 'Tab'}{@render tabIcon()}
+              {:else if id === 'shift'}{@render shiftIcon()}
+              {:else if id === 'ctrl'}<span class="key-caret">^</span>
+              {:else if id === 'arrows'}{@render arrowIcon()}
+              {:else}{label}{/if}
+            </Button>
+            {#if id === 'arrows'}{@render arrowPopup()}
+            {:else if id === 'fkeys'}{@render fkeyPopup()}{/if}
+          {/if}
+        {/each}
       </div>
-      <span class="spacer"></span>
-      <!-- Contextual controls sit in the spacer so the fixed keys never move when they appear. -->
-      {@render extra?.()}
-      <div class="fkey-menu">
-        <Button
-          variant="secondary"
-          size="sm"
-          disabled={disabled}
-          aria-label="Function keys"
-          aria-expanded={fkeysOpen}
-          onpointerdown={(event) => event.preventDefault()}
-          onclick={() => { fkeysOpen = !fkeysOpen; arrowsOpen = false; }}
-        >F keys</Button>
-        {@render fkeyPopup()}
-      </div>
-      <div class="arrow-menu">
-        <Button
-          variant="secondary"
-          size="sm"
-          disabled={disabled}
-          aria-label="Arrow keys"
-          aria-expanded={arrowsOpen}
-          onpointerdown={(event) => event.preventDefault()}
-          onclick={() => { arrowsOpen = !arrowsOpen; fkeysOpen = false; }}
-        >
-          {@render arrowIcon()}
-        </Button>
-        {@render arrowPopup()}
-      </div>
-      <Button variant="secondary" size="sm" disabled={disabled} aria-label="Enter" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Enter')}>Enter</Button>
     </div>
-
+    {#if !inlineExtra}{@render extra?.()}{/if}
+  </div>
 </div>

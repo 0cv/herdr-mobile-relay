@@ -702,11 +702,21 @@ The terminal controls send **Esc**, **Tab** (`⇥`), **Enter**, arrow keys, and
 once you update the relay. On the Herdr TUI relay, some full-screen programs may
 ignore **Home** and **End** without a modifier. **Shift** (`⇧`), **Ctrl** (`^`),
 and **Alt** can be combined, remain armed for repeated input, and apply to typed
-characters or any available terminal key — arm `^` and type `c` to interrupt.
+characters and ordinary terminal keys — arm `^` and type `c` to interrupt.
 A tapped key briefly flashes, armed modifiers stay highlighted, and screen
 readers announce the exact chord that was sent; a failed send shows a
 notification. Toggle the modifiers off or
 move focus to the composer to disarm them.
+
+Choose **More → Manage agent → Edit key row** to add, remove or move
+controls, or **Reset to default** to restore the original order. You can add
+individual arrow keys that use armed modifiers, or one-tap **Shift+Tab** and
+**Ctrl+letter** chords (A–Z except I and M) that ignore armed modifiers and
+leave them armed. **Save** applies to all terminals on this device, including
+question screens. Readers can edit the row without sending keys. No relay
+update is needed. In the demo, changes last until you reload or leave.
+If the keys don't fit, swipe the row sideways; **Keyboard** stays visible
+whenever it's offered.
 
 While the composer cannot send — the agent awaits an approval or question
 answer, or its pane needs inspection — the **Keyboard** button

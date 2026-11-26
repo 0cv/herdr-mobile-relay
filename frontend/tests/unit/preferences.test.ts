@@ -5,10 +5,12 @@ import {
   INTERFACE_SIZE_KEY,
   TERMINAL_HEIGHT_LEASE_KEY,
   TERMINAL_HISTORY_KEY,
+  TERMINAL_KEY_ROW_KEY,
   TERMINAL_REFRESH_KEY,
   TERMINAL_WAKE_LOCK_KEY,
   THEME_KEY,
 } from '$lib/config';
+import { defaultKeyRow } from '$lib/terminal-key-row';
 
 type Preferences = typeof import('$lib/preferences');
 
@@ -97,4 +99,45 @@ it('keeps server visibility choices in memory when storage is unavailable', asyn
   expect(get(preferences.hiddenServers)).toEqual(['relay-1']);
   preferences.pruneHiddenServers(['relay-2']);
   expect(get(preferences.hiddenServers)).toEqual([]);
+});
+
+it.each([null, '{', 'null', '"Tab"', '["Tab","Tab"]', '["Tab","unknown"]'])(
+  'uses the default key row for missing or invalid data: %s', async (stored) => {
+    if (stored !== null) localStorage.setItem(TERMINAL_KEY_ROW_KEY, stored);
+    expect(get((await import('$lib/preferences')).terminalKeyRow)).toEqual(defaultKeyRow);
+  },
+);
+
+it.each([{ row: [] }, { row: ['ctrl+c', 'Tab'] }])('reloads the saved key row $row and removes it when reset', async ({ row }) => {
+  const original = await import('$lib/preferences');
+  original.setTerminalKeyRow(row);
+  expect(get(original.terminalKeyRow)).toEqual(row);
+  expect(localStorage.getItem(TERMINAL_KEY_ROW_KEY)).toBe(JSON.stringify(row));
+  vi.resetModules();
+  const reloaded = await import('$lib/preferences');
+  expect(get(reloaded.terminalKeyRow)).toEqual(row);
+  reloaded.setTerminalKeyRow(defaultKeyRow);
+  expect(get(reloaded.terminalKeyRow)).toEqual(defaultKeyRow);
+  expect(localStorage.getItem(TERMINAL_KEY_ROW_KEY)).toBeNull();
+});
+
+it('does not publish a key row if validation or storage fails', async () => {
+  const read = localStorage.getItem.bind(localStorage);
+  vi.spyOn(localStorage, 'getItem').mockImplementation((key) => {
+    if (key === TERMINAL_KEY_ROW_KEY) throw new Error('blocked');
+    return read(key);
+  });
+  const { setTerminalKeyRow, terminalKeyRow } = await import('$lib/preferences');
+  expect(get(terminalKeyRow)).toEqual(defaultKeyRow);
+  expect(() => setTerminalKeyRow(['unknown'])).toThrow();
+  expect(get(terminalKeyRow)).toEqual(defaultKeyRow);
+
+  vi.spyOn(localStorage, 'setItem').mockImplementation(() => { throw new Error('blocked'); });
+  expect(() => setTerminalKeyRow([])).toThrow('blocked');
+  expect(get(terminalKeyRow)).toEqual(defaultKeyRow);
+  vi.mocked(localStorage.setItem).mockRestore();
+  setTerminalKeyRow(['ctrl+c']);
+  vi.spyOn(localStorage, 'removeItem').mockImplementation(() => { throw new Error('blocked'); });
+  expect(() => setTerminalKeyRow(defaultKeyRow)).toThrow('blocked');
+  expect(get(terminalKeyRow)).toEqual(['ctrl+c']);
 });

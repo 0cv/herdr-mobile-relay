@@ -7,6 +7,7 @@ export const THEME_KEY = 'herdr_theme';
 // Keep the existing key so stored terminal-size preferences migrate into the
 // whole-interface size without resetting users.
 export const INTERFACE_SIZE_KEY = 'herdr_terminal_font_size';
+export const TERMINAL_KEY_ROW_KEY = 'herdr_terminal_key_row';
 export const TERMINAL_HISTORY_KEY = 'herdr_terminal_history_lines';
 export const TERMINAL_REFRESH_KEY = 'herdr_terminal_refresh_ms';
 export const TERMINAL_RESIZE_SESSION_KEY = 'herdr_terminal_resize_session';

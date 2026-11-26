@@ -2,6 +2,7 @@
   import { tick } from 'svelte';
   import AppDialog from '$components/ui/AppDialog.svelte';
   import Button from '$components/ui/Button.svelte';
+  import ManageKeyRow from '$components/ManageKeyRow.svelte';
   import { agentOpeningRoute } from '$lib/agent-navigation';
   import { isAgentView, paneViewPreferenceKey } from '$lib/agent-view';
   import { agentKind, displayName, hostLabel, sessionName, tabName } from '$lib/agents';
@@ -225,39 +226,44 @@
       </div>
     </div>
   {:else}
-    <div bind:this={actionMenu} class="form-stack">
-      <label for="pane-default-view">Default View</label>
-      <select
-        id="pane-default-view"
-        aria-describedby="pane-default-view-help"
-        value={paneViewSelection}
-        disabled={busy || !panePreferenceKey}
-        onchange={changePaneView}
-      >
-        <option value="default">{inheritedPaneViewLabel}</option>
-        <option value="terminal">Terminal</option>
-        <option value="conversation">Conversation</option>
-      </select>
-      <p id="pane-default-view-help" class="hint">
-        {#if panePreferenceKey}
-          Only affects this pane on this device. Applied the next time you open it.
-        {:else}
-          A stable pane identity is unavailable, so this preference cannot be saved yet.
-        {/if}
-      </p>
-      <div class="dialog-actions">
-        {#if capabilities.includes('tab_rename')}
-          <Button data-rename-action="tab" disabled={busy || readOnly} onclick={() => beginRename('tab')}>Rename Tab</Button>
-        {/if}
-        {#if sessionRenameAvailable}
-          <Button data-rename-action="session" variant="secondary" disabled={busy || readOnly} onclick={() => beginRename('session')}>Rename Session</Button>
-        {/if}
-        {#if capabilities.includes('agent_launch')}
-          <Button data-confirm-action="clear" variant="secondary" disabled={busy || readOnly} onclick={clearAgent}>Clear Agent</Button>
-        {/if}
-        <Button data-confirm-action="stop" variant="danger" disabled={busy || readOnly} onclick={stopAgent}>Stop Agent</Button>
-        <Button variant="ghost" disabled={busy} onclick={() => { open = false; }}>Close</Button>
-      </div>
-    </div>
+    <ManageKeyRow>
+      {#snippet children(editKeyRow)}
+        <div bind:this={actionMenu} class="form-stack">
+          <label for="pane-default-view">Default View</label>
+          <select
+            id="pane-default-view"
+            aria-describedby="pane-default-view-help"
+            value={paneViewSelection}
+            disabled={busy || !panePreferenceKey}
+            onchange={changePaneView}
+          >
+            <option value="default">{inheritedPaneViewLabel}</option>
+            <option value="terminal">Terminal</option>
+            <option value="conversation">Conversation</option>
+          </select>
+          <p id="pane-default-view-help" class="hint">
+            {#if panePreferenceKey}
+              Only affects this pane on this device. Applied the next time you open it.
+            {:else}
+              A stable pane identity is unavailable, so this preference cannot be saved yet.
+            {/if}
+          </p>
+          <div class="dialog-actions">
+            {#if capabilities.includes('tab_rename')}
+              <Button data-rename-action="tab" disabled={busy || readOnly} onclick={() => beginRename('tab')}>Rename Tab</Button>
+            {/if}
+            {#if sessionRenameAvailable}
+              <Button data-rename-action="session" variant="secondary" disabled={busy || readOnly} onclick={() => beginRename('session')}>Rename Session</Button>
+            {/if}
+            {#if capabilities.includes('agent_launch')}
+              <Button data-confirm-action="clear" variant="secondary" disabled={busy || readOnly} onclick={clearAgent}>Clear Agent</Button>
+            {/if}
+            <Button data-confirm-action="stop" variant="danger" disabled={busy || readOnly} onclick={stopAgent}>Stop Agent</Button>
+            {@render editKeyRow()}
+            <Button variant="ghost" disabled={busy} onclick={() => { open = false; }}>Close</Button>
+          </div>
+        </div>
+      {/snippet}
+    </ManageKeyRow>
   {/if}
 </AppDialog>

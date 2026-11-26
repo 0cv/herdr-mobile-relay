@@ -3,6 +3,9 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import TerminalKeys from '$components/TerminalKeys.svelte';
 import TerminalView from '$components/TerminalView.svelte';
+import { setTerminalKeyRow } from '$lib/preferences';
+import { defaultKeyRow } from '$lib/terminal-key-row';
+import { targetRefForAgent } from '$lib/resource-id';
 import { relayStore } from '$lib/store';
 import type { Agent, CommandResult } from '$lib/types';
 import { deferred } from '../support/relay';
@@ -25,6 +28,85 @@ describe('TerminalKeys', () => {
   afterEach(() => {
     vi.restoreAllMocks();
     relayStore.connections.set(new Map());
+    setTerminalKeyRow(defaultKeyRow);
+  });
+
+  it('sends fixed chords exactly and does not consume Alt', async () => {
+    setTerminalKeyRow(['alt', 'ctrl+c', 'shift+tab']);
+    const user = userEvent.setup();
+    const send = vi.spyOn(relayStore, 'sendToAgent').mockResolvedValue(commandResult('fixed'));
+    render(TerminalKeys, { agent });
+    const alt = screen.getByRole('button', { name: 'Alt' });
+    await user.click(alt);
+    await user.click(screen.getByRole('button', { name: 'Ctrl+C' }));
+    expect(send).toHaveBeenCalledExactlyOnceWith(agent, { type: 'send_keys', keys: ['ctrl+c'], activity_label: 'Ctrl+C' });
+    expect(alt).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('textbox', { name: 'Modifier shortcut character' })).toHaveFocus();
+
+    await user.click(screen.getByRole('button', { name: 'Shift+Tab' }));
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(send).toHaveBeenLastCalledWith(agent, { type: 'send_keys', keys: ['shift+tab'], activity_label: 'Shift+Tab' });
+    expect(alt).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('sends a direct arrow with armed modifiers and disarms a removed toggle', async () => {
+    setTerminalKeyRow(['Up', 'ctrl']);
+    const user = userEvent.setup();
+    const send = vi.spyOn(relayStore, 'sendToAgent').mockResolvedValue(commandResult('arrow'));
+    render(TerminalKeys, { agent });
+    const up = screen.getByRole('button', { name: 'Up' });
+    await user.click(screen.getByRole('button', { name: 'Ctrl' }));
+    await user.click(up);
+    expect(send).toHaveBeenCalledExactlyOnceWith(agent, { type: 'send_keys', keys: ['ctrl+up'], activity_label: 'Ctrl+Up' });
+
+    setTerminalKeyRow(['Up']);
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Ctrl' })).not.toBeInTheDocument());
+    await user.click(up);
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(send).toHaveBeenLastCalledWith(agent, { type: 'send_keys', keys: ['Up'], activity_label: 'Up' });
+  });
+
+  it('still sends detected key hints with an empty row', async () => {
+    setTerminalKeyRow([]);
+    const send = vi.spyOn(relayStore, 'sendToAgent').mockResolvedValue(commandResult('hint'));
+    render(TerminalView, {
+      agent, allAgents: [agent], responding: new Set<string>(),
+      frame: {
+        paneId: agent.pane_id, target: targetRefForAgent(agent), format: 'plain', receivedAt: performance.now(),
+        content: 'Choose a model\nCurrent: balanced\n↑/↓ to navigate · Enter to select · Esc to cancel',
+      },
+    });
+    expect(document.querySelectorAll('.term-keys button')).toHaveLength(0);
+    const hints = screen.getByRole('region', { name: /^Terminal menu:/ });
+    await userEvent.click(within(hints).getByRole('button', { name: /Select/ }));
+    expect(send).toHaveBeenCalledExactlyOnceWith(agent, { type: 'send_keys', keys: ['Enter'], activity_label: 'Select' });
+  });
+
+  it.each([{ readOnly: true }, { blocked: true }])('disables all entries with %j', async (restriction) => {
+    setTerminalKeyRow([...defaultKeyRow, 'Up', 'ctrl+c', 'shift+tab']);
+    const send = vi.spyOn(relayStore, 'sendToAgent');
+    const user = userEvent.setup();
+    render(TerminalKeys, { agent, ...restriction });
+    const buttons = screen.getAllByRole('button');
+    expect(buttons).toHaveLength(11);
+    for (const button of buttons) {
+      expect(button).toBeDisabled();
+      await user.click(button);
+    }
+    expect(screen.queryByRole('group')).not.toBeInTheDocument();
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it('closes an open menu when the saved key order changes', async () => {
+    render(TerminalKeys, { agent });
+    const trigger = screen.getByRole('button', { name: 'Function keys' });
+    await userEvent.click(trigger);
+    expect(screen.getByRole('group', { name: 'Function keys' })).toBeVisible();
+
+    setTerminalKeyRow(['fkeys', ...defaultKeyRow.filter((id) => id !== 'fkeys')]);
+    await waitFor(() => expect(trigger).toHaveAttribute('aria-expanded', 'false'));
+    expect(screen.getAllByRole('button')[0]).toBe(trigger);
+    expect(screen.queryByRole('group', { name: 'Function keys' })).not.toBeInTheDocument();
   });
 
   it('only shows arrows when the agent relay does not advertise paging keys', async () => {
@@ -170,6 +252,18 @@ describe('TerminalKeys', () => {
       id: 'question-1', kind: 'single_select', question: 'Choose an option',
       options: [{ index: 0, label: 'First' }], submit_label: 'Next',
     },
+  });
+
+  it('applies the device layout to questions and keeps Keyboard with an empty row', async () => {
+    setTerminalKeyRow(['ctrl+c']);
+    const question = questionAgent();
+    render(TerminalView, { agent: question, allAgents: [question], responding: new Set<string>() });
+    const row = within(document.querySelector<HTMLElement>('.term-keys')!);
+    expect(row.getByRole('button', { name: 'Ctrl+C' })).toBeVisible();
+    expect(row.getByRole('button', { name: 'Keyboard' })).toBeVisible();
+    setTerminalKeyRow([]);
+    await waitFor(() => expect(row.getAllByRole('button')).toHaveLength(1));
+    expect(row.getByRole('button', { name: 'Keyboard' })).toBeVisible();
   });
 
   it('keeps a second Esc queued on the question row when the question closes before the first ACK', async () => {

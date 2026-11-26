@@ -366,6 +366,39 @@ async function exerciseTerminal(page: Page) {
   await back(page);
 }
 
+test('renders the default terminal keys without Array.toSpliced', async ({ page }) => {
+  await page.addInitScript(() => { Reflect.deleteProperty(Array.prototype, 'toSpliced'); });
+  await page.goto(demoOrigin);
+  await openDemoAgent(page, 'Fixture checks');
+  const row = page.locator('.term-keys');
+  await expect(row.getByRole('button', { name: 'Esc', exact: true })).toBeVisible();
+  await expect(row.getByRole('button', { name: 'Enter', exact: true })).toBeVisible();
+});
+
+test('edits the key row and sends Ctrl+C on a sample controller', async ({ page }) => {
+  const observation = await watchDemo(page);
+  await page.goto(demoOrigin);
+  await openDemoAgent(page, 'Fixture checks');
+  await chooseMore(page, 'Manage agent');
+  const manage = page.getByRole('dialog', { name: 'Manage Agent' });
+  await manage.getByRole('button', { name: 'Edit key row' }).click();
+  await manage.getByRole('combobox', { name: 'Add a key' }).selectOption('ctrl-letter');
+  await manage.getByRole('combobox', { name: 'Letter' }).selectOption('C');
+  await manage.getByRole('button', { name: 'Add', exact: true }).click();
+  await manage.getByRole('button', { name: 'Save', exact: true }).click();
+  await manage.getByRole('button', { name: 'Close', exact: true }).click();
+
+  const chord = page.locator('.term-keys').getByRole('button', { name: 'Ctrl+C', exact: true });
+  await chord.tap();
+  await expectTerminalExchange(page, 'Keys: ctrl+c', '^C · Sample step interrupted.');
+  await page.reload();
+  await openDemoAgent(page, 'Fixture checks');
+  await expect(page.locator('.term-keys').getByRole('button', { name: 'Esc', exact: true })).toBeVisible();
+  await expect(chord).toHaveCount(0);
+  await expectCleanDemoOrigin(page);
+  expect(observation.unexpected).toEqual([]);
+});
+
 test('git status agrees with the workspace inspector on a linked worktree', async ({ page }) => {
   const observation = await watchDemo(page);
   await page.goto(demoOrigin);
