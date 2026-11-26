@@ -1,4 +1,5 @@
 import { expect, test, type Browser, type Page } from '@playwright/test';
+import { chooseMore, openConversationSearch, openMore } from '../support/journey-chrome';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -147,8 +148,27 @@ async function expectSampleHome(page: Page) {
   await expect(page.locator('link[rel="manifest"]')).toHaveCount(0);
 }
 
-async function openSettings(page: Page) {
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+test('searches demo settings by their labels without leaving Settings', async ({ page }) => {
+  const observation = await watchDemo(page);
+  await page.goto(demoOrigin);
+  const settings = await openSettings(page);
+  const search = settings.getByRole('searchbox', { name: 'Search settings' });
+  await search.fill('defaultview');
+  await expect(settings.getByRole('group', { name: 'Default View' })).toBeVisible();
+  await expect(settings.getByRole('group', { name: 'Theme' })).toBeHidden();
+  await search.fill('Read Aloud language that is not offered');
+  await expect(settings.getByRole('status')).toHaveText('No settings match.');
+  await search.clear();
+  await expect(settings.getByRole('group', { name: 'Theme' })).toBeVisible();
+  await expect(page).toHaveURL(`${demoOrigin}/#settings`);
+  await back(page);
+  await expectSampleHome(page);
+  expect(observation.unexpected).toEqual([]);
+});
+
+async function openSettings(page: Page, fromAgent = false) {
+  if (fromAgent) await chooseMore(page, 'Settings');
+  else await page.getByRole('banner').getByRole('button', { name: 'Settings', exact: true }).click();
   await expect(page).toHaveURL(`${demoOrigin}/#settings`);
   await expectDemoHeader(page);
   const settings = page.getByRole('main', { name: 'Settings' });
@@ -366,7 +386,9 @@ test('git status agrees with the workspace inspector on a linked worktree', asyn
 async function openSampleConversation(page: Page, expectedEntries = 6) {
   await openDemoAgent(page, 'Release notes');
   await expect(page.getByRole('main', { name: 'Conversation' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Full history' })).toHaveAttribute('aria-pressed', 'true');
+  const more = await openMore(page);
+  await expect(more.getByRole('button', { name: 'Full history' })).toHaveAttribute('aria-pressed', 'true');
+  await more.getByRole('button', { name: 'Close', exact: true }).click();
   const history = page.getByRole('region', { name: 'Conversation with Release notes' });
   const entries = history.getByRole('article');
   await expect(entries).toHaveCount(expectedEntries);
@@ -386,7 +408,7 @@ async function openSampleConversation(page: Page, expectedEntries = 6) {
 
 async function exerciseConversation(page: Page) {
   const history = await openSampleConversation(page);
-  const search = page.getByRole('searchbox', { name: 'Search loaded conversation' });
+  const search = await openConversationSearch(page);
   await expect(search).toHaveJSProperty('spellcheck', false);
   await search.fill('sample unmatched conversation phrase');
   await expect(page.getByText('No loaded turns match “sample unmatched conversation phrase”.', { exact: true })).toBeVisible();
@@ -433,8 +455,7 @@ async function exerciseConversation(page: Page) {
 }
 
 async function exerciseLaunch(page: Page) {
-  const header = page.getByRole('banner');
-  await header.getByRole('button', { name: 'Manage workspaces' }).click();
+  await chooseMore(page, 'Manage workspaces');
   const workspaces = page.getByRole('main', { name: 'Workspaces' });
   const rows = workspaces.getByRole('region', { name: 'Herdr workspaces' });
   const computer = workspaces.getByLabel('Computer', { exact: true });
@@ -465,7 +486,7 @@ async function exerciseLaunch(page: Page) {
   await back(page);
   await expect(page.getByRole('main', { name: 'Agents' })).toBeVisible();
 
-  await header.getByRole('button', { name: 'Start agent', exact: true }).click();
+  await page.getByRole('banner').getByRole('button', { name: 'Start agent', exact: true }).click();
   await expect(page).toHaveURL(`${demoOrigin}/#launch`);
   await expect(launch.getByLabel('Computer', { exact: true }).getByRole('option')).toHaveText(['Atlas']);
   const profile = launch.getByLabel('Agent', { exact: true });
@@ -527,7 +548,7 @@ test('a launch without an initial task opens with a mostly filled terminal', asy
 
 async function exerciseInspector(page: Page) {
   await openSampleConversation(page, 10);
-  await page.getByRole('button', { name: 'Manage agent', exact: true }).click();
+  await chooseMore(page, 'Manage agent');
   const manage = page.getByRole('dialog', { name: 'Manage Agent' });
   await expect(manage.getByText(demoLabel, { exact: true })).toBeInViewport();
   await expect(manage.getByLabel('Default View')).toBeEnabled();
@@ -728,7 +749,7 @@ for (const permission of ['granted', 'denied'] as const) {
     await demo.getByRole('button', { name: 'Back', exact: true }).click();
     await expectSampleHome(demo);
 
-    await demo.getByRole('button', { name: 'Search all agents' }).click();
+    await chooseMore(demo, 'Search all agents');
     const dialog = demo.getByRole('dialog', { name: 'Jump to agent' });
     await expect(dialog.getByText(demoLabel, { exact: true })).toBeVisible();
     const search = dialog.getByRole('searchbox', { name: 'Search agents and workspaces' });
@@ -980,7 +1001,7 @@ test.describe('demo in landscape', () => {
     const observation = await watchDemo(page);
     await page.goto(demoOrigin);
     await expect(page.getByRole('button', { name: 'Open Patch review on Atlas' })).toBeVisible();
-    await page.getByRole('button', { name: 'Search all agents' }).click();
+    await chooseMore(page, 'Search all agents');
     const dialog = page.getByRole('dialog', { name: 'Jump to agent' });
     const label = dialog.getByText(demoLabel, { exact: true });
     await expect(label).toBeInViewport({ ratio: 1 });
@@ -1014,7 +1035,7 @@ test('browser history cannot reopen a route from before the demo reload', async 
   await page.getByRole('button', { name: 'Open Patch review on Atlas' }).click();
   const output = page.getByLabel('Agent terminal output');
   await expect(output).toContainText('Reviewed the search pagination patch.');
-  await openSettings(page);
+  await openSettings(page, true);
 
   await page.goBack();
   await expect(output).toContainText('Reviewed the search pagination patch.');

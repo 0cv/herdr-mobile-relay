@@ -24,9 +24,9 @@
     questionInteraction,
     sortedAgents,
   } from '$lib/agents';
+  import { freshAgentStatus } from '$lib/input-target-state';
   import { interfaceSize, terminalHeightLease, terminalResizeSession, theme } from '$lib/preferences';
-  import { replaceView } from '$lib/router';
-  import { targetRefForAgent } from '$lib/resource-id';
+  import { targetRefForAgent, targetRefMatchesAgent } from '$lib/resource-id';
   import { securityState } from '$lib/security';
   import { paneActive } from '$lib/pane-activity.svelte';
   import { PaneSizeLease } from '$lib/pane-size-lease.svelte';
@@ -43,6 +43,7 @@
   import { detectTerminalMenu, terminalTextInputMode } from '$lib/terminal-menu';
   import type {
     Agent,
+    FrontendTargetRef,
     TerminalFrame,
   } from '$lib/types';
   import type { RenderedTerminalRow } from '$lib/terminal';
@@ -175,7 +176,6 @@
   // tails after every refresh. Readers use the same wrapping regime because
   // their role can never obtain a size lease.
   const resizeLayoutPending = $derived(readOnly || (resizeSessionActive && !resizeLayoutActive));
-  const nextBlocked = $derived(sortedAgents(allAgents.filter((item) => agentNeedsResponse(item) && item.pane_id !== agent.pane_id))[0]);
   const terminalPlainText = $derived(
     stripAnsi(displayed)
       .replaceAll(TERMINAL_SEPARATOR_TOKEN, '────────'),
@@ -867,10 +867,12 @@
     });
   }
 
-  // The header owns the Find control, so the terminal exposes opening it rather
-  // than lifting findOpen out: kept here, the bar still closes with the pane.
+  export function canFind() {
+    return !questionMode;
+  }
+
   export function openFind() {
-    find?.open();
+    if (canFind()) find?.open();
   }
 
   function scrollToRow(row: number) {
@@ -988,14 +990,22 @@
     return keys.map((key) => key === ' ' ? 'Space' : key).join('+');
   }
 
-  function openNext() {
-    if (nextBlocked) {
-      replaceView({
-        view: 'terminal',
-        paneId: nextBlocked.pane_id,
-        target: targetRefForAgent(nextBlocked) || undefined,
-      });
+  function isOtherBlocked(candidate: Agent) {
+    return candidate.pane_id !== agent.pane_id
+      && freshAgentStatus($connections.get(candidate.relay_id)) && agentNeedsResponse(candidate);
+  }
+
+  export function nextBlocked() {
+    if (manualInput) return;
+    for (const candidate of sortedAgents(allAgents.filter(isOtherBlocked))) {
+      const target = targetRefForAgent(candidate);
+      if (target) return { agent: candidate, target };
     }
+  }
+
+  export function checkedBlocked(target: FrontendTargetRef) {
+    if (manualInput) return;
+    return allAgents.find(candidate => isOtherBlocked(candidate) && targetRefMatchesAgent(target, candidate));
   }
 </script>
 
@@ -1029,7 +1039,7 @@
     terminal={terminalElement}
     mountedRange={() => ({ start: virtualStart, end: virtualEnd })}
     domVersion={virtualHtml}
-    disabled={questionMode}
+    disabled={!canFind()}
     {scrollToRow}
   />
   <div class="term-wrap">
@@ -1101,9 +1111,6 @@
     {/if}
 
     {#if !questionMode && !manualInput}<AgentInteraction {agent} {readOnly} responding={responding.has(agent.pane_id)} blocked={inputBlocked} />{/if}
-    {#if nextBlocked}
-      <div class="quick-actions"><Button variant="secondary" onclick={openNext}>Next blocked →</Button></div>
-    {/if}
     </div>
   </div>
 </main>

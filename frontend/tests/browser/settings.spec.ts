@@ -1,6 +1,86 @@
 import { expect, test } from '@playwright/test';
-import { saveDeviceCredential } from '../support/journey-device';
+import { captureClipboard, copiedText, emulateStandalone, saveDeviceCredential } from '../support/journey-device';
 import { boot, commands, commandsForSocket, connectFedora, fedora, handshake, lastCommand, reply, server, setAutoCommands, socketCount } from '../support/journey-relay';
+
+test('filters visible Settings labels in place without touching values, history or requests', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 740 });
+  await emulateStandalone(page, { navigatorStandalone: true });
+  await boot(page);
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  const search = page.getByRole('searchbox', { name: 'Search settings' });
+  await expect(search).toHaveAttribute('spellcheck', 'false');
+  await expect(search).toHaveAttribute('autocomplete', 'off');
+  expect((await search.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+  const hostname = 'synthetic-value-not-a-label';
+  await page.getByLabel('Relay Name').fill(hostname);
+  await page.waitForLoadState('networkidle');
+  const snapshot = () => page.evaluate(() => ({
+    url: location.href, history: history.length, storage: JSON.stringify(localStorage), session: JSON.stringify(sessionStorage),
+  }));
+  const before = await snapshot();
+  const requests: string[] = [];
+  page.on('request', request => requests.push(request.url()));
+  await search.fill('  lEaSe   TERminal  ');
+  const lease = page.getByRole('switch', { name: 'Lease Terminal Height' });
+  await expect(lease).toBeVisible();
+  await expect(page.getByRole('group', { name: 'Terminal History' })).toBeHidden();
+  await expect(page.getByRole('switch', { name: 'Resize Session' })).toBeHidden();
+  await search.fill(hostname);
+  await expect(page.getByRole('status').filter({ hasText: 'No settings match.' })).toBeVisible();
+  await expect(page.getByLabel('Relay Name')).toBeHidden();
+  await search.fill('250 ms');
+  await expect(page.getByRole('status').filter({ hasText: 'No settings match.' })).toBeVisible();
+  await search.fill('scanQRcode');
+  await expect(page.getByRole('button', { name: 'Scan QR Code' })).toBeVisible();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await search.clear();
+  await expect(page.getByLabel('Relay Name')).toHaveValue(hostname);
+  await expect(page.getByRole('group', { name: 'Terminal History' })).toBeVisible();
+  expect(await snapshot()).toEqual(before);
+  expect(requests).toEqual([]);
+  expect(await commands(page)).toEqual([]);
+});
+
+test('keeps the Add Relay form usable while filtering Settings', async ({ page }) => {
+  await boot(page);
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('searchbox', { name: 'Search settings' }).fill('Add Relay');
+  await page.getByLabel('Relay Name').fill('Fixture relay');
+  await page.getByLabel('Relay URL').fill('ws://127.0.0.1:8871');
+  await expect(page.getByLabel('Relay key')).toBeVisible();
+  await page.getByRole('button', { name: 'Add Relay', exact: true }).click();
+  await expect.poll(() => socketCount(page)).toBe(1);
+});
+
+test('keeps a new invitation link copyable while filtering Settings', async ({ page }) => {
+  await captureClipboard(page);
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await saveDeviceCredential(page, { id: 'credential-controller', deviceId: 'device-controller', secret: 'R'.repeat(43), role: 'controller' });
+  await handshake(page, 0, { capabilities: [] });
+  await page.getByRole('button', { name: /^Settings\b/ }).click();
+  const search = page.getByRole('searchbox', { name: 'Search settings' });
+  await search.fill('Invite Device');
+  await page.getByRole('button', { name: 'Invite Device', exact: true }).click();
+  const invite = page.getByRole('dialog', { name: 'Invite Device', exact: true });
+  await invite.getByLabel('Device name', { exact: true }).fill('Fixture reader');
+  await setAutoCommands(page, false);
+  await invite.getByRole('button', { name: 'Create Invitation', exact: true }).click();
+
+  const secret = 'A'.repeat(43);
+  await reply(page, await lastCommand(page, 'create_device_invitation'), {
+    invitation: { invitation_id: 'invitation-fixture', version: 1, secret, expires_at: new Date(Date.now() + 60_000).toISOString() },
+  });
+  await expect(invite).toHaveCount(0);
+  const link = page.getByLabel('One-use invitation link', { exact: true });
+  await expect(link).toBeVisible();
+  const copy = page.getByRole('button', { name: 'Copy link', exact: true });
+  await copy.click();
+  expect(await copiedText(page)).toBe(await link.inputValue());
+  await search.fill(secret);
+  await expect(page.getByText('No settings match.', { exact: true })).toBeVisible();
+  await expect(copy).toBeVisible();
+});
 
 test('distinguishes loading inventory from a healthy relay', async ({ page }) => {
   await connectFedora(page, { inventory: { state: 'starting' } });

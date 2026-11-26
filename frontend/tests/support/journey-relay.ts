@@ -1,4 +1,5 @@
 import { expect, type Page } from '@playwright/test';
+import { chooseMore } from './journey-chrome';
 import { saveDeviceCredential } from './journey-device';
 
 export interface RelayFixture {
@@ -276,6 +277,7 @@ export async function boot(page: Page, relays: RelayFixture[] = [], path = '/', 
                 snapshot_id: configuredPage?.snapshotId || (older ? 'snapshot-1' : ''),
                 next_cursor: pageCursor,
                 entries: pageEntries,
+                provisional: older ? undefined : fixture.provisional,
                 capabilities: fixture.capabilities,
                 subscription_id: fixture.capabilities ? 'fixture-subscription' : undefined,
                 sequence: fixture.sequence || 0,
@@ -488,6 +490,7 @@ export async function setNextInteraction(page: Page, interaction: Record<string,
 
 export interface ConversationFixture {
   capabilities?: Record<string, unknown>;
+  provisional?: Record<string, unknown>[];
   sequence?: number;
   entries: Record<string, unknown>[];
   total: number;
@@ -551,7 +554,7 @@ export async function openSharedComposer(page: Page, mode: string, reader = fals
   await server(page, 0, { type: 'agents', agents: [{ ...composerTarget, status: 'idle', project: 'Shared composer', agent: 'codex', conversation_history_available: true }] });
   await page.getByRole('button', { name: 'Open Shared composer on Fedora' }).click();
   await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
-  await page.getByRole('button', { name: mode, exact: true }).click();
+  await chooseMore(page, mode);
   await expect(page.locator('.prompt-composer > .draft-status')).toHaveCount(0);
   await replyToPaneRead(page);
   return page.getByRole('combobox', { name: 'Prompt', exact: true });

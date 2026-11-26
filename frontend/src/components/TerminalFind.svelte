@@ -67,7 +67,8 @@
       if (disabled
         || event.altKey
         || (!event.ctrlKey && !event.metaKey)
-        || event.key.toLocaleLowerCase() !== 'f') return;
+        || event.key.toLocaleLowerCase() !== 'f'
+        || document.querySelector('dialog[open]')) return;
       event.preventDefault();
       openTerminalFind();
     };

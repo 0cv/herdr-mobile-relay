@@ -292,7 +292,7 @@ describe('shared composer safety', () => {
     render(ConversationHistory, { agent: { ...agent, status: 'done' }, frame: { ...frame, content: 'Available models\nType to filter • Enter to select • Tab to edit' } });
     expect(screen.getByLabelText('Prompt')).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Send prompt' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Attach photos' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Attach' })).toBeDisabled();
     expect(screen.queryByRole('button', { name: 'Keyboard' })).not.toBeInTheDocument();
     expect(screen.getByText('Draft only — use structured controls or advanced input in Terminal.')).toBeVisible();
     await fireEvent.keyDown(screen.getByLabelText('Prompt'), { key: 'Enter', ctrlKey: true });
@@ -320,7 +320,7 @@ describe('shared composer safety', () => {
 
     it(`${viewName} denies attachments and sending without an exact target`, async () => {
       mount({ ...agent, terminal_id: '' });
-      expect(screen.getByRole('button', { name: 'Attach photos' })).toBeDisabled();
+      expect(screen.getByRole('button', { name: 'Attach' })).toBeDisabled();
       expect(screen.getByText(/Attachments and sending need a stable target/)).toBeVisible();
       await fireEvent.input(screen.getByLabelText('Prompt'), { target: { value: 'unsafe' } });
       await fireEvent.keyDown(screen.getByLabelText('Prompt'), { key: 'Enter', ctrlKey: true });
@@ -337,7 +337,7 @@ describe('shared composer safety', () => {
       const prompt = screen.getByLabelText('Prompt');
       await fireEvent.input(prompt, { target: { value: 'pending' } });
       await fireEvent.keyDown(prompt, { key: 'Enter', metaKey: true });
-      expect(screen.getByRole('button', { name: 'Attach photos' })).toBeDisabled();
+      expect(screen.getByRole('button', { name: 'Attach' })).toBeDisabled();
       const file = new File(['png'], 'picture.png', { type: 'image/png' });
       await fireEvent.change(document.querySelector('input[type=file]')!, { target: { files: [file] } });
       await fireEvent.paste(prompt, { clipboardData: { items: [{ kind: 'file', type: file.type, getAsFile: () => file }] } });

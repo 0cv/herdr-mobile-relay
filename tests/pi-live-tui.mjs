@@ -5,6 +5,7 @@ import { mkdir, readFile, writeFile, lstat, rmdir } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { instanceIdentity } from '../relay/pi-command-bridge/bridge.mjs';
+import { waitForLoadedConversation } from '../frontend/tests/support/pi-live-browser.mjs';
 
 const root = resolve(process.env.PI_LIVE_TEST_WORK || '');
 const packageRoot = resolve(process.env.PI_TEST_PACKAGE || '');
@@ -40,10 +41,10 @@ async function qualifyBrowser(work, onReady) {
     page = await context.newPage();
     await page.goto(config.url);
     await page.getByRole('button', { name: 'Open Native live on Native relay' }).click({ timeout: 10000 });
-    await page.getByText('Live events · provisional text', { exact: true }).waitFor({ timeout: 10000 });
+    await waitForLoadedConversation(page, 'Native live');
     const assertReaderConversation = async () => {
-      assert.equal(await page.getByRole('textbox', { name: 'Prompt', exact: true }).isDisabled(), true);
-      for (const name of ['Attach photos', 'Attach files', 'Send prompt']) assert.equal(await page.getByRole('button', { name, exact: true }).isDisabled(), true);
+      assert.equal(await page.getByRole('combobox', { name: 'Prompt', exact: true }).isDisabled(), true);
+      for (const name of ['Attach', 'Send prompt']) assert.equal(await page.getByRole('button', { name, exact: true }).isDisabled(), true);
     };
     if (config.role === 'reader') {
       assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('herdr_device_auth_v1')).relays['private-native'].role), 'reader');
@@ -59,12 +60,16 @@ async function qualifyBrowser(work, onReady) {
     assert.equal(await partial.count(), 0);
     if (config.role === 'reader') {
       await assertReaderConversation();
-      await page.getByRole('button', { name: 'Conversation', exact: true }).click();
+      const more = page.getByRole('banner').getByRole('button', { name: /^More\b/ });
+      await more.click();
+      await page.getByRole('dialog', { name: 'More' }).getByRole('button', { name: 'Conversation', exact: true }).click();
+      await page.getByRole('banner').getByText(/^Conversation · /).waitFor();
       await page.getByText('Visible fragment 39.', { exact: false }).waitFor();
+      assert.equal(await page.getByRole('button', { name: /^Attach (photos|files)$/ }).count(), 0);
       await assertReaderConversation();
       await page.getByRole('button', { name: 'Terminal view', exact: true }).click();
       assert.equal(await page.getByRole('combobox', { name: 'Prompt', exact: true }).isDisabled(), true);
-      for (const name of ['Attach photos', 'Attach files', 'Enter', 'Tab', 'Ctrl', 'Shift', 'Arrow keys', 'Function keys']) assert.equal(await page.getByRole('button', { name, exact: true }).isDisabled(), true);
+      for (const name of ['Attach', 'Send prompt', 'Enter', 'Tab', 'Ctrl', 'Shift', 'Arrow keys', 'Function keys']) assert.equal(await page.getByRole('button', { name, exact: true }).isDisabled(), true);
       assert.equal(await page.locator('.terminal-find button:enabled, .terminal-find select:enabled').count(), 0);
       await page.getByRole('log').dispatchEvent('wheel', { deltaY: -200 });
       await page.setViewportSize({ width: 390, height: 740 });

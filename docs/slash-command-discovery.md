@@ -140,7 +140,7 @@ directory, then look up its exact path and each canonical ancestor in
 alias cannot override a canonical decision or independently grant project
 trust; null entries defer to ancestors and then `defaultProjectTrust`.
 
-For Pi, turn on **Settings → Pi Integration** for its computer. This
+For Pi, find **Pi Integration** in Settings and turn it on for its computer. This
 controller-only setting installs the relay-owned integration into all Pi agent
 directories known to that relay and reports each profile's result. Readers see
 it read-only. It starts off and never edits Pi settings, trust decisions,

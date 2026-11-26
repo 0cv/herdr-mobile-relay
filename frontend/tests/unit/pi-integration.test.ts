@@ -144,7 +144,7 @@ it('points a blocked Pi Conversation without capability to the setting without s
   vi.spyOn(relayStore, 'readPane').mockImplementation(() => {});
   const send = vi.spyOn(relayStore, 'sendToAgent');
   render(ConversationHistory, { agent });
-  expect(await screen.findByText('For live Pi replies, enable Settings → Pi Integration, then /reload Pi.')).toBeInTheDocument();
+  expect(await screen.findByText('For live Pi replies, find Pi Integration in Settings and enable it, then /reload Pi.')).toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Send prompt' })).toBeDisabled();
   expect(send).not.toHaveBeenCalled();
 });

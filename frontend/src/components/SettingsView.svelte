@@ -1,4 +1,6 @@
 <script lang="ts">
+  import SettingsSearch from '$components/SettingsSearch.svelte';
+  import { settingsUpdateLabel } from '$lib/update-reload';
   import { copyText } from '$lib/clipboard';
   import { onMount } from 'svelte';
   import DeviceSettings from '$components/DeviceSettings.svelte';
@@ -151,6 +153,7 @@
   let previousAppUpdate = $state<AppUpdateStatus | null>(null);
   let checkingUpdates = $state(false);
   const appUpdateChecking = $derived(checkingUpdates || $appUpdate.state === 'checking');
+  let searchRoot = $state<HTMLElement>();
   const appUpdateForLayout = $derived(
     appUpdateChecking && previousAppUpdate ? previousAppUpdate : $appUpdate,
   );
@@ -438,7 +441,7 @@
 
   async function changeSpeechVoice(relayId: string, language: string, install: boolean) {
     const key = speechVoiceKey(relayId, language);
-    if (speechVoiceBusy.includes(key)) return;
+    if (isReadOnlyRelay(relayId) || speechVoiceBusy.includes(key)) return;
     speechVoiceBusy = [...speechVoiceBusy, key];
     try {
       if (install) await relayStore.installSpeechVoice(relayId, language);
@@ -502,11 +505,13 @@
 
 <main
   class="page settings-page"
+  bind:this={searchRoot}
   aria-labelledby="settings-title"
   data-app-assets={APP_ASSET_VERSION}
   data-app-build={APP_BUILD_ID}
 >
   <h2 id="settings-title">Settings</h2>
+  <SettingsSearch root={searchRoot} />
 
   <Card>
     <h3>Relays</h3>
@@ -782,7 +787,7 @@
                     variant="danger"
                     size="sm"
                     aria-busy={busy}
-                    disabled={busy}
+                    disabled={busy || isReadOnlyRelay(relay.id)}
                     aria-label={`Remove the ${language.label} voice on ${relay.label}`}
                     onclick={() => changeSpeechVoice(relay.id, language.code, false)}
                   >{busy ? 'Removing…' : 'Remove'}</Button>
@@ -791,7 +796,7 @@
                     variant="secondary"
                     size="sm"
                     aria-busy={busy}
-                    disabled={busy}
+                    disabled={busy || isReadOnlyRelay(relay.id)}
                     aria-label={`Download the ${language.label} voice on ${relay.label}`}
                     onclick={() => changeSpeechVoice(relay.id, language.code, true)}
                   >{busy ? 'Downloading…' : 'Download'}</Button>
@@ -831,7 +836,7 @@
   </Card>
 
   <Card>
-    <h3>About</h3>
+    <h3>Updates{#if settingsUpdateLabel($connections, $appUpdateStatus.state) !== 'Settings'} · Update notice{/if}</h3>
     <p>Phone app version {APP_VERSION}</p>
     <div class="app-update-status" aria-busy={appUpdateChecking}>
       <div class:app-update-status-hidden={appUpdateChecking} aria-hidden={appUpdateChecking}>

@@ -168,18 +168,16 @@ describe('agent view controls and conversation loading hook', () => {
       { id: 'tool', timestamp: '', role: 'assistant', text: '', tools: [{ id: 'call', name: 'Default tool' }] },
     ] }));
     const view = render(ConversationHistory, { agent: agent() });
-    const full = screen.getByRole('button', { name: 'Full history' });
-    await waitFor(() => expect(full).toHaveAttribute('aria-pressed', String(saved === 'activity')));
+    await waitFor(() => expect(view.component.getTools().mode).toBe(saved === 'activity' ? 'activity' : 'conversation'));
     if (saved === 'activity') expect(await screen.findByText('Default tool')).toBeVisible();
     else expect(screen.queryByText('Default tool')).not.toBeInTheDocument();
     expect(relayStore.getConversationHistory).toHaveBeenCalledTimes(1);
-    const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: 'Conversation' }));
+    view.component.setMode('conversation');
     expect(localStorage.getItem('herdr-conversation-view')).toBe('conversation');
     view.unmount();
-    render(ConversationHistory, { agent: agent() });
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Conversation' })).toHaveAttribute('aria-pressed', 'true'));
-    await user.click(screen.getByRole('button', { name: 'Full history' }));
+    const reopened = render(ConversationHistory, { agent: agent() });
+    await waitFor(() => expect(reopened.component.getTools().mode).toBe('conversation'));
+    reopened.component.setMode('activity');
     expect(localStorage.getItem('herdr-conversation-view')).toBe('activity');
   });
 

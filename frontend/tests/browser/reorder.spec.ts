@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { chooseMore } from '../support/journey-chrome';
 import { installMockRelay, mockRelayCommands, mockRelayServer } from '../support/mock-relay-socket';
 
 async function openReorderList(page: Page, kind: 'tabs' | 'workspaces') {
@@ -12,7 +13,7 @@ async function openReorderList(page: Page, kind: 'tabs' | 'workspaces') {
     }
   });
   await page.goto('/');
-  if (kind === 'workspaces') await page.getByRole('button', { name: 'Manage workspaces' }).click();
+  if (kind === 'workspaces') await chooseMore(page, 'Manage workspaces');
   const slots = page.locator(kind === 'tabs' ? '.workspace-tab' : '.workspace-management-slot');
   await expect(slots).toHaveCount(3);
   // Real layout/measurement, with intentionally unequal row heights and gaps.
@@ -269,7 +270,7 @@ for (const kind of ['tabs', 'workspaces'] as const) {
         ...snapshot([1, 2, 3]),
       });
       await page.goto('/');
-      if (kind === 'workspaces') await page.getByRole('button', { name: 'Manage workspaces' }).click();
+      if (kind === 'workspaces') await chooseMore(page, 'Manage workspaces');
       const selector = kind === 'tabs' ? '.workspace-tab' : '.workspace-management-slot';
       const slots = page.locator(selector);
       await expect(slots).toHaveCount(3);

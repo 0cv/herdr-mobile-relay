@@ -53,8 +53,8 @@ it('does not fetch underflow or mode-switch context even when IntersectionObserv
   const view = render(ConversationHistory, { agent });
   await screen.findByText('latest fragment');
   for (let i = 0; i < 5; i++) observers.forEach(callback => callback());
-  await fireEvent.click(screen.getByRole('button', { name: 'Conversation' }));
-  await fireEvent.click(screen.getByRole('button', { name: 'Full history' }));
+  view.component.setMode('conversation');
+  view.component.setMode('activity');
   await new Promise(resolve => setTimeout(resolve, 20));
   expect(request).toHaveBeenCalledTimes(1);
   expect(request.mock.calls[0][1]?.limit).toBe(24);

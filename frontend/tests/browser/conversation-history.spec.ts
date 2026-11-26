@@ -1,4 +1,5 @@
 import { expect, test, type Locator, type Page } from '@playwright/test';
+import { chooseMore, moreTrigger, openConversationSearch } from '../support/journey-chrome';
 import { scrollConversationToBottom, showOlderConversationEntry } from '../support/journey-conversation';
 import { captureClipboard, copiedText, distanceFromBottom, saveDeviceCredential } from '../support/journey-device';
 import { boot, closeSocket, commands, composerTarget, connectFedora, fedora, handshake, lastCommand, reply, server, setAutoCommands, setConversationFixture, socketCount, type ConversationFixture } from '../support/journey-relay';
@@ -50,10 +51,10 @@ test('reads and replies from native conversation history', async ({ page }) => {
   // owns both superseded prose and the tool activity attached to it.
   await expect(page.getByText('intermediate progress update')).toBeHidden();
   await expect(page.getByText('Read', { exact: true })).toBeHidden();
-  await page.getByRole('button', { name: 'Full history' }).click();
+  await chooseMore(page, 'Full history');
   await expect(page.getByText('intermediate progress update')).toBeVisible();
   await expect(page.getByText('Read', { exact: true })).toBeVisible();
-  await page.getByRole('button', { name: 'Conversation', exact: true }).click();
+  await chooseMore(page, 'Conversation');
   await expect(page.getByText('intermediate progress update')).toBeHidden();
   await expect(page.getByText('Read', { exact: true })).toBeHidden();
 
@@ -137,10 +138,17 @@ test('reads and replies from native conversation history', async ({ page }) => {
     command.type === 'get_conversation_history' && command.cursor === 'cursor-1'
   ))).toMatchObject({ pane_id: 'w1:p1', cursor: 'cursor-1' });
 
-  const search = page.getByRole('searchbox', { name: 'Search loaded conversation' });
+  const search = await openConversationSearch(page);
   await search.fill('first retained');
   await expect(page.getByText('first retained question')).toBeVisible();
   await expect(page.getByText('latest retained question')).toBeHidden();
+  await search.press('Escape');
+  await expect(search).toHaveCount(0);
+  await expect(moreTrigger(page)).toBeFocused();
+  await expect(page.getByText('latest retained question')).toBeVisible();
+  await expect(await openConversationSearch(page)).toHaveValue('');
+  await page.getByRole('button', { name: 'Close conversation search' }).click();
+  await expect(moreTrigger(page)).toBeFocused();
   await server(page, 0, {
     type: 'agent_update',
     pane_id: 'w1:p1',
@@ -155,7 +163,7 @@ test('reads and replies from native conversation history', async ({ page }) => {
   await expect(composer).toBeEnabled();
   await composer.fill('approval-local draft');
   await expect(page.getByRole('button', { name: 'Send prompt', exact: true })).toBeDisabled();
-  await expect(page.getByRole('button', { name: 'Attach files', exact: true })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Attach', exact: true })).toBeDisabled();
   const promptsBeforeApprovalEdit = (await commands(page)).filter(command => command.type === 'submit_prompt').length;
   await composer.press('Control+Enter');
   expect((await commands(page)).filter(command => command.type === 'submit_prompt').length).toBe(promptsBeforeApprovalEdit);
@@ -233,9 +241,9 @@ test('shows tool-only agent turns only in full history and decodes their argumen
 
   const card = page.getByLabel(/^Conversation with/).locator('details').filter({ hasText: 'Bash' });
   await expect(card).toBeHidden();
-  await page.getByRole('button', { name: 'Full history' }).click();
+  await chooseMore(page, 'Full history');
   await expect(card).toBeVisible();
-  const search = page.getByRole('searchbox', { name: 'Search loaded conversation' });
+  const search = await openConversationSearch(page);
   await search.fill('Bash');
   await expect(card).toBeVisible();
   await search.fill('');
@@ -297,7 +305,7 @@ test('a reader reviews edit previews by keyboard only on the advertising relay',
   await expect(card.getByText('Could not save this edit', { exact: true })).toBeVisible();
   await expect(card.locator('.diff-addition')).toHaveText('+new');
 
-  const search = page.getByRole('searchbox', { name: 'Search loaded conversation' });
+  const search = await openConversationSearch(page);
   await search.fill('context hint');
   await expect(card).toBeVisible();
   await expect(page.getByText('Use this change?', { exact: true })).toBeHidden();
@@ -311,14 +319,14 @@ test('a reader reviews edit previews by keyboard only on the advertising relay',
   await rawRead.getByRole('button', { name: 'Show all 80 lines' }).click();
   await expect(rawRead.locator('pre')).toContainText('ordinary output 79');
 
-  await page.getByRole('button', { name: 'Conversation', exact: true }).click();
+  await chooseMore(page, 'Conversation');
   await expect(card).toBeHidden();
   await expect(page.getByText('Use this change?', { exact: true })).toBeVisible();
   await expect(writeCard.locator('summary')).toHaveAccessibleName('write called');
   await expect(writeCard.getByText('Input', { exact: true })).toBeVisible();
   await expect(writeCard.locator('pre')).toContainText('path: src/log.txt');
   await expect(writeCard.locator('.workspace-diff-line')).toHaveCount(0);
-  await page.getByRole('button', { name: 'Full history', exact: true }).click();
+  await chooseMore(page, 'Full history');
   await expect(card.getByText('Could not save this edit', { exact: true })).toBeVisible();
   await expect(writeCard.getByLabel('Written content')).toBeVisible();
   await page.getByRole('button', { name: 'Back', exact: true }).click();
@@ -364,7 +372,7 @@ test('keeps code and timestamps readable at phone and desktop widths', async ({ 
   };
   await expect(code.locator('.syntax-keyword')).toHaveCount(2);
   await replyPresentation(320);
-  await page.getByRole('button', { name: 'Full history' }).click();
+  await chooseMore(page, 'Full history');
   await replyPresentation(320);
   const readingContrast = () => page.evaluate(() => {
     const themes = ['dark', 'light', 'nord', 'solarized', 'rose', 'latte'];
@@ -408,7 +416,7 @@ test('keeps code and timestamps readable at phone and desktop widths', async ({ 
   await replyPresentation(940);
   const ratios = await readingContrast();
   for (const [theme, ratio] of ratios) expect(ratio, theme).toBeGreaterThanOrEqual(4.5);
-  await page.getByRole('button', { name: 'Conversation', exact: true }).click();
+  await chooseMore(page, 'Conversation');
   await expect(code.locator('.syntax-keyword')).toHaveCount(2);
   await replyPresentation(940);
   expect((await commands(page)).filter(command => command.type === 'workspace_file' || command.type === 'workspace_git_diff')).toEqual([]);
@@ -668,7 +676,7 @@ test('retains a Claude continuation cursor through repeated preparation', async 
   });
   await page.getByRole('button', { name: 'Open Claude continuation on Fedora' }).click();
   await page.getByRole('button', { name: 'Conversation history' }).click();
-  await page.getByRole('button', { name: 'Full history' }).click();
+  await chooseMore(page, 'Full history');
   const list = page.locator('.conversation-list');
   await expect(page.getByText('latest continuation answer')).toBeVisible();
   await list.evaluate((element) => {
@@ -732,7 +740,7 @@ test('accepts the first Claude continuation and rejects a replacement cursor', a
   });
   await page.getByRole('button', { name: 'Open Claude acceptance on Fedora' }).click();
   await page.getByRole('button', { name: 'Conversation history' }).click();
-  await page.getByRole('button', { name: 'Full history' }).click();
+  await chooseMore(page, 'Full history');
   await expect(page.getByText('A continuation history 23')).toBeVisible();
   await expect(page.getByRole('status').filter({ hasText: 'part of that history is unavailable' })).toBeVisible();
 
@@ -785,10 +793,12 @@ for (const availability of ['available', 'no-capability', 'no-directory'] as con
     const header = page.locator('.app-header');
     const inspect = header.getByRole('button', { name: 'Inspect workspace', exact: true });
     await expect(inspect).toBeVisible();
-    for (const name of ['Terminal view', 'Inspect workspace', 'Manage agent']) {
-      const box = await header.getByRole('button', { name, exact: true }).boundingBox();
-      expect(box!.x).toBeGreaterThanOrEqual(0);
-      expect(box!.x + box!.width).toBeLessThanOrEqual(360);
+    await expect(header.getByRole('button')).toHaveCount(4);
+    for (const name of ['Back', 'Terminal view', 'Inspect workspace', /^More\b/]) {
+      const box = (await header.getByRole('button', { name, exact: typeof name === 'string' }).boundingBox())!;
+      expect(Math.min(box.width, box.height)).toBeGreaterThanOrEqual(44);
+      expect(box.x).toBeGreaterThanOrEqual(0);
+      expect(box.x + box.width).toBeLessThanOrEqual(360);
     }
     expect((await header.boundingBox())!.height).toBeLessThanOrEqual(50);
     const path = page.getByRole('button', { name: 'src/main.ts:42', exact: true });
@@ -845,7 +855,7 @@ test('colours a saved list fence without replacing selected prose or a focused f
   const fence = message.locator('li pre code');
   const link = page.getByRole('button', { name: 'src/main.ts:2', exact: true });
   const sameLink = await link.elementHandle();
-  await page.getByRole('searchbox', { name: 'Search loaded conversation' }).focus();
+  await openConversationSearch(page);
   await page.keyboard.press('Tab');
   // Message controls precede the body in the reading order.
   for (let index = 0; index < 5 && !await link.evaluate(element => element === document.activeElement); index++) {
@@ -878,7 +888,7 @@ test('colours a saved list fence without replacing selected prose or a focused f
   const dialog = page.getByRole('dialog', { name: 'Workspace', exact: true });
   await expect(dialog.locator('.preview-heading')).toContainText('Line 2');
   await dialog.getByRole('button', { name: 'Close workspace inspector' }).click();
-  const search = page.getByRole('searchbox', { name: 'Search loaded conversation' });
+  const search = await openConversationSearch(page);
   await search.fill('const preview');
   await expect(fence.locator('mark')).toHaveText('const preview');
   await expect(fence.locator('.syntax-keyword')).toHaveCount(0);
@@ -1286,8 +1296,8 @@ test('phone feedback integrated history loads on upward demand and explicit acti
   const reads = async () => (await commands(page)).filter(command => command.type === 'get_conversation_history');
   expect(await reads()).toHaveLength(1);
   expect((await reads())[0].limit).toBe(24);
-  await page.getByRole('button', { name: 'Conversation', exact: true }).click();
-  await page.getByRole('button', { name: 'Full history', exact: true }).click();
+  await chooseMore(page, 'Conversation');
+  await chooseMore(page, 'Full history');
   expect(await reads()).toHaveLength(1);
   await setAutoCommands(page, false);
   await page.clock.runFor(300);

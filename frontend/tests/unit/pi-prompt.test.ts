@@ -143,7 +143,7 @@ it.each(['not_started', 'dispatched_unknown'])('preserves existing unknown-dispa
 
 it('excludes attachments, hidden/tainted drafts, reader devices and expired capabilities', async () => {
   const { view, frame } = await mount();
-  expect(screen.getByRole('button', { name: 'Attach files' })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Attach' })).toBeDisabled();
   for (const text of ['Attachment: ref', 'x'.repeat(100001)]) {
     await fireEvent.input(input(), { target: { value: text } }); await submit();
   }

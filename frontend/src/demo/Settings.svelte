@@ -1,4 +1,5 @@
 <script lang="ts">
+  import SettingsSearch from '$components/SettingsSearch.svelte';
   import Card from '$components/ui/Card.svelte';
   import {
     AGENT_VIEWS, AGENT_VIEW_LABELS, THEMES, INTERFACE_SIZES, HOME_LAYOUTS, HOME_LAYOUT_LABELS,
@@ -11,6 +12,7 @@
   import { relayStore } from '$lib/store';
   import SampleDevices from './SampleDevices.svelte';
 
+  let searchRoot = $state<HTMLElement>();
   const { connections, relayConfigs, devices } = relayStore;
   const voices = $derived([...$connections.values()].flatMap(({ speechVoices }) => speechVoices || []));
 </script>
@@ -24,8 +26,9 @@
   </fieldset>
 {/snippet}
 
-<main class="page settings-page" aria-labelledby="settings-title">
+<main class="page settings-page" aria-labelledby="settings-title" bind:this={searchRoot}>
   <h2 id="settings-title">Settings</h2>
+  <SettingsSearch root={searchRoot} />
   <Card>
     <h3>Sample computers</h3>
     <ul>

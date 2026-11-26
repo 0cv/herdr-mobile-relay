@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { Snippet } from 'svelte';
+  import { tick, type Snippet } from 'svelte';
 
   let {
     id,
@@ -8,6 +8,7 @@
     description = '',
     children,
     dismissible = true,
+    onDismiss,
   }: {
     id: string;
     open?: boolean;
@@ -15,6 +16,7 @@
     description?: string;
     children?: Snippet;
     dismissible?: boolean;
+    onDismiss?: () => void;
   } = $props();
 
   let dialog = $state<HTMLDialogElement>();
@@ -29,16 +31,17 @@
       event.preventDefault();
       return;
     }
-    open = false;
+    dismiss();
   }
 
-  function closed() {
+  function dismiss() {
+    if (!open) return;
     open = false;
+    if (onDismiss) void tick().then(onDismiss);
   }
 
   function dismissFromBackdrop(event: MouseEvent) {
-    if (!dismissible || event.target !== dialog) return;
-    open = false;
+    if (dismissible && event.target === dialog) dismiss();
   }
 </script>
 
@@ -50,7 +53,7 @@
     aria-labelledby={`${id}-title`}
     aria-describedby={description ? `${id}-description` : undefined}
     oncancel={cancel}
-    onclose={closed}
+    onclose={dismiss}
     onclick={dismissFromBackdrop}
   >
     <div class="dialog-content">

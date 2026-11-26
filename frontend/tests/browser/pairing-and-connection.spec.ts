@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { moreTrigger, openMore } from '../support/journey-chrome';
 import { emulateIphoneSafari, emulateStandalone, setPageVisibility } from '../support/journey-device';
 import { boot, closeSocket, commands, commandsForSocket, connectFedora, fedora, handshake, server, setAutoCommands, socketCount, type RelayFixture } from '../support/journey-relay';
 
@@ -100,7 +101,9 @@ test('imports quick setup and merges agents from multiple relays', async ({ page
     [],
     '/#setup=0123456789abcdef0123456789abcdef&label=Fedora%20Workstation&relay=wss%3A%2F%2Frelay-fedora.example.com',
   );
-  await expect(page.getByRole('button', { name: 'Activity history' }).locator('svg')).toBeVisible();
+  const more = await openMore(page);
+  await expect(more.getByRole('button', { name: 'Activity history' })).toBeVisible();
+  await more.getByRole('button', { name: 'Close', exact: true }).click();
   await expect.poll(() => socketCount(page)).toBe(1);
   expect(await page.evaluate(() => JSON.parse(localStorage.getItem('herdr_relays') || '[]')[0]))
     .toMatchObject({
@@ -144,7 +147,7 @@ test('imports quick setup and merges agents from multiple relays', async ({ page
   await server(page, base + 1, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'blocked', attention_kind: 'approval', project: 'Mac app', agent: 'claude', options: ['Approve once', 'Deny'] }] });
   const headerBox = await page.getByRole('banner').boundingBox();
   const connectionBox = await page.getByRole('img', { name: /relays connected/ }).boundingBox();
-  const settingsBox = await page.getByRole('button', { name: 'Settings' }).boundingBox();
+  const settingsBox = await moreTrigger(page).boundingBox();
   expect(headerBox && connectionBox && settingsBox).toBeTruthy();
   const leadingInset = connectionBox!.x + connectionBox!.width / 2 - headerBox!.x;
   const trailingInset = headerBox!.x + headerBox!.width - settingsBox!.x - settingsBox!.width / 2;

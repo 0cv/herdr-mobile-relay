@@ -23,7 +23,8 @@ discovery semantics before the relay catches up.
 
 ## Pi live command metadata
 
-Turn on **Settings → Pi Integration** for the computer running Pi. A paired
+Find **Pi Integration** in Settings and turn it on for the computer running Pi.
+A paired
 controller can install it for every known Pi agent directory: the home default,
 `PI_CODING_AGENT_DIR`, discovered named profiles and `HERDR_PI_CONFIG_DIRS`.
 Readers can inspect the setting but cannot change it. It defaults to off;

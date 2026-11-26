@@ -97,6 +97,9 @@ const scenes = {
       if (await button(agents, label).isVisible()) await summary(workspace).click();
     }
     if (!await worktree.isVisible()) await summary('Project').click();
+    await summary('Examples').evaluate(element => {
+      window.scrollBy({ top: Math.max(0, Math.ceil(element.getBoundingClientRect().bottom - innerHeight)), behavior: 'instant' });
+    });
     for (const name of ['Project', 'Search', 'Docs', 'Examples']) await visible(summary(name));
     await visible(text(worktree, 'fix/one'));
     const result = button(worktree, 'Open Fixture checks on Atlas');
@@ -155,9 +158,7 @@ const scenes = {
   },
   async 'conversations.jpeg'(page) {
     await openAgent(page, 'Release notes');
-    const fullHistory = button(page, 'Full history');
-    await expect(fullHistory).toHaveAttribute('aria-pressed', 'true');
-    await visible(fullHistory);
+    await visible(page.getByRole('banner').getByText(/^Full history · /));
     const history = region(page, 'Conversation with Release notes');
     for (const prompt of ['Review the search rollout plan', 'Draft a note for the search preview', 'Verify the rollout before review']) {
       await visible(text(history, prompt));

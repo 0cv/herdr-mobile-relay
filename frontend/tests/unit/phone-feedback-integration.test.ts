@@ -62,7 +62,7 @@ async function flush() { await vi.advanceTimersByTimeAsync(0); await tick(); }
 function fenced() {
   expect(screen.getByLabelText('Prompt')).toBeEnabled();
   expect(screen.getByRole('button', { name: 'Send prompt' })).toBeDisabled();
-  expect(screen.getByRole('button', { name: 'Attach files' })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Attach' })).toBeDisabled();
   expect(screen.queryByRole('button', { name: 'Keyboard' })).not.toBeInTheDocument();
 }
 
@@ -164,7 +164,7 @@ it('retains Pi uncertainty through notice paging, mode/view switches, lock and r
   complete(older, { available: true, entries: [{ ...notice, id: 'pi:older', text: 'Earlier generic notice' }, ...rows(0, 22)], has_more: false, next_cursor: '', total: null, source_revision: 'revision', snapshot_id: 'snapshot', state: 'ready', mode: 'snapshot' });
   await flush();
   expect(screen.getByText('Earlier generic notice')).toBeVisible();
-  await fireEvent.click(screen.getByRole('button', { name: /^Full history$/ })); await flush();
+  view.component.setMode('activity'); await flush();
   expect(screen.getByText(notice.text)).toBeVisible();
   expect(delivery.uncertain).toBe(true);
   view.unmount();
@@ -179,14 +179,14 @@ it('retains Pi uncertainty through notice paging, mode/view switches, lock and r
   expect(delivery.uncertain).toBe(true);
   terminal.unmount();
   securityState.set({ locked: false } as never);
-  render(ConversationHistory, { agent }); await flush();
+  const reopened = render(ConversationHistory, { agent }); await flush();
   await fireEvent.click(screen.getByRole('button', { name: 'I checked — allow another send' }));
   expect(delivery.uncertain).toBe(false);
   expect(requests('send_pi_prompt_unconfirmed')).toHaveLength(0);
   expect(requests('send_terminal_text')).toHaveLength(0);
   expect(requests('submit_prompt')).toHaveLength(0);
   expect(requests('send_keys')).toHaveLength(0);
-  await fireEvent.click(screen.getByRole('button', { name: /^Conversation$/ }));
+  reopened.component.setMode('conversation');
 });
 
 it('recovers genuine health loss while rejecting retired history, callbacks and literal replay after target replacement', async () => {

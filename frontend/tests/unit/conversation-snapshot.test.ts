@@ -88,12 +88,13 @@ it('shows the conversation-only empty explanation once for tool activity', async
     available: true, reason: '', entries: [{ ...entry('tool-only', ''), tools: [{ name: 'read', input: '/fixture/file' }] }],
     hasMore: false, total: 1, state: 'ready',
   });
-  render(ConversationHistory, { agent });
+  const view = render(ConversationHistory, { agent });
 
   const message = 'No user prompts or agent answers are recorded in the available history.';
   expect(await screen.findByText(message)).toBeVisible();
   expect(screen.getAllByText(message)).toHaveLength(1);
-  await fireEvent.click(screen.getByRole('button', { name: 'Full history' }));
+  view.component.setMode('activity');
+  await waitFor(() => expect(view.component.getTools().mode).toBe('activity'));
   expect(screen.queryByText(message)).not.toBeInTheDocument();
 });
 

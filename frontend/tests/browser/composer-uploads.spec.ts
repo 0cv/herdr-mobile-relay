@@ -1,6 +1,6 @@
 import { expect, test, type Locator, type Page } from '@playwright/test';
 import { resolve } from 'node:path';
-import { commands, composerTarget, openSharedComposer } from '../support/journey-relay';
+import { commands, composerTarget, openSharedComposer, server } from '../support/journey-relay';
 
 for (const mode of ['Conversation', 'Full history']) {
   test(`shared composer ${mode}: chunked upload hashes uploads for the exact target`, async ({ page }) => {
@@ -16,7 +16,28 @@ for (const mode of ['Conversation', 'Full history']) {
     const prompt = await openSharedComposer(page, mode);
     expect(await page.evaluate(() => typeof crypto.subtle.digest)).toBe('function');
     await prompt.fill('Review upload');
-    await page.locator('input[type=file][accept="image/*"]').setInputFiles([
+    const attach = page.getByRole('button', { name: 'Attach', exact: true });
+    const picker = page.getByRole('dialog', { name: 'Attach', exact: true });
+    await expect(picker).toHaveCount(0);
+    await attach.press('Enter');
+    await expect(picker.getByRole('button', { name: 'Attach photos' })).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(picker).toHaveCount(0);
+    await expect(attach).toBeFocused();
+
+    await attach.click();
+    await expect(picker.getByRole('button', { name: 'Attach files' })).toBeEnabled();
+    await server(page, 0, {
+      type: 'agent_update', ...composerTarget, status: 'working', project: 'Shared composer', agent: 'codex', conversation_history_available: true,
+    });
+    await expect(page.getByRole('banner').getByRole('img', { name: 'Working' })).toBeVisible();
+    await expect(picker).toBeVisible();
+    const choice = page.waitForEvent('filechooser');
+    await picker.getByRole('button', { name: 'Attach photos' }).click();
+    const chooser = await choice;
+    expect(await chooser.element().getAttribute('accept')).toBe('image/*');
+    await expect(attach).toBeFocused();
+    await chooser.setFiles([
       { name: 'upload-one.png', mimeType: 'image/png', buffer: Buffer.from('png') },
       { name: 'upload-two.png', mimeType: 'image/png', buffer: Buffer.from('abc') },
     ]);
@@ -487,7 +508,7 @@ for (const mode of ['Conversation', 'Full history']) {
 
       await settleOverlapOldRead(page);
       await expect(form).toHaveAttribute('aria-busy', 'false');
-      await expect(page.getByRole('button', { name: 'Attach photos' })).toBeEnabled();
+      await expect(page.getByRole('button', { name: 'Attach' })).toBeEnabled();
       await expect(page.getByRole('button', { name: 'Cancel upload' })).toHaveCount(0);
       await expect(status).toHaveText('The relay could not confirm attachment cancellation.');
       await expect(status).toHaveClass(/error/);

@@ -96,7 +96,24 @@ press Escape to close the model picker. Relay commands are serialized per pane,
 but desktop typing is not locked: avoid typing there during delivery. Fresh
 reads detect observed interference, not an atomic guarantee against it.
 
+## App controls
+
+On Home, **Start agent** (when available) and **Settings** stay next to
+**More**. Open **More** for **Search all agents**, **Manage workspaces**, or
+**Activity history**. On Terminal and Conversation, the header keeps **Back**,
+the switch to the other view, and **Inspect workspace**. **More** has
+**Manage agent**, **Settings**, and the current view’s search and display
+tools. A badge on Settings, or on More when it contains Settings, marks an
+update notice. On other pages, use **Back** for the previous screen or
+**More** for another destination.
+
 ## Settings
+
+**Search settings** at the top of the page filters the controls by their
+labels, not their values. For example, type “lease terminal” to find
+**Lease Terminal Height**. Clear the field to see every setting again. The
+search stays on this page: it is not saved or sent anywhere. Settings keeps
+this phone’s preferences alongside controls for each connected computer.
 
 **Pi Integration** is a computer-side setting for each relay, not a phone
 preference. It defaults to off. Paired controllers can enable it for all known
@@ -225,9 +242,9 @@ can still clear the mark when a reader views the pane.
 
 The workspace card keeps its directory (shown as `~/…` if it's inside the
 computer's home directory). To find an agent's exact working directory, open
-**Search all agents** and type the pane name you see on Home. The full path
-appears in the search result without opening the agent or needing workspace
-inspection. At 900 CSS pixels and wider, the rail keeps workspace groups and
+**More → Search all agents** and type the pane name you see on Home. The full
+path appears in the search result without opening the agent or needing
+workspace inspection. At 900 CSS pixels and wider, the rail keeps workspace groups and
 status marks beside the terminal.
 
 The new labels, shapes and counts work with both Herdr TUI and herdr-core
@@ -246,7 +263,7 @@ being inferred from active agents. A workspace therefore remains visible when
 it contains only a shell or no running agent; the phone does not expose that
 shell as a generic terminal.
 
-Open **Workspaces** from the folder button in the header to:
+Open **More → Manage workspaces** to:
 
 - open **Create Workspace**, choose a directory and label in its dialog, then
   confirm a non-focusing workspace with the native initial tab;
@@ -357,7 +374,14 @@ horizontally. Read-only reader panes wrap desktop-width text to the phone width
 instead. Prompts, keys, approvals, uploads, terminal reading, and Conversation
 work the same in both layouts.
 
-**Resize Session** (Settings → Terminal, on by default, saved per device) lets
+Use **More → Find in terminal** to search the loaded output, or
+**More → Search all agents** to find a different pane. When another agent
+needs a response, **Next blocked** appears below the word **More**. The first
+action inside names that agent and computer. Readers can jump too: the jump
+does not mark anything read, answer the request, or use a pane that has taken
+the named agent’s place. The action is hidden during manual terminal input.
+
+**Resize Session** (in Settings, on by default, saved per device) lets
 a controller phone resize the shared terminal's width to fit itself while it has
 the pane open. A saved off choice stays off. Turn it off to avoid these costs:
 
@@ -411,8 +435,8 @@ In **Settings → Agents → Default View**, choose **Terminal** or
 **Conversation** for new agent openings. Conversation is the initial default
 when history is available, across all supported providers; a saved choice of
 Terminal still wins. In
-**Manage agent → Default View**, choose **Use default** or set a preference for
-that pane; the menu is available from both Terminal and Conversation. These
+**More → Manage agent → Default View**, choose **Use default** or set a
+preference for that pane. The menu is available from Terminal and Conversation. These
 preferences are stored only in this browser/app on this device and apply across
 its connected computers. A pane preference belongs to the pane, not its harness,
 and changing its session or name does not reset it. A new or replaced terminal
@@ -435,7 +459,10 @@ that exchange. Questions the agent asked (Claude Code AskUserQuestion) stay
 visible with the chosen answer. **Conversation** is the initial mode.
 **Full history** shows every recorded message with collapsible tool cards;
 agent questions stay expanded. The app remembers the mode on this device.
-Both modes use an escaped Markdown subset, and search filters the current view.
+The current mode appears beneath the agent name. Change it in **More** without
+leaving the pane. **More → Search loaded conversation** opens a filter for this
+view’s loaded history; **Close** or Escape clears it. Both modes use an escaped
+Markdown subset.
 
 In both modes, agent replies sit directly on the page and prompts keep their
 bubbles. Each message can copy its original Markdown and has one **Copy code**
@@ -458,6 +485,7 @@ see the same cards as controllers on either relay; the cards do not apply edits.
 
 Conversation and Full history share the Terminal composer: multiline prompts,
 locally shared drafts, slash-command suggestions, photos/files and pasted images.
+Open **Attach** to choose **Attach photos** or **Attach files**.
 Slash suggestions fill the draft without sending it; Ctrl/Meta+Enter sends it.
 Both views prevent sending until an upload has finished inserting its references,
 and prevent uploads while a prompt is sending. Missing target identity disables

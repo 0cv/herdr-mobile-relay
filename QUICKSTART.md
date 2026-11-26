@@ -63,9 +63,9 @@ Run an agent in Herdr or tap **＋** in the phone app. You can inspect output,
 send prompts, answer approvals and plan questions, upload images, and manage the
 agent lifecycle.
 
-For Pi, enable **Settings → Pi Integration** for its computer, then run `/reload`
-in Pi or restart it. This is off until a controller enables it; the relay keeps
-owned copies current after updates. The CLI alternative is
+For Pi, search Settings for **Pi Integration** and enable it for its computer.
+Then run `/reload` in Pi or restart it. This is off until a controller enables
+it; the relay keeps owned copies current after updates. The CLI alternative is
 `bash relay/setup.sh --pi-install [agent-dir]`.
 
 On hosts with a published Piper runtime, setup downloads the engine and the
@@ -137,9 +137,10 @@ changes, the full action list, teardown, and uninstall.
 - **Temporary URL fails:** rerun Quick Start for a fresh hostname.
 - **Gateway registration times out:** check `HERDR_GATEWAY_URL` and outbound
   HTTPS access; `curl -s localhost:8375/healthz` reports `gateway.registered`.
-- **App still shows the previous release after the relay updates:** open Settings,
-  choose **Check for Updates**, then **Load Update**. A separately hosted app
-  must be published by its configured deployment-owner relay first.
+- **App still shows the previous release after the relay updates:** in Settings,
+  find **Check for Updates** under Updates, then choose **Load Update**.
+  A separately hosted app must be published by its configured deployment-owner
+  relay first.
 - **Need the stable QR again:** invoke `setup-link`.
 - **Need relay log filtering:** see [Cloudflare tunnel logging](docs/cloudflare-tunnel.md#relay-logging).
 
