@@ -25,20 +25,21 @@ beforeEach(() => {
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); relayStore.connections.set(new Map()); localStorage.clear(); });
 
 it.each([
+  ['claude', 'working', 'Claude Code'],
   ['codex', 'working', 'Codex'],
   ['Pi Coding Agent', 'working', 'Pi'],
   ['omp', 'working', 'Oh My Pi'],
   ['opencode', 'working', 'OpenCode'],
   ['pi', 'idle', ''],
   ['pi', 'done', ''],
-  ['claude', 'working', ''],
+  ['cursor', 'working', ''],
 ])('uses the right prompt wording for %s (%s)', async (kind, status, steeringAgent) => {
   const target = { ...agent, agent: kind, status };
   vi.spyOn(relayStore, 'sendToAgent').mockResolvedValue({ type: 'command_result', request_id: 'sent', ok: true });
   render(PromptComposer, { agent: target });
   const prompt = screen.getByLabelText('Prompt');
   expect(prompt).toHaveValue('');
-  expect(prompt).toHaveAttribute('placeholder', steeringAgent ? 'Joins this task' : 'Type a reply…');
+  expect(prompt).toHaveAttribute('placeholder', steeringAgent ? 'Adds to task' : 'Type a reply…');
   expect(prompt).toHaveAccessibleDescription(steeringAgent ? `${steeringAgent} is working. Send adds this to its current task.` : '');
   await send();
   expect(relayStore.sendToAgent).toHaveBeenCalledExactlyOnceWith(target, { type: 'submit_prompt', text: 'New prompt' });
@@ -57,7 +58,7 @@ it.each([
   render(PromptComposer, { agent: target });
   const prompt = screen.getByLabelText('Prompt');
   await fireEvent.input(prompt, { target: { value: text } });
-  expect(prompt).toHaveAttribute('placeholder', steer ? 'Joins this task' : 'Type a reply…');
+  expect(prompt).toHaveAttribute('placeholder', steer ? 'Adds to task' : 'Type a reply…');
   expect(prompt).toHaveAccessibleDescription(steer ? 'Pi is working. Send adds this to its current task.' : '');
   await fireEvent.submit(screen.getByRole('form', { name: 'Send a prompt' }));
   expect(relayStore.sendToAgent).toHaveBeenCalledExactlyOnceWith(target, { type: 'submit_prompt', text });

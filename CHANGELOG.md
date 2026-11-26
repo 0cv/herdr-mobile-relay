@@ -9,9 +9,9 @@ project follows [Semantic Versioning](https://semver.org/).
 
 - Search Settings by label without leaving the page. Clear the search to see
   all settings again.
-- When you can send a prompt to a working Codex, Pi, Oh My Pi or OpenCode
-  agent, the phone shows **Joins this task**. Slash commands keep the usual
-  confirmation.
+- When you can send a prompt to a working Claude Code, Codex, Pi, Oh My Pi or
+  OpenCode agent, the phone shows **Adds to task**. Slash commands keep the
+  usual confirmation.
 
 ### Changed
 

@@ -1,13 +1,13 @@
 import { agentKind, agentStatusGroup, type AgentKind } from './agents';
 import type { Agent } from './types';
 
-const steeringKinds = new Set<AgentKind>(['codex', 'pi', 'omp', 'opencode']);
+const steeringKinds = new Set<AgentKind>(['claude', 'codex', 'pi', 'omp', 'opencode']);
 
 export function busySendHint(agent: Agent, agentName: string) {
   const kind = agentKind(agent.agent);
   if (!kind || !steeringKinds.has(kind) || agentStatusGroup(agent) !== 'working') return;
   return {
-    placeholder: 'Joins this task',
+    placeholder: 'Adds to task',
     description: `${agentName} is working. Send adds this to its current task.`,
     sentMessage: `Sent. ${agentName} will read it during its current task.`,
   };

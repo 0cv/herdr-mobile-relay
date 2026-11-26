@@ -6,8 +6,8 @@ import { boot, closeSocket, commands, composerTarget, connectFedora, fedora, han
 test('explains Send only for a verified working agent', async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 740 });
   const codex = { ...composerTarget, project: 'Codex app', agent: 'codex', status: 'idle' };
-  const claude = { pane_id: 'w1:p2', project: 'Claude app', agent: 'claude', status: 'working' };
-  const inventory = (status: string) => server(page, 0, { type: 'agents', agents: [{ ...codex, status }, claude] });
+  const cursor = { pane_id: 'w1:p2', project: 'Cursor app', agent: 'cursor', status: 'working' };
+  const inventory = (status: string) => server(page, 0, { type: 'agents', agents: [{ ...codex, status }, cursor] });
   const prompt = page.getByRole('combobox', { name: 'Prompt', exact: true });
   const send = page.getByRole('button', { name: 'Send prompt', exact: true });
   const toast = page.locator('.toast');
@@ -25,7 +25,7 @@ test('explains Send only for a verified working agent', async ({ page }) => {
   await inventory('working');
   const description = 'Codex is working. Send adds this to its current task.';
   await expect(prompt).toHaveValue('');
-  await expect(prompt).toHaveAttribute('placeholder', 'Joins this task');
+  await expect(prompt).toHaveAttribute('placeholder', 'Adds to task');
   await expect(prompt).toHaveAccessibleDescription(description);
   await setAutoCommands(page, false);
   await page.locator('input[type=file][accept="image/*"]').setInputFiles({ name: 'pending.png', mimeType: 'image/png', buffer: Buffer.from('png') });
@@ -57,7 +57,7 @@ test('explains Send only for a verified working agent', async ({ page }) => {
 
   await setAutoCommands(page, true);
   await page.getByRole('button', { name: 'Back', exact: true }).click();
-  await page.getByRole('button', { name: 'Open Claude app on Fedora' }).click();
+  await page.getByRole('button', { name: 'Open Cursor app on Fedora' }).click();
   await defaultWording();
   await prompt.fill('A follow-up');
   await send.click();
@@ -82,7 +82,7 @@ test('fits the busy-send hint on one line at 320 px with Large selected', async 
     await expect(prompt).toHaveAttribute('placeholder', 'Type a reply…');
     const idleHeight = await prompt.evaluate(element => element.clientHeight);
     await server(page, 0, { ...composerTarget, type: 'agent_update', status: 'working' });
-    await expect(prompt).toHaveAttribute('placeholder', 'Joins this task');
+    await expect(prompt).toHaveAttribute('placeholder', 'Adds to task');
     await expect(prompt).toHaveValue('');
     const { height, scrollHeight, availableWidth, textWidth } = await prompt.evaluate(async (element: HTMLTextAreaElement) => {
       await document.fonts.ready;
