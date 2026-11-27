@@ -88,9 +88,9 @@ import { appScriptPattern, appStylePattern, releaseEntryPath } from './release-r
 // Raised from 170 to 171 KiB by owner authorization for recorded edit diffs
 // in Full history (474 B gzip) and the in-app QR scanner (754 B gzip).
 // Raised from 171 to 174 KiB by owner authorization for file path links (2,250 B gzip).
-// Raised 32 B above 174 KiB for Home text contrast (+14 B gzip) and
-// small build-to-build drift in compressed asset hashes.
-const limit = 174 * 1024 + 32;
+// Raised from 174 KiB + 32 B to 176 KiB for code reading (+1.6 KiB gzip
+// on top of Home status contrast). The scanner stays lazy.
+const limit = 176 * 1024;
 const root = resolve(process.argv[2] || 'dist');
 const assetNames = await readdir(join(root, 'assets'));
 const appScript = assetNames.find((name) => appScriptPattern.test(name));

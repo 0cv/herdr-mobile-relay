@@ -81,7 +81,7 @@ export function createDemoConversation(epoch: number): ConversationEntry[] {
     },
     {
       id: 'notes-4', role: 'assistant', timestamp: at(23),
-      text: 'I added the preview-first rollout note. Try it at:\n\n```text\n/search?preview=1\n```',
+      text: 'I added the preview-first rollout note. Use the preview flag:\n\n```typescript\nconst previewUrl = "/search?preview=1";\n```',
       tools: [{
         id: 'notes-edit', name: 'Edit', state: 'completed',
         input: JSON.stringify({ path: 'docs/release-notes.md', before: 'Roll out to everyone.', after: 'Start with the search preview group.' }),

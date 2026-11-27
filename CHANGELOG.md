@@ -11,6 +11,10 @@ project follows [Semantic Versioning](https://semver.org/).
   Status words, distinct shapes, and workspace counts make new results easy to
   tell apart from idle agents. Search by the pane name to see its exact path.
   These changes work with existing Herdr TUI and herdr-core relays.
+- Agent replies sit directly on the page and timestamps are easier to read.
+  Code in conversations, workspace files and diffs gets syntax colours for
+  JavaScript, TypeScript, Go, Python, JSON and Bash. Copied text is unchanged,
+  and long code stays plain.
 
 ### Fixed
 

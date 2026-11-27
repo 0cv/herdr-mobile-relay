@@ -66,6 +66,11 @@ const changes = [
     { context: '{#if items.length === 0}', before: ['  <p>No results.</p>'], after: ['  <p role="status">No matches. Try a shorter query.</p>', '  <button onclick={reset}>Clear search</button>'] },
     ['{:else}', '  <ul>{#each items as item}<li>{item}</li>{/each}</ul>', '{/if}'],
   ]),
+  sampleChange(testsPath, [
+    ['import { expect, test } from "vitest";', '', 'const searchUrl = "/search?preview=1";', ''],
+    { context: 'test("opens the preview", () => {', before: ['  expect(searchUrl).toBe("/search");'], after: ['  const preview = "/search?preview=1";', '  expect(searchUrl).toBe(preview);'] },
+    ['});'],
+  ]),
 ];
 
 const workspaceFiles = new Map([
@@ -84,7 +89,7 @@ export function sampleWorkspaceTree(root: string) {
   return {
     root,
     entries: [
-      ...['docs', 'src', 'src/search'].map((path) => ({ path, name: path.split('/').at(-1), kind: 'directory' })),
+      ...['docs', 'src', 'src/search', 'tests'].map((path) => ({ path, name: path.split('/').at(-1), kind: 'directory' })),
       ...[...workspaceFiles].map(([path, text]) => ({ path, name: path.split('/').at(-1), kind: 'file', size: text.length })),
     ],
   };

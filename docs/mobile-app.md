@@ -71,7 +71,7 @@ app and a connected relay.
 
 | Git Inspection | Native Conversations |
 | --- | --- |
-| <img src="../images/git-history.jpeg" alt="Workspace Changes tab listing two files and showing three groups of additions and removals in the release notes diff" width="392"> | <img src="../images/conversations.jpeg" alt="Full history showing three exchanges about the search rollout, with completed Read, Edit, and Bash steps" width="392"> |
+| <img src="../images/git-history.jpeg" alt="Workspace Changes tab listing three files and showing additions and removals in the release notes diff" width="392"> | <img src="../images/conversations.jpeg" alt="Full history showing agent replies on the page, a coloured TypeScript example, and individual tool cards" width="392"> |
 
 | Terminal | Read Aloud |
 | --- | --- |
@@ -432,12 +432,20 @@ next newer window without losing the visible message anchor; repeat until the
 newest messages, then following resumes. No jump button is needed.
 **Conversation** keeps each user prompt and the latest agent answer from
 that exchange. Questions the agent asked (Claude Code AskUserQuestion) stay
-visible with the chosen answer. **Conversation** is the initial mode. **Full history** is an explicit
-preference that shows every recorded message with collapsible tool activity
-(agent questions stay expanded);
-the app remembers either mode on this device. Both use an escaped Markdown subset, search filters the
-currently displayed view, each fenced code block has its own copy control, and
-each message can copy its original Markdown.
+visible with the chosen answer. **Conversation** is the initial mode.
+**Full history** shows every recorded message with collapsible tool cards;
+agent questions stay expanded. The app remembers the mode on this device.
+Both modes use an escaped Markdown subset, and search filters the current view.
+
+In both modes, agent replies sit directly on the page and prompts keep their
+bubbles. Each message can copy its original Markdown and has one **Copy code**
+action if it contains finished code blocks. Saved, labelled code blocks, source
+files and supported diffs get local syntax colours for JavaScript, TypeScript,
+Go, Python, JSON and Bash. Code stays plain if the language is unknown, the
+preview is live, the block exceeds 16 KiB or 300 lines, or the colour script
+cannot load. Search marks take priority in conversation code blocks. Reading
+and copying work the same for readers and controllers on either relay, with no
+relay update required.
 
 In **Full history**, open an edit's tool card to see the recorded path and the
 requested added and removed lines. A write shows **Written content**: all

@@ -1,5 +1,7 @@
 <script lang="ts">
   import { tick } from 'svelte';
+  import CodeTokens from '$components/CodeTokens.svelte';
+  import { fileLanguage, fitsSyntaxBudget, loadCodeColours, type LoadSyntax, type ScanCode } from '$lib/code-reading';
   import Button from '$components/ui/Button.svelte';
   import type { FileTarget } from '$lib/file-links';
   import { loadWorkspaceTree, loadWorkspaceFile, loadWorkspaceGitStatus, loadWorkspaceGitDiff, type WorkspaceFileTarget } from '$lib/workspace-inspection';
@@ -9,14 +11,19 @@
     open = $bindable(false),
     agent,
     fileTarget,
+    loadSyntax,
   }: {
     open?: boolean;
     agent: Agent | null;
     fileTarget: WorkspaceFileTarget | null;
+    loadSyntax: LoadSyntax;
   } = $props();
 
   let dialog = $state<HTMLDialogElement>();
   let textarea = $state<HTMLTextAreaElement>();
+  let mirror = $state<HTMLElement>();
+  let diffElement = $state<HTMLElement>();
+  let forcedColours = $state(false);
   let query = $state('');
   let section = $state<'files' | 'changes'>('files');
   let tree = $state<WorkspaceTree | null>(null);
@@ -54,6 +61,15 @@
 
   $effect(() => {
     if (open && dialog && !dialog.open) dialog.showModal();
+  });
+
+  $effect(() => {
+    if (!open) return;
+    const media = window.matchMedia('(forced-colors: active)');
+    const update = () => { forcedColours = media.matches; };
+    update();
+    media.addEventListener('change', update);
+    return () => media.removeEventListener('change', update);
   });
 
   $effect(() => {
@@ -173,18 +189,55 @@
     setDiffZoom(diffZoom * Math.exp(-event.deltaY * 0.01));
   }
 
-  function diffLineTone(line: string): string {
-    if (line.startsWith('diff --git ') || line.startsWith('index ') || line.startsWith('new file mode ')
-      || line.startsWith('deleted file mode ') || line.startsWith('similarity index ')
-      || line.startsWith('rename from ') || line.startsWith('rename to ')
-      || line.startsWith('Binary files ')) return 'diff-meta';
-    if (line.startsWith('--- ') || line.startsWith('+++ ')) return 'diff-file';
-    if (line.startsWith('@@')) return 'diff-hunk';
-    if (line.startsWith('+')) return 'diff-addition';
-    if (line.startsWith('-')) return 'diff-deletion';
-    if (line.startsWith('\\ ')) return 'diff-note';
-    return 'diff-context';
+  let scanner = $state<ScanCode | null>(null);
+  const fileText = $derived(preview && 'kind' in preview && preview.kind === 'text' ? preview.text : undefined);
+  const diffText = $derived(preview && 'diff' in preview ? preview.diff : undefined);
+  const language = $derived.by(() => {
+    const text = fileText ?? diffText;
+    if (!open || !preview || !text || (fileText && forcedColours)) return;
+    const language = fileLanguage(preview.path);
+    return language && fitsSyntaxBudget(text) ? language : undefined;
+  });
+  $effect(() => {
+    const current = preview;
+    if (!current || !language || scanner || (diffText && !diffElement)) return;
+    return loadCodeColours(diffElement, loadSyntax, scan => { scanner = scan; });
+  });
+
+  const fileTokens = $derived(language && scanner && fileText ? scanner(fileText.replace(/\r\n?/g, '\n'), language) : null);
+  const diffRows = $derived.by(() => {
+    if (!diffText) return [];
+    let inHunk = false;
+    return diffText.split('\n').map(line => {
+      const sign = line[0];
+      let tone = 'diff-context';
+      let body = false;
+      if (line.startsWith('@@')) {
+        inHunk = true;
+        tone = 'diff-hunk';
+      } else if (line.startsWith('\\ ')) tone = 'diff-note';
+      else if (inHunk && (!line || sign === '+' || sign === '-' || sign === ' ')) {
+        body = Boolean(line);
+        tone = sign === '+' ? 'diff-addition' : sign === '-' ? 'diff-deletion' : 'diff-context';
+      } else {
+        inHunk = false;
+        if (line.startsWith('--- ') || line.startsWith('+++ ')) tone = 'diff-file';
+        else if (/^(?:diff --git|index|(?:new|deleted) file mode|similarity index|rename (?:from|to)|Binary files) /u.test(line)) tone = 'diff-meta';
+        else if (sign === '+' || sign === '-') tone = sign === '+' ? 'diff-addition' : 'diff-deletion';
+      }
+      const tokens = body && language && scanner ? scanner(line.slice(1), language) : null;
+      return { line, sign, tone, tokens };
+    });
+  });
+
+  function syncMirror() {
+    if (!textarea || !mirror) return;
+    mirror.style.transform = `translate(${-textarea.scrollLeft}px, ${-textarea.scrollTop}px)`;
   }
+
+  $effect(() => {
+    if (textarea && mirror) syncMirror();
+  });
 
 
   async function loadWorkspace(target: Agent) {
@@ -260,6 +313,7 @@
     element.setSelectionRange(start, start + lines[line - 1].length);
     const { paddingTop, lineHeight } = getComputedStyle(element);
     element.scrollTop = parseFloat(paddingTop) + (line - 1) * parseFloat(lineHeight);
+    syncMirror();
     previewLine = line;
   }
 
@@ -380,7 +434,12 @@
             </figure>
           {:else if preview && 'kind' in preview}
             <header class="preview-heading"><strong>{preview.path}</strong><span>{#if previewLine}Line {previewLine} · {/if}{Math.ceil(preview.size / 1024)} KB</span></header>
-            <textarea bind:this={textarea} class="workspace-code-preview" readonly wrap="off" spellcheck="false" aria-label={`Contents of ${preview.path}`} value={preview.text || ''}></textarea>
+            <div class="workspace-file-text" class:coloured={fileTokens !== null}>
+              {#if fileTokens}
+                <pre class="workspace-code-preview workspace-code-mirror" aria-hidden="true" bind:this={mirror}><CodeTokens tokens={fileTokens} /></pre>
+              {/if}
+              <textarea bind:this={textarea} class="workspace-code-preview" onscroll={syncMirror} readonly wrap="off" spellcheck="false" aria-label={`Contents of ${preview.path}`} value={preview.text || ''}></textarea>
+            </div>
           {:else if preview && 'diff' in preview}
             <header class="preview-heading">
               <strong>{preview.path}</strong>
@@ -396,6 +455,7 @@
             {#if preview.diff}
               <pre
                 class="workspace-code-preview workspace-diff"
+                bind:this={diffElement}
                 style={`--diff-zoom: ${diffZoom}`}
                 aria-label={`Diff for ${preview.path}`}
                 onpointerdown={startDiffPinch}
@@ -403,7 +463,7 @@
                 onpointerup={finishDiffPinch}
                 onpointercancel={finishDiffPinch}
                 onwheel={zoomDiffWheel}
-              >{#each preview.diff.split('\n') as line, index (index)}<span class={`workspace-diff-line ${diffLineTone(line)}`}>{line}</span>{/each}</pre>
+              >{#each diffRows as { line, sign, tone, tokens }, index (index)}<span class={`workspace-diff-line ${tone}`}>{#if tokens}{sign}<CodeTokens {tokens} />{:else}{line}{/if}</span>{/each}</pre>
             {:else}
               <p class="workspace-message">No text diff for this file.</p>
             {/if}

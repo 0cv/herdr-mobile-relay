@@ -206,7 +206,7 @@ export function speakableText(value: string): string {
   return lines.filter(Boolean).join('\n').replace(/[ \t]+/gu, ' ').trim();
 }
 
-export function safeMarkdownHtml(value: string, highlight = '', fileLinks?: FileLinkContext | null, _role?: string): string {
+export function safeMarkdownHtml(value: string, highlight = '', fileLinks?: FileLinkContext | null, _role?: string, markFences = false): string {
   const inline = (text: string) => renderInline(text, highlight, fileLinks);
   const lines = value.replace(/\r\n?/g, '\n').split('\n');
   const output: string[] = [];
@@ -227,10 +227,11 @@ export function safeMarkdownHtml(value: string, highlight = '', fileLinks?: File
     output.push(`<p>${paragraph.map(inline).join('<br>')}</p>`);
     paragraph = [];
   };
-  const flushCode = () => {
+  const flushCode = (closed = false) => {
     if (!inCode) return;
     const language = /^[A-Za-z0-9_+.-]{1,32}$/u.test(codeLanguage) ? ` class="language-${escapeHtml(codeLanguage)}"` : '';
-    output.push(`<pre><code${language}>${renderOutputText(codeLines.join('\n'), highlight)}</code></pre>`);
+    const savedFence = closed && language && markFences ? ` data-fence="${escapeHtml(codeLanguage)}"` : '';
+    output.push(`<pre><code${language}${savedFence}>${renderOutputText(codeLines.join('\n'), highlight)}</code></pre>`);
     inCode = false;
     codeLanguage = '';
     codeLines = [];
@@ -276,7 +277,7 @@ export function safeMarkdownHtml(value: string, highlight = '', fileLinks?: File
     const line = lines[index];
     const fence = line.match(CODE_FENCE);
     if (fence) {
-      if (inCode) flushCode();
+      if (inCode) flushCode(!fence[1]);
       else {
         flushParagraph();
         const lead = leadOf(line);

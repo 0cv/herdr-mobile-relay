@@ -3,7 +3,7 @@ import { renderOutputText, safeMarkdownHtml as renderMarkdown } from '../lib/mar
 
 export * from '../lib/markdown';
 
-export function safeMarkdownHtml(text: string, highlight = '', fileLinks?: FileLinkContext | null, role?: string): string {
+export function safeMarkdownHtml(text: string, highlight = '', fileLinks?: FileLinkContext | null, role?: string, markFences = false): string {
   if (role === 'user') return `<p class="demo-user-text">${renderOutputText(text, highlight, fileLinks)}</p>`;
-  return renderMarkdown(text, highlight, fileLinks);
+  return renderMarkdown(text, highlight, fileLinks, role, markFences);
 }

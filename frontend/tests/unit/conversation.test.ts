@@ -1,12 +1,13 @@
 import { render, screen, waitFor } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import ConversationMessage from '$components/ConversationMessage.svelte';
 import { clampPayload, conversationEntries, formatToolPayload, isChosenOption, maxPayloadLines, parseAskUserQuestion, pendingQuestionEntryId } from '$lib/conversation';
 import type { ConversationEntry, ConversationTool } from '$lib/types';
 import { ConversationLiveReader, LIVE_MAX_BYTES } from '$lib/conversation-live';
 import { normalizeConversationBatch, normalizeConversationPage } from '$lib/conversation-page';
 import { estimateEntriesBytes } from '$lib/conversation-values';
+import { scanCode } from '$lib/syntax-colours';
 import editFixture from '../../../contracts/fixtures/conversation_edit_diff.json';
 import { makeAgent } from '../support/relay';
 
@@ -136,6 +137,33 @@ describe('recorded edit previews', () => {
     await restored.rerender({ ...props, showDiffs: false });
     expect(screen.queryByLabelText('Requested change')).toBeNull();
     expect(screen.getByText('Input', { exact: true })).toBeVisible();
+  });
+
+  it('leaves running and provisional previews and fences plain until settled and saved', async () => {
+    const loadSyntax = vi.fn(async () => scanCode);
+    const source = '/* first line\nconst label = "<b>";\nlast line */';
+    const text = `\`\`\`go\n${source}\n\`\`\``;
+    const tool: ConversationTool = {
+      ...editFixture, state: 'running',
+      diff: { kind: 'edit', path: 'src/main.go', added: 1, removed: 1, truncated: false, text: '-const was = 1\n+const is = 2' },
+    };
+    const props = {
+      text, tools: [tool], loadSyntax, provisional: true,
+      viewState: { tableOffsets: [], openTools: new Set([`${tool.id || tool.name}:0`]) },
+    };
+    const { container, rerender } = render(ConversationMessage, props);
+    expect(loadSyntax).not.toHaveBeenCalled();
+    expect(container.querySelector('pre code')?.textContent).toBe(source);
+    expect(container.querySelector('.workspace-diff-line')).not.toBeNull();
+    await rerender({ ...props, tools: [{ ...tool, state: 'completed' }] });
+    expect(loadSyntax).not.toHaveBeenCalled();
+    await rerender({ ...props, provisional: false });
+    await waitFor(() => expect(container.querySelector('pre code .syntax-string')).toHaveTextContent('"<b>"'));
+    expect(container.querySelector('pre code .syntax-comment')).toBeNull();
+    expect(container.querySelector('pre code')?.textContent).toBe(source);
+    expect(container.querySelector('.workspace-diff-line .syntax-keyword')).toBeNull();
+    await rerender({ ...props, tools: [{ ...tool, state: 'completed' }], provisional: false });
+    await waitFor(() => expect(container.querySelector('.workspace-diff-line .syntax-keyword')).toHaveTextContent('const'));
   });
 
   it('labels a cut write as written content, not removed lines', () => {
