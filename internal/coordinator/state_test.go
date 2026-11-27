@@ -361,7 +361,7 @@ func TestAcknowledgeExplicitDonePersistsAcrossSnapshots(t *testing.T) {
 	s.CommitInventory([]*AgentState{{PaneID: "p1", Agent: "codex", Status: "working"}}, s.RevisionCounter())
 	s.CommitInventory([]*AgentState{{PaneID: "p1", Agent: "codex", Status: "done"}}, s.RevisionCounter())
 
-	if !s.AcknowledgePane("p1") {
+	if _, ok := s.AcknowledgePane("p1"); !ok {
 		t.Fatal("explicit done pane was not acknowledged")
 	}
 	if got := s.DisplayedStatus("p1"); got != "idle" {

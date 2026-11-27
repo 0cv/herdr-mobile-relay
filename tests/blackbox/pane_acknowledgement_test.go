@@ -59,10 +59,21 @@ func TestPairedPaneReadsAcknowledgeOnlyForControllers(t *testing.T) {
 				t.Fatalf("reader %s changed the result: %v", action, after)
 			}
 			read(controller)
-			update := reader.awaitMessage(ctx, "agent_update")
-			if update["pane_id"] != "pane-1" || update["status"] != "idle" {
-				t.Fatalf("controller %s did not clear the result: %v", action, update)
-			}
+			reader.awaitMatchingMessage(ctx, "an idle status for pane-1 after controller "+action, func(message map[string]any) bool {
+				switch message["type"] {
+				case "agent_update":
+					return message["pane_id"] == "pane-1" && message["status"] == "idle"
+				case "agents":
+					agents, _ := message["agents"].([]any)
+					for _, entry := range agents {
+						agent, _ := entry.(map[string]any)
+						if agent["pane_id"] == "pane-1" && agent["status"] == "idle" {
+							return true
+						}
+					}
+				}
+				return false
+			})
 		})
 	}
 }

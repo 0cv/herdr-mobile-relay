@@ -344,13 +344,20 @@ func (p *phone) readMessage(ctx context.Context) map[string]any {
 // awaitMessage reads until a message of the wanted type arrives.
 func (p *phone) awaitMessage(ctx context.Context, wanted string) map[string]any {
 	p.t.Helper()
+	return p.awaitMatchingMessage(ctx, fmt.Sprintf("a %q message", wanted), func(message map[string]any) bool {
+		return message["type"] == wanted
+	})
+}
+
+func (p *phone) awaitMatchingMessage(ctx context.Context, wanted string, matches func(map[string]any) bool) map[string]any {
+	p.t.Helper()
 	for range 60 {
 		message := p.readMessage(ctx)
-		if message["type"] == wanted {
+		if matches(message) {
 			return message
 		}
 	}
-	p.t.Fatalf("relay never sent a %q message", wanted)
+	p.t.Fatalf("relay never sent %s", wanted)
 	return nil
 }
 

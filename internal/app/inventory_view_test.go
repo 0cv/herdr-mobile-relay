@@ -1104,9 +1104,11 @@ func TestStatusClockIncrementalCompletionAndAcknowledgement(t *testing.T) {
 		t.Fatalf("committed result = %+v", a)
 	}
 
-	s.state.AcknowledgePane("pane-1")
-	raw, _ = s.state.Agent("pane-1")
-	s.broadcastCommitted(coordinator.AgentUpdate{Agent: raw})
+	ack, _ := s.state.AcknowledgePane("pane-1")
+	if ack == nil {
+		t.Fatal("result did not change on acknowledgement")
+	}
+	s.broadcastCommitted(coordinator.AgentUpdate{Agent: ack})
 	frame = readFrame(t, e.conn)
 	if frame["type"] != "agent_update" || frame["status"] != "idle" {
 		t.Fatal(frame)

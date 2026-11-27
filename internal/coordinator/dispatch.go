@@ -556,16 +556,14 @@ func (d *Dispatcher) handleTabReorder(ctx context.Context, req commandRequest) *
 }
 
 func (d *Dispatcher) handleAcknowledge(requestID, paneID string) *CommandResult {
-	before := d.state.DisplayedStatus(paneID)
-	if paneID == "" || !d.state.AcknowledgePane(paneID) {
+	update, ok := d.state.AcknowledgePane(paneID)
+	if !ok {
 		return d.fail(requestID, "acknowledge_pane", paneID, "Agent is unavailable")
 	}
-	after := d.state.DisplayedStatus(paneID)
-	d.wake()
-	if agent, ok := d.state.Agent(paneID); ok && d.broadcast != nil && before != after {
-		agent.Status = after
-		d.broadcast(AgentUpdate{Agent: agent})
+	if update != nil && d.broadcast != nil {
+		d.broadcast(AgentUpdate{Agent: update})
 	}
+	d.wake()
 	return completed(requestID, "acknowledge_pane", paneID, nil)
 }
 
