@@ -17,6 +17,7 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Slash suggestions put the commands you've used recently for that kind of agent first.
 - Agent pages keep Back, the Terminal/Conversation switch and workspace
   inspection in the header, and Home keeps Start agent and Settings. Other
   actions move to **More**. When another agent needs input,
