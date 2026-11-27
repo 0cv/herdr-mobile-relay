@@ -1,11 +1,13 @@
 <script lang="ts">
   import { onDestroy, onMount, tick, untrack } from 'svelte';
   import AppDialog from '$components/ui/AppDialog.svelte';
+  import { agentDisplayName } from '$components/AgentLogo.svelte';
   import AttachmentProgress from '$components/AttachmentProgress.svelte';
   import Button from '$components/ui/Button.svelte';
   import { attachmentsAvailable, slashCommandsAvailable, promptAutocorrect, promptSpellcheck } from '$lib/composer-policy';
   import { clearPromptDraft, loadPromptDraft, promptComposerScope, savePromptDraft } from '$lib/prompt-drafts';
   import { interfaceSize } from '$lib/preferences';
+  import { relayProtocolError } from '$lib/protocol';
   import { targetRefForAgent, targetRefMatchesAgent } from '$lib/resource-id';
   import { relayStore } from '$lib/store';
   import { securityState } from '$lib/security';
@@ -16,7 +18,8 @@
   import { promptDispatchRestriction } from '$lib/terminal-input';
   import { inputContextIdentity } from '$lib/input-target-state';
   import { guardReload, holdReloadsWhileSending } from '$lib/reload-guard';
-  import { dispatchFlag, type ComposerSubmitAdapter } from '$lib/composer';
+  import { busySendHint, dispatchFlag, type ComposerSubmitAdapter } from '$lib/composer';
+  import { SLASH_COMMAND_NAME } from '$lib/wire-normalizers';
   import type { AttachmentBatchController, AttachmentBatchSnapshot, AttachmentRef } from '$lib/attachments';
   import type { Agent, FrontendTargetRef, SlashCommand, SlashCommandCatalog, TerminalFrame } from '$lib/types';
 
@@ -112,8 +115,19 @@
     ? Math.min(activeSlashIndex, filteredSlashCommands.length - 1)
     : -1);
 
-  const inputLocked = $derived(readOnly || promptBlocked || attachmentsBlocked || noEchoActive || deliveryBlocked);
-  const attachmentsLocked = $derived(!attachmentsAvailable || inputLocked || piPromptTarget(agent) || sendingSecret || !targetRefForAgent(agent));
+  const promptLocked = $derived(readOnly || promptBlocked || noEchoActive || deliveryBlocked);
+  const inputLocked = $derived(promptLocked || attachmentsBlocked);
+  const targetRef = $derived(targetRefForAgent(agent));
+  const canSend = $derived(!promptLocked && !sending && !sendingSecret && !uploadingAttachment && Boolean(targetRef));
+  const promptText = $derived(submitAdapter?.filter ? composer : composer.replace(/[\r\n]+$/g, ''));
+  const busySendDescription = $props.id();
+  const busySend = $derived.by(() => {
+    if (!canSend || dispatchBlocked || submitAdapter
+      || connection?.status !== 'connected' || relayProtocolError(connection) || connection.inventory.state !== 'ready'
+      || SLASH_COMMAND_NAME.test(promptText.trimStart().split(/\s/, 1)[0])) return;
+    return busySendHint(agent, agentDisplayName(agent.agent || ''));
+  });
+  const attachmentsLocked = $derived(!attachmentsAvailable || inputLocked || piPromptTarget(agent) || sendingSecret || !targetRef);
   const pickerDisabled = $derived(attachmentsLocked || uploadingAttachment || sending);
 
   $effect(() => {
@@ -247,8 +261,8 @@
   async function sendPrompt() {
     const submittedDraft = composer;
     const adapter = submitAdapter;
-    const text = adapter?.filter ? submittedDraft : submittedDraft.replace(/[\r\n]+$/g, '');
-    if (!text || readOnly || promptBlocked || deliveryBlocked || sending || uploadingAttachment || sendingSecret || noEchoActive) return;
+    const text = promptText;
+    if (!canSend || !text) return;
     const bridge = Boolean(dispatchBlocked && bridgeReady);
     if (bridge && (!validPiPromptText(text) || !piCapability || !frame)) {
       relayStore.showToast('Pi prompts must be text only and at most 100,000 bytes.', true);
@@ -260,11 +274,8 @@
       return;
     }
     const target = { ...agent };
-    const identity = targetRefForAgent(target);
-    if (!identity) {
-      relayStore.showToast('This terminal does not have a stable input target.', true);
-      return;
-    }
+    const identity = targetRef!;
+    const sentMessage = adapter?.sentMessage || busySend?.sentMessage || 'Prompt sent.';
     sending = true;
     composer = '';
     clearPromptDraft(target);
@@ -273,7 +284,7 @@
       if (bridge) await relayStore.sendPiPrompt(target, text, piCapability!, frame!);
       else if (adapter) await adapter.send(target, text);
       else await relayStore.sendToAgent(target, { type: 'submit_prompt', text });
-      if (!bridge) relayStore.showToast(adapter?.sentMessage || 'Prompt sent.');
+      if (!bridge) relayStore.showToast(sentMessage);
       if (mounted && targetRefMatchesAgent(identity, agent)) {
         uploadStatus = '';
         uploadError = false;
@@ -298,7 +309,7 @@
     const secret = secretValue;
     if (!secret || !secretReady || !frame || dispatchBlocked || sendingSecret || uploadingAttachment || sending) return;
     const target = { ...agent };
-    const identity = targetRefForAgent(target);
+    const identity = targetRef;
     if (!identity) return;
     sendingSecret = true;
     secretValue = '';
@@ -652,9 +663,10 @@
           bind:value={composer}
           rows="1"
           disabled={readOnly}
-          placeholder={placeholder}
+          placeholder={busySend?.placeholder ?? placeholder}
           role="combobox"
           aria-label="Prompt"
+          aria-describedby={busySend && busySendDescription}
           aria-autocomplete="list"
           aria-haspopup="listbox"
           aria-expanded={slashMenuOpen}
@@ -669,9 +681,10 @@
           onkeydown={keydown}
           onpaste={paste}
         ></textarea>
+        <span id={busySendDescription} hidden>{busySend?.description}</span>
         {#if composer}<button type="button" class="input-clear" aria-label="Clear prompt text" onclick={clearComposer}>×</button>{/if}
       </div>
-      <Button type="submit" size="icon" disabled={!composer.replace(/[\r\n]+$/g, '') || readOnly || promptBlocked || deliveryBlocked || noEchoActive || sending || uploadingAttachment || !targetRefForAgent(agent)} aria-label={sending ? 'Submitting input' : submitLabel} >{sending ? '…' : '➤'}</Button>
+      <Button type="submit" size="icon" disabled={!canSend || !promptText} aria-label={sending ? 'Submitting input' : submitLabel} >{sending ? '…' : '➤'}</Button>
     </form>
     {#if !readOnly && attachmentSnapshot?.items.length}
       <AttachmentProgress snapshot={attachmentSnapshot} restartDisabled={attachmentsLocked || sending} oncancel={cancelAttachmentUpload} onrestart={restartAttachmentUpload} />
@@ -688,7 +701,7 @@
     {#if uploadStatus}<p class:error={uploadError} class="upload-status" role="status">{uploadStatus}</p>{/if}
     {#if draftPersistenceWarning && (composer || draftPersistenceError)}<p class="draft-status" class:error={draftPersistenceError} role="status">{draftPersistenceWarning}</p>{/if}
 
-  {#if !readOnly && !targetRefForAgent(agent)}
+  {#if !readOnly && !targetRef}
     <p class="upload-status error" role="status">Attachments and sending need a stable target. Wait for the agent inventory to refresh.</p>
   {/if}
 </div>
