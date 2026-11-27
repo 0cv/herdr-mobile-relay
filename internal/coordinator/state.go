@@ -1060,14 +1060,15 @@ func interactionsEqual(left, right *question.Interaction) bool {
 	return left.ID == right.ID
 }
 
-func (s *State) AcknowledgePane(paneID string) bool {
+func (s *State) AcknowledgePane(paneID string) (update *AgentState, found bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	rec := s.panes[paneID]
-	if rec == nil {
-		return false
+	if paneID == "" || rec == nil {
+		return nil, false
 	}
+	before := rec.displayedStatus()
 	agent := rec.agent
 	now := time.Now().UnixMilli()
 	agent.LastSeenAt = max(now, agent.LastActiveAt)
@@ -1079,7 +1080,10 @@ func (s *State) AcknowledgePane(paneID string) bool {
 	if s.syncTriageLocked(agent) {
 		s.persistTriageLocked()
 	}
-	return true
+	if before != rec.displayedStatus() {
+		return s.displayedAgentLocked(rec), true
+	}
+	return nil, true
 }
 
 func (s *State) DisplayedStatus(paneID string) string {

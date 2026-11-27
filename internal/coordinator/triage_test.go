@@ -24,7 +24,7 @@ func TestTriagePersistsSeenCompletionAcrossRestart(t *testing.T) {
 	if got := first.DisplayedStatus("pane-1"); got != "done" {
 		t.Fatalf("unseen completion displayed as %q, want done", got)
 	}
-	if !first.AcknowledgePane("pane-1") {
+	if _, ok := first.AcknowledgePane("pane-1"); !ok {
 		t.Fatal("completion was not acknowledged")
 	}
 
