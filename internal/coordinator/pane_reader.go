@@ -75,12 +75,13 @@ func (r *paneReader) readForDisplay(
 }
 
 type PaneReadRequest struct {
-	PaneID    string
-	RequestID string
-	Format    string
-	Lines     int
-	Columns   int
-	Rows      int
+	PaneID      string
+	RequestID   string
+	Format      string
+	Lines       int
+	Columns     int
+	Rows        int
+	Acknowledge bool
 }
 
 func (r *paneReader) read(ctx context.Context, request PaneReadRequest) map[string]any {

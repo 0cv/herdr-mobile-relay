@@ -898,9 +898,38 @@ test('shows five workspaces and activity relative to the visit', async ({ page }
   if (!await workspaces.getByRole('region', { name: 'fix/one worktree' }).isVisible()) await project.click();
   const worktree = workspaces.getByRole('region', { name: 'fix/one worktree' });
   await expect(worktree.getByText('fix/one', { exact: true })).toBeVisible();
-  await expect(worktree.locator('time')).toHaveText('32m');
+  await expect(demoAgent(page, 'Fixture checks')).toHaveAccessibleDescription('New result · last active 32m ago');
   const history = await openSampleConversation(page);
   await expect(history.locator('time').last()).toHaveAttribute('datetime', '2031-04-06T13:52:00.000Z');
+  await expectCleanDemoOrigin(page);
+  expect(observation.unexpected).toEqual([]);
+});
+
+test('finds waiting input and opens the new result without relying on color', async ({ page }) => {
+  const observation = await watchDemo(page);
+  await page.goto(demoOrigin);
+  const waiting = page.getByRole('region', { name: 'Needs input', exact: true });
+  await expect(waiting.getByRole('button', { name: 'Open Patch review on Atlas' }))
+    .toHaveAccessibleDescription(/^Needs input.*make test$/);
+  await page.locator('.agent-list').evaluate((element) => { (element as HTMLElement).style.filter = 'grayscale(1)'; });
+  const result = demoAgent(page, 'Fixture checks');
+  const idle = demoAgent(page, 'Release notes');
+  const project = page.locator('.workspace-card > summary').filter({ has: page.getByText('Project', { exact: true }) });
+  await expect(result).toHaveAccessibleDescription(/^New result · last active /);
+  await expect(idle).toHaveAccessibleDescription(/^Idle · last active /);
+  await expect(result.locator('.status-check')).toBeVisible();
+  await expect(idle.locator('.status-ring')).toBeVisible();
+  await expect(project).toHaveAccessibleName(/1 new result/);
+  await result.focus();
+  await result.press('Enter');
+  await expect(output(page)).toContainText('Pi · Fixture checks');
+  await expect(page.getByRole('banner').getByRole('img', { name: 'Idle' })).toBeVisible();
+  await back(page);
+  await expect(result).toHaveAccessibleDescription(/^Idle · last active /);
+  await expect(project.locator('.workspace-done-count')).toHaveCount(0);
+  await page.reload();
+  await expect(result).toHaveAccessibleDescription(/^New result · last active /);
+  await expect(project).toHaveAccessibleName(/1 new result/);
   await expectCleanDemoOrigin(page);
   expect(observation.unexpected).toEqual([]);
 });

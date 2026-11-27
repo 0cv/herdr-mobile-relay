@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 )
@@ -18,6 +19,7 @@ type socketScenario struct {
 	Tabs               []map[string]any  `json:"tabs"`
 	Workspaces         []map[string]any  `json:"workspaces"`
 	Content            map[string]string `json:"content"`
+	SocketReadPanes    []string          `json:"socket_read_panes"`
 	FocusedWorkspaceID string            `json:"focused_workspace_id"`
 }
 
@@ -29,6 +31,7 @@ type socketRequest struct {
 
 type socketServer struct {
 	scenario     socketScenario
+	readState    *stateStore
 	overrides    string
 	inputLog     string
 	inputLogLock sync.Mutex
@@ -53,6 +56,12 @@ func runSocketServer() error {
 	}
 	if err := json.Unmarshal(data, &server.scenario); err != nil {
 		return err
+	}
+	if len(server.scenario.SocketReadPanes) != 0 {
+		server.readState, err = openStateStore()
+		if err != nil {
+			return err
+		}
 	}
 	if server.scenario.Panes == nil {
 		server.scenario.Panes = []map[string]any{}
@@ -171,12 +180,25 @@ func (s *socketServer) serve(conn net.Conn) {
 			sendError("unknown_method", "unknown method")
 			break
 		}
-		s.logInput(request)
+		s.logRequest(request)
 		if params.Text == uncertainInputText {
 			return
 		}
 		send(map[string]any{"type": "ok"})
 	case "pane.read":
+		if slices.Contains(s.scenario.SocketReadPanes, params.PaneID) {
+			var state socketScenario
+			data, err := os.ReadFile(s.readState.path)
+			if err != nil || json.Unmarshal(data, &state) != nil {
+				sendError("pane_read_failed", "could not read fixture state")
+				break
+			}
+			if s.inputLog != "" {
+				s.logRequest(request)
+			}
+			send(map[string]any{"type": "pane_read", "read": map[string]any{"text": state.Content[params.PaneID], "truncated": false}})
+			break
+		}
 		if len(s.scenario.Content) > 0 {
 			sendError("unknown_method", "scenario content uses the CLI fixture")
 			break
@@ -216,7 +238,7 @@ func (s *socketServer) panes() []map[string]any {
 	return panes
 }
 
-func (s *socketServer) logInput(request socketRequest) {
+func (s *socketServer) logRequest(request socketRequest) {
 	record, err := json.Marshal(map[string]any{
 		"method":     request.Method,
 		"params":     request.Params,

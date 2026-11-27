@@ -8,7 +8,8 @@ import {
   agentLastActiveAt,
   agentNeedsInspection,
   agentStatusGroup,
-  agentStatusTone,
+  agentStatusMarks,
+  waitingPreview,
   agentUpdatedAt,
   approvalOptions,
   mergeAgentDetails,
@@ -505,23 +506,50 @@ describe('terminal rendering', () => {
 });
 
 describe('agent state and sorting', () => {
-  it('maps active agent states to semantic indicator tones', () => {
-    expect(agentStatusTone(agent({ status: 'working' }))).toBe('warning');
-    expect(agentStatusTone(agent({
-      status: 'blocked', attention_kind: 'approval', attention_capable: true,
-    }))).toBe('danger');
-    expect(agentStatusTone(agent({
-      status: 'blocked', attention_kind: 'unknown', attention_capable: true,
-    }))).toBe('warning');
-    expect(agentStatusGroup(agent({
-      status: 'blocked', attention_kind: 'chat', attention_capable: true,
-    }))).toBe('ready');
-    expect(agentStatusTone(agent({ status: 'done' }))).toBe('success');
-    // An idle agent the phone has already opened is still ready for input, so
-    // it keeps the ready (green ring) tone rather than the unknown-state grey.
-    expect(agentStatusTone(agent({ status: 'idle' }))).toBe('ready');
-    expect(agentStatusTone(agent({ status: 'ready' }))).toBe('ready');
-    expect(agentStatusTone(agent({ status: 'exited' }))).toBe('muted');
+  it.each([
+    ...['done', 'complete', 'completed', 'finished', 'success', 'succeeded', 'unread']
+      .map((status) => [status, undefined, 'done', 'check', 'New result'] as const),
+    ['working', undefined, 'working', 'chevron', 'Working'],
+    ['blocked', 'approval', 'blocked', 'square', 'Needs input'],
+    ['blocked', 'question', 'blocked', 'square', 'Needs input'],
+    ['blocked', 'unknown', 'attention', 'triangle', 'Needs inspection'],
+    ['blocked', undefined, 'attention', 'triangle', 'Needs inspection'],
+    ['blocked', 'chat', 'ready', 'ring', 'Idle'],
+    ['idle', undefined, 'ready', 'ring', 'Idle'],
+    ['ready', undefined, 'ready', 'ring', 'Idle'],
+    ['exited', undefined, 'other', 'dash', 'Status unknown'],
+  ] as const)('maps %s (%s) to %s with a %s', (status, attention_kind, expected, shape, label) => {
+    const group = agentStatusGroup(agent({ status, attention_kind }));
+    expect(group).toBe(expected);
+    expect(agentStatusMarks[group]).toMatchObject({ shape, label });
+  });
+
+  it('bounds waiting text by Unicode characters and keeps literal command punctuation', () => {
+    const command = "printf '%s' \"<out>&|\"";
+    const decorated = `\x1b[31m${command}\x1b[0m\x00 \r\n\t\x1b]8;;https://example.test\x1b\\file\x1b]8;;\x07`;
+    expect(waitingPreview(agent({ command: decorated }), null)).toBe(`${command} file`);
+    const prefix = `${command} `;
+    const limit = 400 - prefix.length;
+    expect(waitingPreview(agent({ command: prefix + '🧪'.repeat(limit) }), null)).toBe(prefix + '🧪'.repeat(limit));
+    const truncated = waitingPreview(agent({ command: prefix + '🧪'.repeat(limit + 1) }), null);
+    expect([...truncated]).toHaveLength(400);
+    expect(truncated).toBe(prefix + '🧪'.repeat(limit - 1) + '…');
+  });
+
+  it.each(['\x1b]', '\x9d'])('discards a truncated hyperlink payload from commands and prompt fallbacks', (osc) => {
+    const truncated = `view ${osc}8;;https://example.test/?token=sample\x1b[31m`;
+    expect(waitingPreview(agent({ command: truncated }), null)).toBe('view');
+    expect(waitingPreview(agent({ prompt: `$ ${truncated}\nprivate payload continuation` }), null)).toBe('view');
+  });
+
+  it('does not treat BEL as the end of a device control string', () => {
+    expect(waitingPreview(agent({ command: 'view \x1bPprivate\x07payload' }), null)).toBe('view');
+  });
+
+  it.each(['\x1b[', '\x9b'])('discards truncated CSI parameters from waiting text', (csi) => {
+    const truncated = `view ${csi}38;2;255`;
+    expect(waitingPreview(agent({ command: truncated }), null)).toBe('view');
+    expect(waitingPreview(agent({ prompt: `$ ${truncated}\n` }), null)).toBe('view');
   });
 
   it('resolves the tab name from the Herdr tab label over the pane name', () => {

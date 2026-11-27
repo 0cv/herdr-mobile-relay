@@ -907,7 +907,7 @@ func (d *Dispatcher) HandleClearActivities(
 }
 
 func (d *Dispatcher) HandleReadPane(ctx context.Context, request PaneReadRequest) map[string]any {
-	if request.PaneID != "" {
+	if request.Acknowledge && request.PaneID != "" {
 		d.handleAcknowledge(request.RequestID, request.PaneID)
 	}
 	return d.panes.read(ctx, request)

@@ -63,7 +63,7 @@ app and a connected relay.
 
 | Agents |
 | --- |
-| <img src="../images/home.jpeg" alt="Atlas and Birch workspaces, including the fix/one worktree, below a pinned test approval and rollout question" width="392"> |
+| <img src="../images/home.jpeg" alt="Pinned test approval and rollout question above the Project workspace, with a check for Fixture checks and an open ring for idle Release notes" width="392"> |
 
 | Plan Questions | In-app Notification Settings |
 | --- | --- |
@@ -196,23 +196,42 @@ this link from another app takes you to that agent.
 
 ## Workspace navigation and inspection
 
-The home screen keeps agents that need input visible at the top. By default,
-each workspace below them appears once — mixed — with a dot for its most
-notable session: done, then working, then idle. The **Home Workspaces**
-setting can separate them into Done, Working, and Idle sections instead; both
-layouts retain the workspace and tab hierarchy. On a phone, tap the
-magnifying-glass button to search projects, workspaces, paths, tabs, sessions,
-agents, hosts, and relays.
-At 900 CSS pixels and wider, an agent rail keeps those workspace groups beside
-the open terminal.
+The home screen pins agents that need input or inspection at the top. Each
+row names its pane (or uses the project name if the pane is unnamed) and
+shows its state in words as well as a shape:
 
-A workspace card names its computer on the first line, beside the workspace
-label, and gives the second line to the workspace directory. Agent rows inside
-the card, including those nested in a linked worktree, show their own working
-directory rather than repeating that computer name. A directory inside the
-computer's home directory is written `~/code/app`, matching how the relay's
-directory browser labels it; every other directory is written in full. An
-agent that reports no directory keeps its name on that line.
+| Mark | What it means |
+| --- | --- |
+| Solid square | **Needs input** — check the question or approval. |
+| Upright triangle | **Needs inspection** — open the agent to see what is blocking it. |
+| Right-facing chevron | **Working** — the agent is still running. |
+| Check | **New result** — the relay has a result waiting to be opened; the check doesn't mean the task succeeded. |
+| Open ring | **Idle** — the agent is not working and has no new result. |
+| Dash | **Status unknown** — the relay hasn't reported a recognised state. |
+
+The row shows the waiting question or command when available. **Last active**
+is the age of the last activity the relay reported, not the time spent working
+or waiting. The row does not show a current task or any part of a new answer.
+
+**Mixed**, the default Home Workspaces layout, shows each workspace once and
+marks its most notable session: new result, then working, then idle. **By State**
+keeps the existing Done, Working, and Idle sections. Both layouts keep the
+workspace and tab hierarchy. A workspace's **new result** count includes its
+linked worktrees, even while collapsed, and follows the server filter. A
+controller opening a result clears the mark for everyone connected to that
+relay. With an updated relay, readers can open Conversation or Terminal without
+clearing the mark for anyone. If you update only the phone app, an older relay
+can still clear the mark when a reader views the pane.
+
+The workspace card keeps its directory (shown as `~/…` if it's inside the
+computer's home directory). To find an agent's exact working directory, open
+**Search all agents** and type the pane name you see on Home. The full path
+appears in the search result without opening the agent or needing workspace
+inspection. At 900 CSS pixels and wider, the rail keeps workspace groups and
+status marks beside the terminal.
+
+The new labels, shapes and counts work with both Herdr TUI and herdr-core
+relays without a relay update.
 
 When the relay advertises tab ordering, press and hold an agent card until its
 tab lifts, then drag to reorder the tab in Herdr; a plain tap still opens the

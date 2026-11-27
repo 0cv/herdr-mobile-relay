@@ -9,6 +9,7 @@
   import LockScreen from '$components/LockScreen.svelte';
   import ManageDialog from '$components/ManageDialog.svelte';
   import SettingsView from '$components/SettingsView.svelte';
+  import StatusMark from '$components/StatusMark.svelte';
   import TerminalView from '$components/TerminalView.svelte';
   import UpdateProgressDialog from '$components/UpdateProgressDialog.svelte';
   import WorkspaceInspector from '$components/WorkspaceInspector.svelte';
@@ -22,7 +23,7 @@
   import {
     agentContextLabel,
     agentStatusGroup,
-    agentStatusTone,
+    agentStatusMarks,
     displayName,
     hostLabel,
   } from '$lib/agents';
@@ -43,6 +44,7 @@
   } from '$lib/router';
   import { initializeDeviceSecurity, securityState } from '$lib/security';
   import { relayStore } from '$lib/store';
+  import { connectionMarks, relayStatusMark } from '$lib/status-marks';
   import {
     AppReloadHeld,
     appUpdateStatus,
@@ -148,28 +150,14 @@
   });
   const headerMeta = $derived(activeAgent ? terminalSecondaryLabel(activeAgent) : '');
   const headerIndicator = $derived.by(() => {
-    if (!activeAgent) return {
-      tone: inventoryUnavailable || inventoryLoading ? 'warning' : connected ? 'success' : connecting ? 'warning' : 'danger',
-      label: `${connected}/${$relays.length} relays connected${inventoryUnavailable ? `; ${inventoryUnavailable} agent inventory unavailable` : inventoryLoading ? `; ${inventoryLoading} agent inventory loading` : ''}`,
-    };
-    if (activeConnection?.status !== 'connected') return {
-      tone: 'warning' as const,
-      label: 'Relay reconnecting',
-    };
-    if (activeConnection.inventory.state !== 'ready') return {
-      tone: 'warning' as const,
-      label: activeConnection.inventory.state === 'error' ? 'Agent inventory unavailable' : 'Agent inventory loading',
-    };
-    const group = agentStatusGroup(activeAgent);
+    if (activeAgent) {
+      return activeConnection?.status === 'connected' && activeConnection.inventory.state === 'ready'
+        ? agentStatusMarks[agentStatusGroup(activeAgent)]
+        : relayStatusMark(activeConnection);
+    }
     return {
-      tone: agentStatusTone(activeAgent),
-      label: `Agent ${group === 'ready'
-        ? 'idle'
-        : group === 'attention'
-          ? 'needs inspection'
-          : group === 'other'
-            ? activeAgent.status || 'unknown'
-            : group}`,
+      ...connectionMarks[inventoryUnavailable ? 'degraded' : inventoryLoading || connecting ? 'loading' : connected ? 'connected' : 'disconnected'],
+      label: `${connected}/${$relays.length} relays connected${inventoryUnavailable ? `; ${inventoryUnavailable} agent inventory unavailable` : inventoryLoading ? `; ${inventoryLoading} agent inventory loading` : connecting ? '; connecting' : ''}`,
     };
   });
 
@@ -306,9 +294,7 @@
   }
 
   function openAgent(agent: Agent) {
-    if (relayStore.deviceCredential(agent.relay_id)?.role !== 'reader') {
-      void relayStore.acknowledgePane(agent);
-    }
+    void relayStore.acknowledgePane(agent);
     navigate(agentOpeningRoute(agent));
   }
 
@@ -371,11 +357,7 @@
         </svg>
       </Button>
     {/if}
-    <span
-      class={`status-dot status-${headerIndicator.tone}`}
-      role="img"
-      aria-label={headerIndicator.label}
-    ></span>
+    <StatusMark {...headerIndicator} />
     <div class="header-title">
       <h1>{headerTitle}</h1>
       {#if headerMeta}<span>{headerMeta}</span>{/if}

@@ -5,26 +5,27 @@
   import AgentLogo, { agentDisplayName, hasAgentLogo } from '$components/AgentLogo.svelte';
   import PairDeferredRelay from '$components/PairDeferredRelay.svelte';
   import ScanSetupCode from '$components/ScanSetupCode.svelte';
+  import StatusMark from '$components/StatusMark.svelte';
   import Button from '$components/ui/Button.svelte';
   import {
     agentLastActiveAt,
     agentStatusGroup,
-    agentStatusTone,
+    agentStatusMarks,
     approvalButtonVariant,
     approvalOptions,
-    approvalPromptPreview,
-    displayName,
+    homeAgentLabel,
     hostLabel,
     questionInteraction,
     sortedAgents,
     tabName,
+    waitingPreview,
   } from '$lib/agents';
   import { hiddenServers, homeLayout, setServerHidden } from '$lib/preferences';
   import { answerFailureToast, returnedInteraction } from '$lib/questions';
   import type { CommandError } from '$lib/command-error';
   import { relayStore } from '$lib/store';
   import type { Agent, QuestionInteraction, RelayConfig, RelayConnectionView, RelayWorkspace } from '$lib/types';
-  import { homeRelativePath, informativePath, workspaceGroupTrees, workspaceGroups, workspaceRecordsFor, workspaceProvenance, workspaceStateTone, type WorkspaceGroup, type WorkspaceGroupTree, type WorkspaceTab } from '$lib/workspaces';
+  import { homeRelativePath, informativePath, workspaceGroupTrees, workspaceGroups, workspaceRecordsFor, workspaceProvenance, workspaceStatusGroup, type WorkspaceGroup, type WorkspaceGroupTree, type WorkspaceTab } from '$lib/workspaces';
 
   let {
     agents: allAgents,
@@ -84,11 +85,15 @@
   }));
   const deferredRelays = $derived(relays.filter((relay) => connections.get(relay.id)?.pairingDeferred));
 
-  const statusDefinitions = [
-    ['attention', 'Needs inspection', 'warning'],
-    ['blocked', 'Needs input', 'danger'],
-  ] as const;
-  let relativeNow = $state(Date.now());
+  const activityId = $props.id();
+  const pinnedGroups = ['attention', 'blocked'] as const;
+  const workspaceStatusLabels = {
+    done: undefined,
+    working: 'Has a working session',
+    ready: 'Has an idle session',
+    other: 'No session state reported',
+  };
+  let ageTick = $state(0);
   let movingTab = $state('');
   const tabDrag = createReorderDrag();
   // Optimistic arrangement applied between releasing a drag and the relay
@@ -332,23 +337,22 @@
   function agentMeta(agent: Agent, compact: boolean): string {
     const tab = compact ? '' : tabName(agent);
     const labels = [
-      tab && tab !== displayName(agent) ? tab : '',
+      tab && tab !== homeAgentLabel(agent) ? tab : '',
       agent.session || '',
     ].filter(Boolean);
     if (agent.agent && !hasAgentLogo(agent.agent)) labels.push(agentDisplayName(agent.agent));
     return labels.join(' · ');
   }
 
-  // Home-relative where the relay reported its home directory, absolute
-  // otherwise: a row says which directory the agent runs in, not just its
-  // last segment.
   function relayPath(relayId: string, path: string): string {
     return homeRelativePath(path, connections.get(relayId)?.home || '');
   }
 
   function relativeTimestamp(timestamp: number): string {
-    if (!timestamp) return '';
-    const seconds = Math.max(0, Math.floor((relativeNow - timestamp) / 1_000));
+    void ageTick;
+    const now = Date.now();
+    if (!timestamp || timestamp > now || !Number.isFinite(new Date(timestamp).getTime())) return '';
+    const seconds = Math.floor((now - timestamp) / 1_000);
     if (seconds < 60) return 'now';
     const minutes = Math.floor(seconds / 60);
     if (minutes < 60) return `${minutes}m`;
@@ -361,12 +365,12 @@
     return `${Math.floor(months / 12)}y`;
   }
 
-  function relativeAge(agent: Agent): string {
-    return relativeTimestamp(agentLastActiveAt(agent));
+  function newResultCount(count: number): string {
+    return count ? `${count} new result${count === 1 ? '' : 's'}` : '';
   }
 
   onMount(() => {
-    const timer = setInterval(() => { relativeNow = Date.now(); }, 60_000);
+    const timer = setInterval(() => { ageTick += 1; }, 60_000);
     return () => clearInterval(timer);
   });
 </script>
@@ -389,17 +393,19 @@
       {@const interaction = questionInteraction(agent)}
       {@const options = approvalOptions(agent)}
       {@const group = agentStatusGroup(agent)}
-      {@const tone = agentStatusTone(agent)}
+      {@const mark = agentStatusMarks[group]}
       {@const blocked = group === 'blocked'}
-      {@const needsInspection = group === 'attention'}
+      {@const label = homeAgentLabel(agent)}
       {@const meta = agentMeta(agent, compact)}
-      {@const age = relativeAge(agent)}
-      {@const agentPath = compact ? relayPath(agent.relay_id, String(agent.cwd || '')) : ''}
+      {@const age = relativeTimestamp(agentLastActiveAt(agent))}
+      {@const preview = blocked || group === 'attention' ? waitingPreview(agent, interaction) : ''}
+      {@const description = `${activityId}-${encodeURIComponent(agent.pane_id)}`}
       {@const inventoryReady = !connections.has(agent.relay_id) || connections.get(agent.relay_id)?.inventory.state === 'ready'}
       <article class:blocked class:compact-agent-card={compact} class:stale={!inventoryReady} class="agent-card">
         <button
           class="agent-open"
-          aria-label={`Open ${displayName(agent)} on ${hostLabel(agent)}`}
+          aria-label={`Open ${label} on ${hostLabel(agent)}`}
+          aria-describedby={description}
           disabled={!inventoryReady}
           title={!inventoryReady
             ? 'This cached agent is unavailable until Herdr inventory recovers.'
@@ -411,29 +417,21 @@
         >
           <span class="agent-identity">
             <AgentLogo agent={agent.agent} />
-            <span class={`status-dot status-${tone}`} aria-hidden="true"></span>
+            <StatusMark {...mark} label={undefined} />
           </span>
           <span class="agent-copy">
-            <span class="agent-title-row">
-              {#if agentPath}
-                <!-- Inside a workspace card the computer is named once, on the
-                     card, so the row spends its width on the directory. -->
-                <span class="agent-path">{@render folderIcon()}<span>{agentPath}</span></span>
-              {:else}
-                <span class="agent-project">{displayName(agent)}{#if !compact} <span class="host-badge">@{hostLabel(agent)}</span>{/if}</span>
-              {/if}
-              {#if compact && age}
-                <time class="agent-age" datetime={new Date(agentLastActiveAt(agent)).toISOString()} title={new Date(agentLastActiveAt(agent)).toLocaleString()}>{age}</time>
+            <span class="agent-project">{label}{#if !compact} <span class="host-badge">@{hostLabel(agent)}</span>{/if}</span>
+            {#if meta}<span class="agent-meta">{meta}</span>{/if}
+            <span id={description} class="agent-activity">
+              <span>{mark.label + (age ? ` · last active ${age === 'now' ? 'just now' : `${age} ago`}` : '')}</span>
+              {#if preview}
+                <span class="prompt-preview" class:prompt-full={interaction && quickQuestion(interaction)}>{preview}</span>
               {/if}
             </span>
-            {#if meta}<span class="agent-meta">{meta}</span>{/if}
-            {#if blocked || needsInspection}
-              <span class="prompt-preview" class:prompt-full={interaction && quickQuestion(interaction)}>{interaction?.question || approvalPromptPreview(agent)}</span>
-            {/if}
           </span>
         </button>
         {#if blocked && !responding.has(agent.pane_id)}
-          <div class="agent-actions" aria-label={`Actions for ${displayName(agent)}`}>
+          <div class="agent-actions" aria-label={`Actions for ${label}`}>
             {#if interaction && quickQuestion(interaction)}
               {#each interaction.options as option, position (`${interaction.id}:${option.index ?? position}`)}
                 <Button
@@ -500,9 +498,11 @@
     {#each trees as tree (tree.workspace.key)}
       {@const workspace = tree.workspace}
       {@const summary = tree.aggregate}
+      {@const age = relativeTimestamp(summary.lastActiveAt)}
       {@const working = kind === 'working'}
       {@const done = kind === 'done'}
-      {@const stateTone = kind === 'mixed' ? workspaceStateTone(summary) : ''}
+      {@const state = workspaceStatusGroup(summary)}
+      {@const results = newResultCount(summary.doneCount)}
       {@const provenance = workspaceProvenance(workspace)}
       {@const disclosureKey = `${working ? 'working' : done ? 'done' : 'workspace'}:${workspace.key}`}
       <!-- Mixed mirrors the state sections' opening rules: workspaces with a
@@ -518,17 +518,8 @@
         ontoggle={(event) => rememberWorkspaceDisclosure(disclosureKey, event)}
       >
         <summary>
-          {#if stateTone}
-            <span
-              class={`status-dot workspace-state-dot status-${stateTone}`}
-              class:hollow={stateTone === 'muted'}
-              role="img"
-              aria-label={stateTone === 'success'
-                ? 'Has a done session'
-                : stateTone === 'warning'
-                  ? 'Has a working session'
-                  : stateTone === 'ready' ? 'All sessions idle and ready for input' : 'No session state reported'}
-            ></span>
+          {#if kind === 'mixed'}
+            <StatusMark {...agentStatusMarks[state]} class="workspace-state-dot" label={workspaceStatusLabels[state]} />
           {/if}
           <span class="workspace-card-copy">
             <span class="workspace-card-title">
@@ -537,21 +528,19 @@
             </span>
             {#if workspace.cwd}{@render pathRow(relayPath(workspace.relayId, workspace.cwd))}{/if}
           </span>
-          <span
-            class="workspace-counts"
-            aria-label={`${summary.tabCount} tabs, ${summary.paneCount} panes, and ${summary.agents.length} agents`}
-          >
+          <span class="workspace-counts">
             {#if working}<em class="workspace-working-count">{summary.workingCount} working</em>{/if}
-            {#if done}<em class="workspace-done-count">{summary.doneCount} done</em>{/if}
+            {#if results}<em class="workspace-done-count">{results}</em>{/if}
             <span>{summary.tabCount} {summary.tabCount === 1 ? 'tab' : 'tabs'}</span>
+            <span class="sr-only">{summary.paneCount} {summary.paneCount === 1 ? 'pane' : 'panes'}</span>
             {#if tree.children.length}<span>{tree.children.length} {tree.children.length === 1 ? 'worktree' : 'worktrees'}</span>{/if}
             {#if !working && !done}<span>{summary.agents.length} {summary.agents.length === 1 ? 'agent' : 'agents'}</span>{/if}
-            {#if summary.lastActiveAt}
+            {#if age}
               <time
                 datetime={new Date(summary.lastActiveAt).toISOString()}
                 title={`Last agent activity: ${new Date(summary.lastActiveAt).toLocaleString()}`}
                 aria-label={`Last agent activity ${new Date(summary.lastActiveAt).toLocaleString()}`}
-              >{relativeTimestamp(summary.lastActiveAt)}</time>
+              >{age}</time>
             {/if}
           </span>
         </summary>
@@ -635,12 +624,13 @@
     <div class="empty-state" role="status">Waiting for relays…</div>
   {/if}
 
-  {#each statusDefinitions as [group, title, tone] (group)}
+  {#each pinnedGroups as group (group)}
+    {@const mark = agentStatusMarks[group]}
     {@const visible = sortedAgents(agents.filter((agent) => agentStatusGroup(agent) === group))}
     {#if visible.length}
       <section class="agent-section" aria-labelledby={`section-${group}`}>
         <h2 id={`section-${group}`} class="section-heading">
-          <span class={`status-dot status-${tone}`}></span>{title}
+          <StatusMark {...mark} label={undefined} />{mark.label}
           <span class="section-count" aria-hidden="true">{visible.length}</span>
         </h2>
         {@render agentGrid(visible, false)}
@@ -651,8 +641,8 @@
   {#if doneWorkspaces.length}
     <section class="agent-section done-section" aria-labelledby="section-done">
       <h2 id="section-done" class="section-heading">
-        <span class="status-dot status-success"></span>Done
-        <span class="section-count" aria-hidden="true">{doneAgents.length}</span>
+        <StatusMark {...agentStatusMarks.done} label={undefined} />Done
+        <span class="section-count">{newResultCount(doneAgents.length)}</span>
       </h2>
       {@render workspaceGrid(doneWorkspaces, true, 'done')}
     </section>
@@ -661,7 +651,7 @@
   {#if workingWorkspaces.length}
     <section class="agent-section working-section" aria-labelledby="section-working">
       <h2 id="section-working" class="section-heading">
-        <span class="status-dot status-warning"></span>Working
+        <StatusMark {...agentStatusMarks.working} label={undefined} />Working
         <span class="section-count" aria-hidden="true">{workingAgents.length}</span>
       </h2>
       {@render workspaceGrid(workingWorkspaces, true, 'working')}
@@ -671,7 +661,7 @@
   {#if idleWorkspaces.length}
     <section class="agent-section workspace-section" aria-labelledby="workspace-section-title">
       <h2 id="workspace-section-title" class="section-heading">
-        <span class="status-dot status-ready"></span>Idle
+        <StatusMark {...agentStatusMarks.ready} label={undefined} />Idle
         <span class="section-count" aria-hidden="true">{idleWorkspaces.length}</span>
       </h2>
       {@render workspaceGrid(idleWorkspaces, idleWorkspaces.length === 1, 'idle')}
@@ -679,7 +669,6 @@
   {/if}
 
   {#if mixedWorkspaces.length}
-    <!-- No visible heading: the per-card state dots already tell the story. -->
     <section class="agent-section workspace-section" aria-label="Workspaces">
       {@render workspaceGrid(mixedWorkspaces, mixedWorkspaces.length === 1, 'mixed')}
     </section>

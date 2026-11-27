@@ -87,18 +87,26 @@ const scenes = {
     for (const [name, prompt] of [['Patch review', 'make test'], ['Release plan', rolloutQuestion]]) {
       const card = button(waiting, `Open ${name} on Atlas`);
       await expect(card).toBeEnabled();
+      await expect(card).toHaveAccessibleDescription(/^Needs input\b/);
       await visible(text(card, prompt));
     }
     const workspaces = region(agents, 'Workspaces');
     const summary = (name) => workspaces.locator('.workspace-card > summary').filter({ has: text(page, name) });
     const worktree = region(workspaces, 'fix/one worktree');
-    await expect(summary('Search')).toBeVisible();
-    if (await button(agents, 'Open Search polish on Atlas').isVisible()) await summary('Search').click();
+    for (const [workspace, label] of [['Search', 'Open Search polish on Atlas'], ['Docs', 'Open Docs preview on Birch']]) {
+      if (await button(agents, label).isVisible()) await summary(workspace).click();
+    }
     if (!await worktree.isVisible()) await summary('Project').click();
     for (const name of ['Project', 'Search', 'Docs', 'Examples']) await visible(summary(name));
     await visible(text(worktree, 'fix/one'));
-    await visible(button(worktree, 'Open Fixture checks on Atlas'));
-    await visible(button(agents, 'Open Docs preview on Birch'));
+    const result = button(worktree, 'Open Fixture checks on Atlas');
+    const idle = button(workspaces, 'Open Release notes on Atlas');
+    await visible(result);
+    await visible(idle);
+    await visible(result.locator('.status-check'));
+    await visible(idle.locator('.status-ring'));
+    await visible(text(summary('Project'), '1 new result'));
+    await visible(text(result, 'New result · last active 32m ago'));
     for (const choice of ['Allow once', 'Decline', 'Preview first', 'All at once', 'More…']) {
       await visible(button(waiting, choice));
     }

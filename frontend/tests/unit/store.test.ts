@@ -164,6 +164,30 @@ describe('relay command store', () => {
     }
   });
 
+  it.each(['reader', 'controller'] as const)('only acknowledges a done pane as a controller (%s)', async (role) => {
+    const socket = connectRelay({ capabilities: [] });
+    socket.message({ type: 'agents', agents: [{ ...exactAgentFields(), pane_id: 'w1:p1', agent: 'codex', status: 'succeeded' }] });
+    const row = get(relayStore.agents)[0];
+    const credential = vi.spyOn(relayStore, 'deviceCredential').mockReturnValue({ role } as never);
+    const acknowledgement = relayStore.acknowledgePane(row);
+    expect(credential).toHaveBeenCalledWith(row.relay_id);
+    if (role === 'reader') {
+      await acknowledgement;
+      expect(socket.messages().filter(({ type }) => type === 'acknowledge_pane')).toHaveLength(0);
+      expect(get(relayStore.agents)[0].status).toBe('succeeded');
+      return;
+    }
+
+    expect(get(relayStore.agents)[0].status).toBe('succeeded');
+    const sent = socket.messages().filter(({ type }) => type === 'acknowledge_pane');
+    expect(sent).toMatchObject([{ pane_id: row.raw_pane_id, target: targetRefForAgent(row) }]);
+    socket.message({ type: 'command_result', request_id: sent[0].request_id, ok: true, phase: 'completed' });
+    await acknowledgement;
+    expect(get(relayStore.agents)[0].status).toBe('succeeded');
+    socket.message({ type: 'agent_update', ...exactAgentFields(), pane_id: row.raw_pane_id, status: 'idle' });
+    expect(get(relayStore.agents)[0].status).toBe('idle');
+  });
+
   it('retains authoritative unknown-kind agents without profiles, sessions or workspace records', () => {
     const socket = connectRelay({ capabilities: [], agent_profiles: [] });
     socket.message({ type: 'agents', agents: [{ ...exactAgentFields(), pane_id: 'w1:p1', terminal_id: 'terminal', workspace_id: 'workspace', tab_id: 'tab', name: 'Named agent', agent: '', status: 'unknown', cwd: '/home/example/Development', conversation_history_available: false }] });

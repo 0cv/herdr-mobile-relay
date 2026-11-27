@@ -2217,10 +2217,7 @@ class RelayStore {
   }
 
   async acknowledgePane(agent: Agent): Promise<void> {
-    if (agentStatusGroup(agent) === 'done') {
-      this.agentsValue = this.agentsValue.map((item) => item.pane_id === agent.pane_id ? { ...item, status: 'idle' } : item);
-      this.publishAgents('pane acknowledgement');
-    }
+    if (this.deviceCredential(agent.relay_id)?.role === 'reader') return;
     await this.sendToAgent(agent, { type: 'acknowledge_pane' }).catch((error) => this.showToast(error.message, true));
   }
 

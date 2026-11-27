@@ -322,6 +322,33 @@ describe('demo responder', () => {
     }]);
   });
 
+  it('acknowledges only the selected done pane in this demo visit', () => {
+    const [atlas] = createDemoScene();
+    const done = atlas.agents.find((agent) => agent.status === 'done')!;
+    const relay = createDemoResponder(atlas.id);
+    const pane = paneCommand(atlas.id, done);
+    expect(relay.respond({ ...pane, type: 'acknowledge_pane' })).toMatchObject([
+      { type: 'command_result', ok: true },
+      { type: 'agent_update', pane_id: done.pane_id, status: 'idle', pane_revision: done.pane_revision + 1 },
+    ]);
+    expect(relay.respond({ type: 'refresh_agents' })[1]).toMatchObject({
+      agents: atlas.agents.map((agent) => agent === done
+        ? { ...agent, status: 'idle', pane_revision: agent.pane_revision + 1 }
+        : agent),
+    });
+    expect(createDemoResponder(atlas.id).respond({ type: 'refresh_agents' })[1])
+      .toMatchObject({ agents: atlas.agents });
+  });
+
+  it('refuses reader acknowledgement without changing the local inventory', () => {
+    const [, birch] = createDemoScene();
+    const relay = createDemoResponder(birch.id);
+    const pane = paneCommand(birch.id, birch.agents[0]);
+    expect(relay.respond({ ...pane, type: 'acknowledge_pane' }))
+      .toMatchObject([{ type: 'command_result', ok: false, phase: 'not_started' }]);
+    expect(relay.respond({ type: 'refresh_agents' })[1]).toMatchObject({ agents: birch.agents });
+  });
+
   it('appends sanitized prompts and records only the notes conversation', () => {
     const [atlas] = createDemoScene();
     const relay = createDemoResponder(atlas.id);

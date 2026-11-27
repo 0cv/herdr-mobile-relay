@@ -1,8 +1,9 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import AppDialog from '$components/ui/AppDialog.svelte';
+  import StatusMark from '$components/StatusMark.svelte';
   import Button from '$components/ui/Button.svelte';
-  import { activityMatchesSearch, activityTone } from '$lib/activity';
+  import { activityMatchesSearch, activityMark } from '$lib/activity';
   import { dailyActivitySummary, formatWorkingDuration } from '$lib/daily-activity';
   import { navigate } from '$lib/router';
   import { relayStore } from '$lib/store';
@@ -91,12 +92,12 @@
     {#each visible as activity (activity.activity_key)}
       <button type="button" class="agent-card activity-item" onclick={() => open(activity)}>
         <span class="activity-title">
-          <span class={`status-dot status-${activityTone(activity.status)}`}></span>
+          <StatusMark {...activityMark(activity.status)} />
           <strong class="agent-project">{activity.summary || activity.kind || 'Activity'}</strong>
           <time datetime={new Date(Number(activity.timestamp)).toISOString()}>{new Date(Number(activity.timestamp)).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}</time>
           <span class="activity-chevron" aria-hidden="true">›</span>
         </span>
-        <span class="activity-meta">{[activity.relay_label, activity.project, activity.session, activity.agent, activity.status].filter(Boolean).join(' · ')}</span>
+        <span class="activity-meta">{[activity.relay_label, activity.project, activity.session, activity.agent, activity.status?.replaceAll('_', ' ') || 'Status unknown'].filter(Boolean).join(' · ')}</span>
       </button>
     {/each}
   </div>

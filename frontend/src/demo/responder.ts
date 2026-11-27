@@ -1,3 +1,4 @@
+import { agentStatusGroup } from '../lib/agents';
 import { normalizeFrontendTargetRef } from '../lib/resource-id';
 import { stripAnsi } from '../lib/terminal';
 import { sampleChecks } from './checks';
@@ -248,7 +249,12 @@ export function createDemoResponder(computerId: string, epoch: number) {
           const change = sampleGitDiff(message.path);
           return change ? [complete(change)] : fail('That sample change is unavailable.');
         }
-        case 'acknowledge_pane': return [complete()];
+        case 'acknowledge_pane': {
+          if (agentStatusGroup(agent) !== 'done') return [complete()];
+          agent.status = 'idle';
+          agent.pane_revision += 1;
+          return [complete(), agentUpdate(agent)];
+        }
         case 'submit_prompt': {
           const text = inputText(message.text);
           if (!text.trim() || agent.status === 'blocked') return fail('Use the waiting controls or enter a sample prompt.');

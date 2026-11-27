@@ -253,7 +253,7 @@ test('replaces a half-open socket immediately when a sleeping phone resumes', as
   await expect(page.getByRole('main', { name: 'Terminal for Resume app' })).toBeVisible();
   await expect(page.getByRole('main', { name: 'Agent unavailable' })).toBeHidden();
   await expect(page.getByRole('log')).toContainText('cached terminal output');
-  await expect(page.getByRole('img', { name: 'Agent working' })).toBeVisible();
+  await expect(page.getByRole('img', { name: 'Working' })).toBeVisible();
 
   // A half-open socket answers nothing, including refocus reads.
   await setAutoCommands(page, false);
@@ -275,7 +275,7 @@ test('replaces a half-open socket immediately when a sleeping phone resumes', as
     type: 'agents',
     agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Resume app', agent: 'codex' }],
   });
-  await expect(page.getByRole('img', { name: 'Agent working' })).toBeVisible();
+  await expect(page.getByRole('img', { name: 'Working' })).toBeVisible();
   await expect(page.getByRole('main', { name: 'Terminal for Resume app' })).toBeVisible();
 });
 

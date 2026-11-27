@@ -1,5 +1,6 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import { readFile, writeFile } from 'node:fs/promises';
+import { control, readerResultPane, withReader } from './attention-relay-fixture';
 
 test.beforeEach(async ({ page }) => {
   const path = process.env.HERDR_ATTENTION_CREDENTIALS;
@@ -257,7 +258,7 @@ test('drives captured attention panes through the real relay', async ({ page }) 
   expect(await approvalsSent(['pane', 'send-keys', 'omp-plan-approval', 'Down', 'Down', 'Down', 'Enter'])).toBe(1);
 });
 
-test('browses a full conversation through the real relay', async ({ page }) => {
+test('reader Conversation and Terminal leave a new result for other devices', async ({ page, browser }, testInfo) => {
   const wsURL = process.env.HERDR_ATTENTION_WS_URL;
   if (!wsURL) throw new Error('HERDR_ATTENTION_WS_URL is not configured');
   await page.addInitScript(({ relayURL }) => {
@@ -271,10 +272,62 @@ test('browses a full conversation through the real relay', async ({ page }) => {
   }, { relayURL: wsURL });
   await page.goto('/');
 
-  await page.getByRole('region', { name: 'conversation-history tab', exact: true }).getByRole('button', { name: 'Open conversation on Captured relay' }).click();
-  await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
-  await expect(page.getByText('history question')).toBeVisible();
-  await expect(page.getByText('history answer')).toBeVisible();
-  await page.getByRole('button', { name: 'Full history' }).click();
-  await expect(page.getByRole('button', { name: 'Full history' })).toHaveAttribute('aria-pressed', 'true');
+  const pane = readerResultPane(testInfo.project.name, testInfo.repeatEachIndex, testInfo.retry);
+  const result = (device: Page) => device.getByRole('button', { name: `Open ${pane} on Captured relay`, exact: true });
+  const summary = (device: Page) => device.locator('.workspace-card > summary')
+    .filter({ has: device.getByText(`Result fixture ${pane}`, { exact: true }) });
+  await expect(result(page)).toHaveAccessibleDescription(/^New result\b/);
+  await expect(summary(page)).toHaveAccessibleName(/1 new result\b/);
+
+  const paneReads = async (source: string, lines: number) => {
+    const path = process.env.HERDR_ATTENTION_INPUT_OPERATIONS!;
+    try {
+      return (await readFile(path, 'utf8')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line))
+        .filter(op => op.method === 'pane.read' && op.params.pane_id === pane && op.params.source === source && op.params.lines === lines).length;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0;
+      throw error;
+    }
+  };
+  const expectFreshResult = async () => {
+    // Read a fresh relay snapshot rather than waiting for, or assuming the absence of, an update.
+    await page.goto('/');
+    await expect(result(page)).toHaveAccessibleDescription(/^New result\b/);
+    await expect(summary(page)).toHaveAccessibleName(/1 new result\b/);
+  };
+
+  await withReader(page, browser, async (reader) => {
+    const back = () => reader.getByRole('button', { name: 'Back', exact: true }).click();
+    const before = await paneReads('recent_unwrapped', 30);
+    await result(reader).click();
+    await expect(reader.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
+    await expect(reader.getByText('history question')).toBeVisible();
+    await expect(reader.getByText('history answer')).toBeVisible();
+    await reader.getByRole('button', { name: 'Full history' }).click();
+    await expect(reader.getByRole('button', { name: 'Full history' })).toHaveAttribute('aria-pressed', 'true');
+    await expect.poll(() => paneReads('recent_unwrapped', 30)).toBeGreaterThan(before);
+    await expectFreshResult();
+
+    await back();
+    await reader.reload();
+    await result(reader).click();
+    const beforeWatch = await paneReads('visible', 500);
+    await reader.getByRole('button', { name: 'Terminal view', exact: true }).click();
+    const output = reader.getByRole('log', { name: 'Agent terminal output' });
+    await expect(output).toContainText('Fixture result');
+    await expect.poll(() => paneReads('visible', 500)).toBeGreaterThan(beforeWatch);
+    await control({ cmd: 'set_content', pane, content: 'Updated fixture result' });
+    await expect(output).toContainText('Updated fixture result');
+    await back();
+    await expect(result(reader)).toHaveAccessibleDescription(/^New result\b/);
+    await expectFreshResult();
+
+    await result(page).click();
+    await expect(page.getByRole('banner').getByRole('img', { name: 'Idle', exact: true })).toBeVisible();
+    await reader.reload();
+    await expect(summary(reader)).toBeVisible();
+    if (!await result(reader).isVisible()) await summary(reader).click();
+    await expect(result(reader)).toHaveAccessibleDescription(/^Idle\b/);
+    await expect(summary(reader).locator('.workspace-done-count')).toHaveCount(0);
+  });
 });

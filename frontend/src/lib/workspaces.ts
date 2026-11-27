@@ -3,6 +3,7 @@ import {
   agentActivitySeq,
   agentStatusGroup,
   displayName,
+  homeAgentLabel,
   hostLabel,
   sortedAgents,
   tabName,
@@ -305,16 +306,11 @@ export function workspaceGroupTrees(groups: WorkspaceGroup[]): WorkspaceGroupTre
   });
 }
 
-/**
- * The most notable session state in a mixed workspace card, by the
- * done > working > ready (idle) precedence. `muted` remains for workspaces
- * whose sessions report no known state.
- */
-export function workspaceStateTone(group: WorkspaceGroup): 'success' | 'warning' | 'ready' | 'muted' {
-  if (group.doneCount) return 'success';
-  if (group.workingCount) return 'warning';
+export function workspaceStatusGroup(group: WorkspaceGroup): 'done' | 'working' | 'ready' | 'other' {
+  if (group.doneCount) return 'done';
+  if (group.workingCount) return 'working';
   if (group.readyCount) return 'ready';
-  return 'muted';
+  return 'other';
 }
 
 export function workspaceMetadataSearchText(group: WorkspaceGroup): string {
@@ -344,7 +340,7 @@ export function workspaceSearchText(group: WorkspaceGroup): string {
 
 export function agentSearchText(agent: Agent): string {
   return [
-    displayName(agent),
+    homeAgentLabel(agent),
     String(agent.agent || ''),
     String(agent.project || ''),
     String(agent.cwd || ''),
