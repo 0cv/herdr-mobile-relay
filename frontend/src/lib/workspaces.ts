@@ -5,6 +5,7 @@ import {
   displayName,
   homeAgentLabel,
   hostLabel,
+  sessionName,
   sortedAgents,
   tabName,
 } from './agents';
@@ -344,6 +345,7 @@ export function agentSearchText(agent: Agent): string {
     String(agent.agent || ''),
     String(agent.project || ''),
     String(agent.cwd || ''),
+    sessionName(agent),
     String(agent.session || ''),
     String(agent.tab_label || ''),
     String(agent.workspace_id || ''),

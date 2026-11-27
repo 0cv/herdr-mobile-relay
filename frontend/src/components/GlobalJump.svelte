@@ -3,7 +3,7 @@
   import AgentLogo from '$components/AgentLogo.svelte';
   import StatusMark from '$components/StatusMark.svelte';
   import AppDialog from '$components/ui/AppDialog.svelte';
-  import { agentStatusGroup, agentStatusMarks, homeAgentLabel, hostLabel, tabName } from '$lib/agents';
+  import { agentStatusGroup, agentStatusMarks, homeAgentLabel, hostLabel, sessionName, tabName } from '$lib/agents';
   import type { Agent } from '$lib/types';
   import {
     agentSearchText,
@@ -74,7 +74,7 @@
                   </span>
                   <span>
                     <strong>{homeAgentLabel(agent)}</strong>
-                    <small>{[tabName(agent), agent.session, `@${hostLabel(agent)}`].filter(Boolean).join(' · ')}</small>
+                    <small>{[tabName(agent), sessionName(agent), `@${hostLabel(agent)}`].filter(Boolean).join(' · ')}</small>
                   </span>
                 </button>
                 {#if agent.cwd}<small class="jump-pane-path" id={description}>{agent.cwd}</small>{/if}

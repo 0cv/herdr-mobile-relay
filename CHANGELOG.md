@@ -36,6 +36,7 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Home no longer shows Pi session file paths in agent rows.
 - The terminal key row keeps open key menus usable when the screen gets narrow and Keyboard moves to the edge.
 - With an updated relay, opening Conversation or Terminal as a reader no longer
   clears a new result for other devices. Controllers still clear it by opening it.

@@ -3,7 +3,7 @@
   import AppDialog from '$components/ui/AppDialog.svelte';
   import StatusMark from '$components/StatusMark.svelte';
   import Button from '$components/ui/Button.svelte';
-  import { activityMatchesSearch, activityMark } from '$lib/activity';
+  import { activityMatchesSearch, activityMark, activityMetadata } from '$lib/activity';
   import { dailyActivitySummary, formatWorkingDuration } from '$lib/daily-activity';
   import { navigate } from '$lib/router';
   import { relayStore } from '$lib/store';
@@ -97,7 +97,7 @@
           <time datetime={new Date(Number(activity.timestamp)).toISOString()}>{new Date(Number(activity.timestamp)).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}</time>
           <span class="activity-chevron" aria-hidden="true">›</span>
         </span>
-        <span class="activity-meta">{[activity.relay_label, activity.project, activity.session, activity.agent, activity.status?.replaceAll('_', ' ') || 'Status unknown'].filter(Boolean).join(' · ')}</span>
+        <span class="activity-meta">{activityMetadata(activity)}</span>
       </button>
     {/each}
   </div>

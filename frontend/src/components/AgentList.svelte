@@ -17,6 +17,7 @@
     homeAgentLabel,
     hostLabel,
     questionInteraction,
+    sessionName,
     sortedAgents,
     tabName,
     waitingPreview,
@@ -339,7 +340,7 @@
     const tab = compact ? '' : tabName(agent);
     const labels = [
       tab && tab !== homeAgentLabel(agent) ? tab : '',
-      agent.session || '',
+      sessionName(agent),
     ].filter(Boolean);
     if (agent.agent && !hasAgentLogo(agent.agent)) labels.push(agentDisplayName(agent.agent));
     return labels.join(' · ');
@@ -425,15 +426,15 @@
           onkeydown={reorderWorkspace ? (event) => handleTabOrderKey(event, reorderWorkspace, reorderTabId ?? '') : undefined}
           onclick={() => onopen(agent)}
         >
-          <span class="agent-identity">
-            <AgentLogo agent={agent.agent} />
-            <StatusMark {...mark} label={undefined} />
-          </span>
+          <AgentLogo agent={agent.agent} />
           <span class="agent-copy">
             <span class="agent-project">{label}{#if !compact} <span class="host-badge">@{hostLabel(agent)}</span>{/if}</span>
             {#if meta}<span class="agent-meta">{meta}</span>{/if}
             <span id={description} class="agent-activity">
-              <span>{mark.label + activityAge(agent, group)}</span>
+              <span class="agent-status">
+                <StatusMark {...mark} label={undefined} />
+                <span>{mark.label + activityAge(agent, group)}</span>
+              </span>
               {#if preview}
                 <span class="prompt-preview" class:prompt-full={interaction && quickQuestion(interaction)}>{preview}</span>
               {/if}

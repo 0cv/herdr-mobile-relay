@@ -709,7 +709,13 @@ describe('agent state and sorting', () => {
   it('uses explicit and legacy session titles without exposing identifiers', () => {
     expect(sessionName({ session_name: ' Current title ', session: '/opaque/session.jsonl' })).toBe('Current title');
     expect(sessionName({ session: 'Legacy session title' })).toBe('Legacy session title');
-    expect(sessionName({ session: '/home/user/.omp/session.jsonl' })).toBe('');
+    expect(sessionName({ session: 'CI/CD cleanup' })).toBe('CI/CD cleanup');
+    expect(sessionName({ session: 'Repair truncated events.jsonl' })).toBe('Repair truncated events.jsonl');
+    expect(sessionName({ session: '/review the parser' })).toBe('/review the parser');
+    expect(sessionName({ session: 'sessions/session.jsonl' })).toBe('sessions/session.jsonl');
+    expect(sessionName({ session: '/home/user/.pi/agent/sessions/session.jsonl' })).toBe('');
+    expect(sessionName({ session: '~/sessions/session.jsonl' })).toBe('');
+    expect(sessionName({ session: 'C:\\sessions\\state.db' })).toBe('');
     expect(sessionName({ session: '019ff024-28dd-7000-8fc4-6961c8ca619b' })).toBe('');
     expect(sessionName({ session_name: '', session: 'stale legacy title' })).toBe('');
   });
