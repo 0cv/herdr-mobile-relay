@@ -487,6 +487,10 @@ Conversation and Full history share the Terminal composer: multiline prompts,
 locally shared drafts, slash-command suggestions, photos/files and pasted images.
 Open **Attach** to choose **Attach photos** or **Attach files**.
 Slash suggestions fill the draft without sending it; Ctrl/Meta+Enter sends it.
+Matching commands you've successfully sent recently appear first for that kind
+of agent. Recent-command order is set when you open the list. This device
+remembers up to ten names from the agent's suggestions per kind, without their
+arguments.
 Both views prevent sending until an upload has finished inserting its references,
 and prevent uploads while a prompt is sending. Missing target identity disables
 attachments and sending with an explanation; upload errors remain visible even

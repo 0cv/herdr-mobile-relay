@@ -177,6 +177,79 @@ test('discovers slash commands per terminal and fills them before sending', asyn
   expect((await commands(page)).filter((command) => command.type === 'submit_prompt')).toHaveLength(1);
 });
 
+test('keeps slash suggestions in order until reopened, even after a tab update or a send', async ({ page }) => {
+  await openAgent(page, { pane_id: 'w1:p1', project: 'Codex app', agent: 'codex', status: 'idle' });
+  await setAutoCommands(page, false);
+  const prompt = page.getByRole('combobox', { name: 'Prompt', exact: true });
+  const send = page.getByRole('button', { name: 'Send prompt', exact: true });
+  const stored = () => page.evaluate(() => localStorage.getItem('herdr_recent_slash_commands'));
+  await replyToPaneRead(page);
+  await expect(page.getByRole('log')).toContainText('Ready');
+  await prompt.fill('/review focus on auth');
+  await send.click();
+  const submitted = await lastCommand(page, 'submit_prompt');
+  expect(submitted).toMatchObject({ pane_id: 'w1:p1', text: '/review focus on auth' });
+  expect(submitted.target).not.toHaveProperty('agent_session_id');
+  expect(await stored()).toBeNull();
+
+  await prompt.fill('/');
+  const request = await lastCommand(page, 'list_slash_commands');
+  await reply(page, request, { commands: [
+    { command: '/help', source: 'builtin' },
+    { command: '/model', source: 'builtin' },
+    { command: '/review', source: 'builtin', argument_hint: '[prompt]' },
+  ] });
+  const options = page.getByRole('listbox', { name: 'Slash commands' }).getByRole('option');
+  const model = options.filter({ hasText: '/model' });
+  await expect(options.nth(0)).toContainText('/help');
+
+  await page.evaluate(() => {
+    const key = 'herdr_recent_slash_commands';
+    const newValue = JSON.stringify({ codex: ['/model'] });
+    localStorage.setItem(key, newValue);
+    window.dispatchEvent(new StorageEvent('storage', { key, newValue }));
+  });
+  await prompt.fill('/mo');
+  await expect(options).toHaveCount(1);
+  await prompt.fill('/');
+  await expect(options.nth(0)).toContainText('/help');
+
+  await prompt.press('ArrowDown');
+  await expect(model).toHaveAttribute('aria-selected', 'true');
+  await expect(prompt).toHaveAttribute('aria-activedescendant', 'slash-command-option-1');
+
+  await reply(page, submitted, {}, { phase: 'confirmed' });
+  await expect(page.locator('.toast')).toHaveText('Prompt sent.');
+  expect(JSON.parse((await stored())!)).toEqual({ codex: ['/review', '/model'] });
+  await expect(options.nth(0)).toContainText('/help');
+  await expect(model).toHaveAttribute('aria-selected', 'true');
+  await expect(prompt).toHaveAttribute('aria-activedescendant', 'slash-command-option-1');
+  await prompt.press('Enter');
+  await expect(prompt).toHaveValue('/model');
+
+  await prompt.fill('/');
+  await expect(options.nth(0)).toHaveAttribute('aria-selected', 'true');
+  await expect(prompt).toHaveAttribute('aria-activedescendant', 'slash-command-option-0');
+  await prompt.press('Enter');
+  await expect(prompt).toHaveValue('/review ');
+  await expect(prompt).toBeEditable();
+  expect((await commands(page)).filter((command) => command.type === 'submit_prompt')).toHaveLength(1);
+});
+
+test('does not remember a sent slash token absent from the catalogue', async ({ page }) => {
+  await openAgent(page, { ...composerTarget, project: 'Codex app', agent: 'codex', status: 'idle' });
+  const prompt = page.getByRole('combobox', { name: 'Prompt', exact: true });
+  await replyToPaneRead(page);
+  await expect(page.getByRole('log')).toContainText('Ready');
+  await prompt.fill('/');
+  await expect(page.getByRole('option', { name: /\/help/ })).toBeVisible();
+  await prompt.fill('/Secret123');
+  await page.getByRole('button', { name: 'Send prompt', exact: true }).click();
+  expect(await lastCommand(page, 'submit_prompt')).toMatchObject({ text: '/Secret123' });
+  await expect(page.locator('.toast')).toHaveText('Prompt sent.');
+  expect(await page.evaluate(() => localStorage.getItem('herdr_recent_slash_commands'))).toBeNull();
+});
+
 test('keeps a large slash catalog responsive in the installed PWA', async ({ page }) => {
   await emulateStandalone(page, { navigatorStandalone: true });
   await openAgent(page, { pane_id: 'w1:p1', status: 'working', project: 'Large catalog app', agent: 'codex', cwd: '/home/test/large' });

@@ -90,6 +90,7 @@ import { appScriptPattern, appStylePattern, releaseEntryPath } from './release-r
 // Raised from 171 to 174 KiB by owner authorization for file path links (2,250 B gzip).
 // Raised from 174 KiB + 32 B to 176 KiB for code reading (+1.6 KiB gzip
 // on top of Home status contrast). The scanner stays lazy.
+// Raised from 176 KiB by 255 B for recent slash command suggestions.
 // Raised from 176 KiB for the device key row, scrolling, and keeping Keyboard focused.
 const limit = 177 * 1024 + 11;
 const root = resolve(process.argv[2] || 'dist');
