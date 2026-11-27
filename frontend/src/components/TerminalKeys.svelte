@@ -49,6 +49,7 @@
   });
 
   function alignPopup() {
+    if (!menu) return;
     const bounds = row.getBoundingClientRect();
     const end = Math.min(bounds.right, trigger.getBoundingClientRect().right) - bounds.left;
     row.style.setProperty('--key-end', `${end}px`);
@@ -59,7 +60,7 @@
     const entries = strip.firstElementChild!;
     function measure() {
       scrolling = entries.getBoundingClientRect().width > strip.getBoundingClientRect().width + .1;
-      if (menu) alignPopup();
+      alignPopup();
     }
     measure();
     const observer = new ResizeObserver(measure);
@@ -178,7 +179,7 @@
     } else if (id === 'arrows' || id === 'fkeys') {
       trigger = button;
       menu = menu === id ? '' : id;
-      if (menu) alignPopup();
+      alignPopup();
     } else if (id.includes('+')) {
       void sendKeys([id], keyRowLabel(id));
     } else {
@@ -296,7 +297,7 @@
 <div use:flashTappedKeys>
   <p class="sr-only" role="status" aria-live="polite">{keyControlStatus}</p>
   <div class="term-keys" class:scrolling bind:this={row} aria-busy={keySending}>
-    <div class="key-strip" use:observeStrip onscroll={() => { menu = ''; }}>
+    <div class="key-strip" use:observeStrip onscroll={alignPopup}>
       <div class="key-entries">
         {#each controls as id (id)}
           {#if !id}

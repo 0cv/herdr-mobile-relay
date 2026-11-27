@@ -872,6 +872,41 @@ async function expectWaitingKeyFeedback(page: Page) {
   await expect(down).toBeInViewport({ ratio: 1 });
 }
 
+test('keeps the arrow menu open when Enter scrolls the Large waiting key row', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 844 });
+  const observation = await watchDemo(page);
+  await page.goto(demoOrigin);
+  const settings = await openSettings(page);
+  await settings.getByRole('group', { name: 'Interface Size' }).getByRole('button', { name: 'Large', exact: true }).click();
+  await back(page);
+  await page.getByRole('region', { name: 'Needs input' }).getByRole('button', { name: 'More…', exact: true }).click();
+
+  const column = page.locator('.terminal-view.question-only');
+  const row = column.locator('.term-keys');
+  const strip = row.locator('.key-strip');
+  const arrows = row.getByRole('button', { name: 'Arrow keys', exact: true });
+  const menu = row.getByRole('group', { name: 'Navigation keys' });
+  const down = menu.getByRole('button', { name: 'Down', exact: true });
+  const scrollLeft = () => strip.evaluate((el) => el.scrollLeft);
+  await expect(row).toHaveClass(/scrolling/);
+  await arrows.evaluate((button) => button.scrollIntoView({ block: 'nearest', inline: 'nearest' }));
+  await arrows.click();
+  await expect(down).toBeInViewport({ ratio: 1 });
+
+  const before = await scrollLeft();
+  await row.getByRole('button', { name: 'Enter', exact: true }).click();
+  await expect.poll(scrollLeft).toBeGreaterThan(before);
+  await expectKeyNote(page, 'Use the waiting controls to make a choice.');
+  await expect(arrows).toHaveAttribute('aria-expanded', 'true');
+  await expect(menu).toBeInViewport({ ratio: 1 });
+  await expect(down).toBeInViewport({ ratio: 1 });
+  const terminal = (await column.boundingBox())!;
+  const popup = (await menu.boundingBox())!;
+  expect(popup.x).toBeGreaterThanOrEqual(terminal.x);
+  expect(popup.x + popup.width).toBeLessThanOrEqual(terminal.x + terminal.width);
+  expect(observation.unexpected).toEqual([]);
+});
+
 for (const { agent, other, choice, from, outcome } of [
   { agent: 'Patch review', other: 'Release plan', choice: 'Allow once', from: 'the agent list', outcome: 'Approval: Allow once.' },
   { agent: 'Patch review', other: 'Release plan', choice: 'Decline', from: 'the agent view', outcome: 'Approval: Decline.' },

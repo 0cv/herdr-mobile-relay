@@ -930,16 +930,20 @@ test('keeps both key menus unclipped at opposite ends of a scrolled key row', as
   await expect(functions).toBeInViewport({ ratio: 1 });
   await functions.getByRole('button', { name: 'F1', exact: true }).click({ trial: true });
   await strip.evaluate((el) => { el.scrollLeft = el.scrollWidth; });
-  await expect(functions).toBeHidden();
+  await expect(functions).toBeInViewport({ ratio: 1 });
 
   await arrows.tap();
+  await expect(functions).toBeHidden();
   await expect(navigation).toBeInViewport({ ratio: 1 });
   const arrowBounds = (await arrows.boundingBox())!;
   const menuBounds = (await navigation.boundingBox())!;
   expect(menuBounds.x + menuBounds.width).toBeCloseTo(arrowBounds.x + arrowBounds.width, 0);
   await navigation.getByRole('button', { name: 'Page down' }).click({ trial: true });
   await strip.evaluate((el) => { el.scrollLeft = 0; });
-  await expect(navigation).toBeHidden();
+  const rowBounds = (await row.boundingBox())!;
+  await expect.poll(async () => (await navigation.boundingBox())?.x)
+    .toBeCloseTo(rowBounds.x + rowBounds.width - menuBounds.width, 0);
+  await expect(navigation).toBeInViewport({ ratio: 1 });
   expect((await commands(page)).filter((command) => command.type === 'send_keys')).toEqual([]);
 });
 
