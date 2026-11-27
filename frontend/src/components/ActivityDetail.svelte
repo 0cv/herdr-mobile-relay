@@ -5,7 +5,7 @@
   import Button from '$components/ui/Button.svelte';
   import CopyIcon from '$components/ui/CopyIcon.svelte';
   import { agentOpeningRoute } from '$lib/agent-navigation';
-  import { activityMark } from '$lib/activity';
+  import { activityMark, activityMetadata } from '$lib/activity';
   import { clientPaneId } from '$lib/agents';
   import { navigate, replaceView } from '$lib/router';
   import { relayStore } from '$lib/store';
@@ -18,9 +18,7 @@
   const activity = $derived($activities.find((item) => item.activity_key === key) || null);
   const paneId = $derived(activity ? clientPaneId(activity.relay_id, activity.pane_id || '') : '');
   const agent = $derived(paneId ? $agents.find((item) => item.pane_id === paneId) || null : null);
-  const meta = $derived(activity
-    ? [activity.relay_label, activity.project, activity.session, activity.agent, activity.status?.replaceAll('_', ' ') || 'Status unknown'].filter(Boolean).join(' · ')
-    : '');
+  const meta = $derived(activity ? activityMetadata(activity) : '');
   const when = $derived(activity ? new Date(Number(activity.timestamp)) : null);
   const extractLabel = $derived(activity?.kind === 'finished' ? 'response' : 'excerpt');
   const extractAction = $derived(`Copy ${extractLabel}`);

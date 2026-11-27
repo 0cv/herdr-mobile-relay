@@ -658,7 +658,7 @@
         </button>
         <input bind:this={imageInput} type="file" accept="image/*" multiple hidden onchange={selectFiles} />
         <input bind:this={fileInput} type="file" accept="image/png,image/jpeg,image/gif,image/webp,text/plain,text/markdown,text/csv,application/json,application/pdf,.docx,.xlsx,.pptx,.odt,.ods,.odp" multiple hidden onchange={selectFiles} />
-        <AppDialog id="composer-attach" title="Attach" bind:open={attachOpen} onDismiss={focusAttach}>
+        <AppDialog id="composer-attach" title="Attach" hideTitle bind:open={attachOpen} onDismiss={focusAttach}>
           <div class="chrome-actions">
             <Button variant="secondary" disabled={pickerDisabled} onclick={() => pickFile(imageInput)}>Attach photos</Button>
             <Button variant="secondary" disabled={pickerDisabled} onclick={() => pickFile(fileInput)}>Attach files</Button>

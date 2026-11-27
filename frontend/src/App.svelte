@@ -607,7 +607,7 @@
   {/if}
 </div>
 
-<AppDialog id="app-more" title="More" bind:open={moreOpen} onDismiss={focusMore}>
+<AppDialog id="app-more" title="More" hideTitle bind:open={moreOpen} onDismiss={focusMore}>
   <div class="chrome-actions" {@attach keepMoreFocus}>
     {#if blockedChoice}
       {@const { agent, target } = blockedChoice}

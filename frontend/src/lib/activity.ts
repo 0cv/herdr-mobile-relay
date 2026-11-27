@@ -1,5 +1,10 @@
+import { sessionName } from './agents';
 import type { Activity } from './types';
 import type { StatusAppearance } from './status-marks';
+
+export function activityMetadata(activity: Activity): string {
+  return [activity.relay_label, activity.project, sessionName(activity), activity.agent, activity.status?.replaceAll('_', ' ') || 'Status unknown'].filter(Boolean).join(' · ');
+}
 
 export function activityMatchesSearch(activity: Partial<Activity>, query: string): boolean {
   if (!query) return true;

@@ -5,6 +5,7 @@
     id,
     open = $bindable(false),
     title,
+    hideTitle = false,
     description = '',
     children,
     dismissible = true,
@@ -13,6 +14,7 @@
     id: string;
     open?: boolean;
     title: string;
+    hideTitle?: boolean;
     description?: string;
     children?: Snippet;
     dismissible?: boolean;
@@ -57,7 +59,7 @@
     onclick={dismissFromBackdrop}
   >
     <div class="dialog-content">
-      <h2 class="dialog-title" id={`${id}-title`}>{title}</h2>
+      <h2 class={hideTitle ? 'sr-only' : 'dialog-title'} id={`${id}-title`}>{title}</h2>
       {#if description}<p class="dialog-description" id={`${id}-description`}>{description}</p>{/if}
       {@render children?.()}
     </div>

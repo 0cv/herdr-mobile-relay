@@ -93,12 +93,13 @@ export function tabName(agent: Partial<Agent>): string {
   return String(agent.tab_label || agent.name || '').trim();
 }
 
-export function sessionName(agent: Partial<Agent>): string {
+export function sessionName(agent: Pick<Agent, 'session' | 'session_name'>): string {
   if (Object.prototype.hasOwnProperty.call(agent, 'session_name')) {
     return String(agent.session_name || '').trim();
   }
-  const legacy = String(agent.session || '').trim();
-  if (legacy.includes('/') || legacy.includes('\\')) return '';
+  const session = String(agent.session || '');
+  if (/^(?:~|[a-z]:)?[\\/]/i.test(session) && !/\s/.test(session)) return '';
+  const legacy = session.trim();
   if (/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(legacy)) return '';
   return legacy;
 }

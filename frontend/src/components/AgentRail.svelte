@@ -1,7 +1,7 @@
 <script lang="ts">
   import AgentLogo from '$components/AgentLogo.svelte';
   import StatusMark from '$components/StatusMark.svelte';
-  import { agentStatusGroup, agentStatusMarks, displayName, hostLabel, tabName } from '$lib/agents';
+  import { agentStatusGroup, agentStatusMarks, displayName, hostLabel, sessionName, tabName } from '$lib/agents';
   import type { Agent } from '$lib/types';
   import { workspaceGroups } from '$lib/workspaces';
 
@@ -37,7 +37,7 @@
             </span>
             <span>
               <strong>{displayName(agent)}</strong>
-              <small>{[tabName(agent), agent.session, hostLabel(agent) !== group.host ? `@${hostLabel(agent)}` : ''].filter(Boolean).join(' · ')}</small>
+              <small>{[tabName(agent), sessionName(agent), hostLabel(agent) !== group.host ? `@${hostLabel(agent)}` : ''].filter(Boolean).join(' · ')}</small>
             </span>
           </button>
         {/each}

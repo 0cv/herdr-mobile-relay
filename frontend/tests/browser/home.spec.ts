@@ -34,7 +34,6 @@ test('keeps Home chrome named and reachable at 320px in every theme', async ({ p
     await expectTextContrast(more, `${theme}: More trigger`);
     await more.press('Enter');
     await expect(dialog.getByRole('button')).toHaveText(['Search all agents', 'Manage workspaces', 'Activity history', 'Close']);
-    await expectTextContrast(dialog.getByRole('heading'), `${theme}: More title`);
     await page.keyboard.press('Tab');
     const focused = dialog.getByRole('button', { name: 'Manage workspaces' });
     await expect(focused).toBeFocused();
@@ -772,13 +771,29 @@ test('a reader finds the exact pane path in jump and sends no acknowledgement fr
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(320);
   await page.keyboard.press('Escape');
 
-  await server(page, 0, { type: 'activity_history', activities: [{
-    id: 'result', kind: 'finished', status: 'completed', summary: 'Fixture checks completed',
-    pane_id: fix.pane_id, timestamp: Date.now(),
-  }] });
+  await server(page, 0, { type: 'activity_history', activities: [
+    {
+      id: 'result', kind: 'finished', status: 'completed', summary: 'Fixture checks completed',
+      pane_id: fix.pane_id, timestamp: Date.now(), session: '/fixtures/.pi/agent/sessions/retained.jsonl',
+    },
+    {
+      id: 'named', kind: 'finished', status: 'completed', summary: 'Pi completed',
+      pane_id: fix.pane_id, timestamp: Date.now(), agent: 'pi', session: 'Repair truncated events.jsonl',
+    },
+  ] });
   await chooseMore(page, 'Activity history');
-  await page.getByRole('button', { name: /Fixture checks completed/ }).click();
-  await page.getByRole('button', { name: /Go to thread/ }).click();
+  const namedActivity = page.getByRole('button', { name: /Pi completed/ });
+  await expect(namedActivity.getByText('Repair truncated events.jsonl')).toBeVisible();
+  await namedActivity.click();
+  await expect(page.getByRole('main', { name: 'Pi completed' }).getByText('Repair truncated events.jsonl')).toBeVisible();
+  await page.getByRole('button', { name: 'Back', exact: true }).click();
+
+  const activity = page.getByRole('button', { name: /Fixture checks completed/ });
+  await expect(activity).not.toContainText('retained.jsonl');
+  await activity.click();
+  const detail = page.getByRole('main', { name: 'Fixture checks completed' });
+  await expect(detail).not.toContainText('retained.jsonl');
+  await detail.getByRole('button', { name: /Go to thread/ }).click();
   await expect(page.getByRole('main', { name: 'Terminal for project' })).toBeVisible();
   await expect(page.getByRole('banner').getByRole('img', { name: 'New result' })).toHaveClass(/status-check/);
   for (const url of [/#activity=/, /#activity$/, /\/$/]) {
@@ -861,7 +876,9 @@ test('keeps the new Terminal, Conversation and Settings labels legible in six th
 
   const badge = page.getByRole('banner').locator('.nav-update-badge');
   await expect(badge).toBeVisible();
-  const more = await openMore(page);
+  await openMore(page);
+  const more = page.getByRole('dialog', { name: 'More', exact: true });
+  await expect(more.getByRole('heading', { name: 'More', exact: true })).toHaveCSS('clip', 'rect(0px, 0px, 0px, 0px)');
   await expect(more.getByRole('button', { name: 'Next blocked: Waiting on Fedora' })).toBeVisible();
   for (const theme of themes) {
     await useTheme(page, theme);
@@ -875,9 +892,9 @@ test('keeps the new Terminal, Conversation and Settings labels legible in six th
 
   await page.getByRole('button', { name: 'Attach', exact: true }).press('Enter');
   const attach = page.getByRole('dialog', { name: 'Attach', exact: true });
+  await expect(attach.getByRole('heading', { name: 'Attach', exact: true })).toHaveCSS('clip', 'rect(0px, 0px, 0px, 0px)');
   for (const theme of themes) {
     await useTheme(page, theme);
-    await expectTextContrast(attach.getByRole('heading'), `${theme}: Attach title`);
     for (const name of ['Attach photos', 'Attach files', 'Close']) {
       await expectTextContrast(attach.getByRole('button', { name, exact: true }), `${theme}: ${name}`);
     }
@@ -945,6 +962,53 @@ test('keeps a truncated terminal hyperlink out of Home and its accessible descri
   await expect(row).toHaveAccessibleDescription('Needs input view');
 });
 
+test('keeps the compact Pi logo clear of the status mark at 390px', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await connectFedora(page);
+  await useTheme(page, 'dark');
+  await server(page, 0, { type: 'agents', agents: [{
+    pane_id: 'w1:p1', workspace_id: 'w1', name: 'Fixture checks', project: 'Project', agent: 'pi', status: 'succeeded',
+  }] });
+  const row = page.locator('.compact-agent-card').getByRole('button', { name: 'Open Fixture checks on Fedora' });
+  await expect(row).toHaveAccessibleDescription('New result');
+  const logo = row.getByRole('img', { name: 'Pi' });
+  const mark = row.locator('.agent-activity .status-check');
+  const text = row.getByText('New result', { exact: true });
+  await expect(logo).toBeVisible();
+  await expect(mark).toBeVisible();
+  const [logoBox, markBox, textBox] = await Promise.all([logo.boundingBox(), mark.boundingBox(), text.boundingBox()]);
+  expect(markBox!.x).toBeGreaterThan(logoBox!.x + logoBox!.width);
+  expect(textBox!.x).toBeGreaterThan(markBox!.x + markBox!.width);
+  expect(markBox!.y + markBox!.height / 2).toBeCloseTo(textBox!.y + textBox!.height / 2, 0);
+});
+
+test('hides a Pi session file path from agent rows but keeps it searchable', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await connectFedora(page);
+  const filename = '2026-11-24T13-11-24-871Z_fixture.jsonl';
+  await server(page, 0, { type: 'agents', agents: [{
+    pane_id: 'w1:p1', workspace_id: 'w1', name: 'Fixture checks', project: 'Project', agent: 'pi', status: 'working',
+    session: `/fixtures/.pi/agent/sessions/--work-project--/${filename}`,
+  }] });
+  const home = page.getByRole('button', { name: 'Open Fixture checks on Fedora' });
+  await expect(home).toBeVisible();
+  await expect(home).not.toContainText(filename);
+
+  await chooseMore(page, 'Search all agents');
+  const jump = page.getByRole('dialog', { name: 'Jump to agent' });
+  await jump.getByRole('searchbox').fill(filename);
+  const result = jump.getByRole('button', { name: /Working.*Fixture checks/ });
+  await expect(result).toBeVisible();
+  await expect(result).not.toContainText(filename);
+  await result.click();
+
+  await page.setViewportSize({ width: 1024, height: 768 });
+  const rail = page.getByRole('complementary', { name: 'Agent navigation' });
+  const active = rail.getByRole('button', { name: /Working.*Project/ });
+  await expect(active).toBeVisible();
+  await expect(active).not.toContainText(filename);
+});
+
 test('keeps static 12px marks, activity and counts legible in six themes at 320px and in the rail', async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 820 });
   await connectFedora(page, { capabilities: ['attention_classification'] });
@@ -983,11 +1047,11 @@ test('keeps static 12px marks, activity and counts legible in six themes at 320p
     await useTheme(page, theme);
     const current = [];
     for (const [name, , , label, shape] of states) {
-      const mark = row(name).locator(`.agent-identity .status-${shape}`);
+      const mark = row(name).locator(`.agent-activity .status-${shape}`);
       await expect(row(name).locator('.agent-activity')).toContainText(label);
       const geometry = await markGeometry(mark);
       expect(geometry).toMatchObject({ width: 12, height: 12, animation: 'none' });
-      const contrast = await surfaceContrast(mark);
+      const contrast = await surfaceContrast(mark, true);
       expect(contrast.opaque).toBe(true);
       expect(contrast.contrast).toBeGreaterThanOrEqual(3);
       current.push(geometry);
@@ -1029,11 +1093,9 @@ test('keeps static 12px marks, activity and counts legible in six themes at 320p
     await expect(active).toHaveAttribute('aria-current', 'page');
     const selectedMark = active.locator('.status-chevron');
     expect(await markGeometry(selectedMark)).toEqual(geometries[0][2]);
-    const { contrast, opaque } = await surfaceContrast(selectedMark);
+    const { contrast, opaque } = await surfaceContrast(selectedMark, true);
     expect(opaque).toBe(true);
     expect(contrast).toBeGreaterThanOrEqual(3);
-    expect(await selectedMark.evaluate((mark) =>
-      getComputedStyle(mark).backgroundColor === getComputedStyle(mark.closest('button')!).backgroundColor)).toBe(true);
     await expect(rail.getByRole('button', { name: /New result.*result/ }).locator('.status-check')).toBeVisible();
     await expect(rail.getByRole('button', { name: /Idle.*idle/ }).locator('.status-ring')).toBeVisible();
     await expect(rail.locator('.agent-activity')).toHaveCount(0);
