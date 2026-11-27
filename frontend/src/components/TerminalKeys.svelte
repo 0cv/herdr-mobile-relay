@@ -38,9 +38,12 @@
   const keyboard = () => row?.querySelector<HTMLButtonElement>('.manual-input-trigger button');
 
   $effect.pre(() => {
-    void inlineExtra;
     menu = '';
     for (const id of modifiers) if (!$terminalKeyRow.includes(id)) armed[id] = false;
+  });
+
+  $effect.pre(() => {
+    void inlineExtra;
     if (keyboard()?.matches(':focus')) void tick().then(() => keyboard()?.focus());
   });
 
@@ -49,7 +52,7 @@
   });
 
   function alignPopup() {
-    if (!menu) return;
+    if (!menu || !row) return;
     const bounds = row.getBoundingClientRect();
     const end = Math.min(bounds.right, trigger.getBoundingClientRect().right) - bounds.left;
     row.style.setProperty('--key-end', `${end}px`);
@@ -57,16 +60,33 @@
 
   function observeStrip(strip: HTMLElement) {
     if (typeof ResizeObserver === 'undefined') return;
+    const container = strip.parentElement!;
     const entries = strip.firstElementChild!;
+    let frame = 0;
     function measure() {
-      scrolling = entries.getBoundingClientRect().width > strip.getBoundingClientRect().width + .1;
-      alignPopup();
+      const { columnGap, paddingLeft, paddingRight } = getComputedStyle(container);
+      const available = container.getBoundingClientRect().width - parseFloat(paddingLeft) - parseFloat(paddingRight);
+      const spacer = entries.querySelector('.spacer');
+      const outside = strip.nextElementSibling;
+      const needed = entries.getBoundingClientRect().width - (spacer?.getBoundingClientRect().width ?? 0)
+        + (outside ? outside.getBoundingClientRect().width + parseFloat(columnGap) : 0);
+      scrolling = needed > available + .1;
+      void tick().then(alignPopup);
     }
     measure();
-    const observer = new ResizeObserver(measure);
+    const observer = new ResizeObserver(() => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(measure);
+    });
+    observer.observe(container);
     observer.observe(strip);
     observer.observe(entries);
-    return { destroy: () => observer.disconnect() };
+    return {
+      destroy() {
+        observer.disconnect();
+        cancelAnimationFrame(frame);
+      },
+    };
   }
   let keyFeedback = $state('');
   const keySending = $derived(sending || blocked);
