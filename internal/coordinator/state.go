@@ -46,6 +46,7 @@ type AgentState struct {
 	UpdatedAt                    int64                  `json:"updated_at"`
 	LastActiveAt                 int64                  `json:"last_active_at,omitempty"`
 	LastSeenAt                   int64                  `json:"last_seen_at,omitempty"`
+	StatusSinceAt                int64                  `json:"status_since_at,omitempty"`
 	ActivitySeq                  int64                  `json:"activity_seq,omitempty"`
 	BlockedEventID               string                 `json:"event_id,omitempty"`
 	AttentionKind                question.AttentionKind `json:"attention_kind,omitempty"`
@@ -75,11 +76,18 @@ type paneRecord struct {
 	probe            idleProbeState
 	blockedRevision  int64
 	workingRevision  int64
+	clock            statusClock
 	revision         int64
 	contentRev       int64
 	attentionRev     int64
 	completion       completionState
 	sessionDiscovery *sessionDiscovery
+}
+
+type statusClock struct {
+	target protocol.TargetRef
+	group  string
+	since  int64
 }
 
 type completionState struct {
@@ -535,7 +543,8 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64, topol
 			existing = rec.agent
 		}
 		replaced := exists && paneSessionReplaced(existing, incoming)
-		if exists && !replaced && existing.SessionID != incoming.SessionID {
+		sessionChanged := exists && existing.SessionID != incoming.SessionID
+		if sessionChanged && !replaced {
 			rec.sessionDiscovery = nil
 			if existing.SessionID == "" && incoming.SessionID != "" && existing.TerminalID != "" && existing.TerminalID == incoming.TerminalID {
 				rec.sessionDiscovery = &sessionDiscovery{
@@ -649,6 +658,7 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64, topol
 				rec.completion.ackDone = true
 			}
 		}
+		s.updateStatusClockLocked(rec, s.lastAttemptAt.UnixMilli())
 		triageDirty = s.syncTriageLocked(&cp) || triageDirty
 		if !preservesChatCompletion(prev, cp.Status, previousAttention) {
 			s.syncAttentionCompletionLocked(incoming.PaneID, previousAttention, cp.AttentionKind)
@@ -774,7 +784,12 @@ func (s *State) CommitEventForSession(
 		rec.attentionRev++
 	}
 	rec.agent = a
+	observedAt := updatedAt
+	if observedAt <= 0 {
+		observedAt = a.LastActiveAt
+	}
 	s.registerTransition(paneID, prev, a.Status, previousAttention)
+	s.updateStatusClockLocked(rec, observedAt)
 	if !preservesChatCompletion(prev, a.Status, previousAttention) {
 		s.syncAttentionCompletionLocked(paneID, previousAttention, a.AttentionKind)
 	}
@@ -864,44 +879,65 @@ func (s *State) fireTransition(paneID, status string) {
 // registerTransition implements the once-per-cycle notification state machine.
 // Blocked notifications fire only on actual transitions into "blocked" (§16.13).
 // Completion (working/blocked → idle) marks the pane as unseen-done (§9.8).
-func (s *State) registerTransition(
-	paneID, prev, status string,
-	previousAttention question.AttentionKind,
-) {
+func (s *State) registerTransition(paneID, prev, status string, previousAttention question.AttentionKind) {
 	rec := s.panes[paneID]
-	if attentionStatuses[status] {
-		if prev != status {
-			rec.completion = completionState{}
-		}
-		if status == "blocked" && prev != "blocked" {
-			s.fireTransition(paneID, status)
-		}
-		if status == "working" && prev != "working" {
-			s.fireTransition(paneID, status)
-		}
-		return
-	}
-
-	if doneStatuses[status] {
-		if attentionStatuses[prev] {
-			rec.completion.ackDone = false
-			rec.completion.unseenDone = true
-			rec.completion.completionRev = rec.revision
-			s.fireTransition(paneID, status)
-		}
-		return
-	}
-
-	// §9.8: working/blocked → idle is the common completion path for agents
-	// that don't emit an explicit "done" status.
-	if status == "idle" && attentionStatuses[prev] {
-		if prev == "blocked" && previousAttention == question.AttentionChat {
-			return
-		}
+	started := attentionStatuses[status] && prev != status
+	finished := attentionStatuses[prev] && (doneStatuses[status] ||
+		status == "idle" && !(prev == "blocked" && previousAttention == question.AttentionChat))
+	if started {
+		rec.completion = completionState{}
+	} else if finished {
 		rec.completion.ackDone = false
 		rec.completion.unseenDone = true
 		rec.completion.completionRev = rec.revision
+	}
+
+	if started || finished {
 		s.fireTransition(paneID, status)
+	}
+}
+
+func (s *State) updateStatusClockLocked(rec *paneRecord, observedAt int64) {
+	target := rec.agent.TargetRef()
+	target.Generation = s.generation[target.PaneID]
+	group := rec.displayedStatusGroup()
+	if rec.clock.target != target {
+		rec.clock = statusClock{target: target, group: group}
+		return
+	}
+	if rec.clock.group == group {
+		return
+	}
+	rec.clock.group = group
+	rec.clock.since = 0
+	if group != "ready" && group != "other" {
+		rec.clock.since = observedAt
+	}
+}
+
+func (rec *paneRecord) displayedStatusGroup() string {
+	status := strings.ToLower(strings.TrimSpace(rec.displayedStatus()))
+	switch {
+	case strings.Contains(status, "blocked"):
+		switch rec.agent.AttentionKind {
+		case question.AttentionApproval, question.AttentionQuestion:
+			return "blocked"
+		case question.AttentionChat:
+			return "ready"
+		default:
+			return "attention"
+		}
+	case strings.Contains(status, "working"), strings.Contains(status, "running"),
+		strings.Contains(status, "progress"), strings.Contains(status, "busy"):
+		return "working"
+	case strings.Contains(status, "done"), strings.Contains(status, "complete"),
+		strings.Contains(status, "finish"), strings.Contains(status, "success"),
+		strings.Contains(status, "succeeded"), strings.Contains(status, "unread"):
+		return "done"
+	case status == "idle", status == "ready":
+		return "ready"
+	default:
+		return "other"
 	}
 }
 
@@ -962,6 +998,7 @@ func (s *State) CommitAttentionClassification(
 		rec.revision = s.revCounter
 		rec.contentRev++
 		rec.attentionRev++
+		s.updateStatusClockLocked(rec, time.Now().UnixMilli())
 		s.syncAttentionCompletionLocked(paneID, previous, agent.AttentionKind)
 	}
 	return s.cloneAgentLocked(rec), rec.attentionRev, true
@@ -1032,10 +1069,12 @@ func (s *State) AcknowledgePane(paneID string) bool {
 		return false
 	}
 	agent := rec.agent
-	agent.LastSeenAt = max(time.Now().UnixMilli(), agent.LastActiveAt)
+	now := time.Now().UnixMilli()
+	agent.LastSeenAt = max(now, agent.LastActiveAt)
 	if rec.completion.unseenDone || doneStatuses[agent.Status] {
 		rec.completion.unseenDone = false
 		rec.completion.ackDone = true
+		s.updateStatusClockLocked(rec, now)
 	}
 	if s.syncTriageLocked(agent) {
 		s.persistTriageLocked()
@@ -1051,14 +1090,38 @@ func (s *State) DisplayedStatus(paneID string) string {
 	if rec == nil {
 		return ""
 	}
-	a := rec.agent
-	if doneStatuses[a.Status] && rec.completion.ackDone {
-		return "idle"
+	return rec.displayedStatus()
+}
+
+func (rec *paneRecord) displayedStatus() string {
+	status := rec.agent.Status
+	if doneStatuses[status] && rec.completion.ackDone {
+		status = "idle"
 	}
-	if a.Status == "idle" && rec.completion.unseenDone {
+	if status == "idle" && rec.completion.unseenDone {
 		return "done"
 	}
-	return a.Status
+	return status
+}
+
+func (s *State) DisplayedAgent(paneID string) (*AgentState, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rec := s.panes[paneID]
+	if rec == nil {
+		return nil, false
+	}
+	return s.displayedAgentLocked(rec), true
+}
+
+func (s *State) displayedAgentLocked(rec *paneRecord) *AgentState {
+	agent := s.cloneAgentLocked(rec)
+	agent.Status = rec.displayedStatus()
+	agent.StatusSinceAt = 0
+	if agent.TargetRef() == rec.clock.target {
+		agent.StatusSinceAt = rec.clock.since
+	}
+	return agent
 }
 
 func (s *State) Snapshot() []*AgentState {
@@ -1070,14 +1133,7 @@ func (s *State) Snapshot() []*AgentState {
 func (s *State) snapshotLocked() []*AgentState {
 	result := make([]*AgentState, 0, len(s.panes))
 	for _, rec := range s.panes {
-		cp := s.cloneAgentLocked(rec)
-		if doneStatuses[cp.Status] && rec.completion.ackDone {
-			cp.Status = "idle"
-		}
-		if cp.Status == "idle" && rec.completion.unseenDone {
-			cp.Status = "done"
-		}
-		result = append(result, cp)
+		result = append(result, s.displayedAgentLocked(rec))
 	}
 	// s.panes is a map; without an explicit order every snapshot serializes
 	// differently, which defeats broadcast dedupe and hands clients a

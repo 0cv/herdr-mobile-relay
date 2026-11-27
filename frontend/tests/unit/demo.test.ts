@@ -30,6 +30,7 @@ describe('demo scene', () => {
     expect(scene.map(({ id, label, agents }) => agents.map((row) => {
       const target = targetRefForAgent(normalizeAgent(id, label, row))!;
       expect(row.last_active_at).toBe(row.updated_at);
+      expect(row.status_since_at).toBe(row.status === 'idle' ? undefined : row.updated_at);
       return [
         target.relay_id, target.server_session_id, target.pane_id, target.terminal_id, target.generation,
         target.agent_session_id, row.workspace_id, row.tab_id, row.tab_label, row.pane_revision, row.activity_seq,
@@ -331,10 +332,10 @@ describe('demo responder', () => {
       { type: 'command_result', ok: true },
       { type: 'agent_update', pane_id: done.pane_id, status: 'idle', pane_revision: done.pane_revision + 1 },
     ]);
-    expect(relay.respond({ type: 'refresh_agents' })[1]).toMatchObject({
-      agents: atlas.agents.map((agent) => agent === done
-        ? { ...agent, status: 'idle', pane_revision: agent.pane_revision + 1 }
-        : agent),
+    const idle = { ...done, status: 'idle', pane_revision: done.pane_revision + 1 };
+    delete idle.status_since_at;
+    expect(relay.respond({ type: 'refresh_agents' })[1]).toEqual({
+      type: 'agents', agents: atlas.agents.map((agent) => agent === done ? idle : agent),
     });
     expect(createDemoResponder(atlas.id).respond({ type: 'refresh_agents' })[1])
       .toMatchObject({ agents: atlas.agents });
@@ -510,12 +511,12 @@ describe('demo responder', () => {
     expect(readPane(relay, pane)).toEqual(before);
     const result = relay.respond(command);
     const cleared = { ...agent, status: 'working', pane_revision: agent.pane_revision + 1, activity_seq: agent.activity_seq + 1,
-      updated_at: 1_786_525_501_000, last_active_at: 1_786_525_501_000 };
+      updated_at: 1_786_525_501_000, last_active_at: 1_786_525_501_000, status_since_at: expect.any(Number) };
     for (const field of ['options', 'command', 'approval_fingerprint', 'interaction', 'attention_kind', 'event_id', 'prompt'] as const) {
       delete cleared[field];
     }
     expect(result).toEqual([
-      ...(type === 'respond' ? [{ ...cleared, type: 'agent_update' }] : []),
+      { ...cleared, type: 'agent_update' },
       { type: 'command_result', action: type, request_id: pane.request_id, ok: true, phase: 'confirmed', data: {} },
     ]);
     const [, agents] = relay.respond({ type: 'refresh_agents' });

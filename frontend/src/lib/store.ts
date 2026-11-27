@@ -60,6 +60,7 @@ import {
   rawBlocked,
   staleAgentRevision,
   stabilizeBlockedSnapshot,
+  withQuestionInteraction,
 } from './agents';
 import { PaneStreams } from './pane-streams';
 import { reportAppAnomaly } from './crash-banner';
@@ -713,6 +714,7 @@ class RelayStore {
       if (previousPath && previousPath !== connection.path) this.panes.restartWatches();
       return;
     }
+    this.clearStatusClocks(relay.id);
     if (status === 'connecting') {
       if (connection.status === 'connecting') return;
       connection.status = 'connecting';
@@ -828,6 +830,7 @@ class RelayStore {
     this.clearHealthTimer(connection);
     this.clearUpdateRestartTimer(connection);
     connection.transport?.close();
+    this.clearStatusClocks(id);
     this.rejectPendingOperations(id, 'Relay disconnected');
     this.connectionsValue.delete(id);
     this.emitConnections();
@@ -998,6 +1001,7 @@ class RelayStore {
     this.clearDelayedPaneReads(connection);
     connection.transport?.close();
     connection.status = 'disconnected';
+    this.clearStatusClocks(relayId);
     this.rejectPendingOperations(relayId, reason);
     this.emitConnections();
   }
@@ -1105,7 +1109,7 @@ class RelayStore {
     this.syncUpdateRestartReconnect(relayId, connection);
     connection.herdrStatus = normalizeHerdrStatus(message.herdr_status);
     connection.appDeploy = normalizeAppDeployment(message.app_deploy);
-    connection.inventory = normalizeAgentInventory(message.inventory, 'ready');
+    this.setInventory(connection, normalizeAgentInventory(message.inventory, 'ready'));
     connection.capabilities = Array.isArray(message.capabilities) ? message.capabilities.filter(Boolean) : [];
     connection.speechLanguages = (Array.isArray(message.speech_languages) ? message.speech_languages : [])
       .filter(isSpeechLanguage);
@@ -1164,8 +1168,26 @@ class RelayStore {
   private handleInventoryStatus(relayId: string, message: Record<string, any>): void {
     const connection = this.connectionsValue.get(relayId);
     if (!connection) return;
-    connection.inventory = normalizeAgentInventory(message);
+    this.setInventory(connection, normalizeAgentInventory(message));
     this.emitConnections();
+  }
+
+  private setInventory(connection: RelayConnection, inventory: RelayConnection['inventory']): void {
+    connection.inventory = inventory;
+    if (!this.inventoryReady(connection)) this.clearStatusClocks(connection.relay.id);
+  }
+
+  private inventoryReady(connection: RelayConnection | undefined): boolean {
+    return connection?.inventory.state === 'ready' && !connection.inventory.stale;
+  }
+
+  private clearStatusClocks(relayId: string): void {
+    const hasClock = (agent: Agent) => agent.relay_id === relayId && agent.status_since_at !== undefined;
+    if (!this.agentsValue.some(hasClock)) return;
+    this.agentsValue = this.agentsValue.map((agent) => hasClock(agent)
+      ? { ...agent, status_since_at: undefined, statusClockGroup: undefined }
+      : agent);
+    this.publishAgents('clear status clocks');
   }
 
   private handleUpdateStatus(relayId: string, message: Record<string, any>): void {
@@ -1273,16 +1295,8 @@ class RelayStore {
       && connection.inventory.state !== 'ready'
       && !connection.inventory.stale
     ) return;
-    const label = get(this.relayConfigs).find((relay) => relay.id === relayId)?.label || 'relay';
-    const attentionCapable = Boolean(connection?.capabilities.includes('attention_classification'));
     const incoming = (Array.isArray(message.agents) ? message.agents : [])
-      .map((agent: Partial<Agent>) => normalizeAgent(
-        relayId,
-        label,
-        normalizeAgentTargetFields(agent),
-        attentionCapable,
-        connection?.capabilities.includes('idle_question_probe'),
-      ));
+      .map((agent: Partial<Agent>) => this.normalizeIncomingAgent(relayId, agent));
     const previous = this.agentsValue;
     this.agentsValue = mergeAgentList(
       this.agentsValue,
@@ -1295,17 +1309,21 @@ class RelayStore {
     this.publishAgents('agents snapshot');
   }
 
-  private handleBlocked(relayId: string, message: Record<string, any>): void {
+  private normalizeIncomingAgent(relayId: string, agent: Partial<Agent>): Agent {
     const connection = this.connectionsValue.get(relayId);
-    const label = get(this.relayConfigs).find((relay) => relay.id === relayId)?.label || 'relay';
-    const attentionCapable = Boolean(connection?.capabilities.includes('attention_classification'));
-    const next = normalizeAgent(
+    const next = normalizeAgentTargetFields(agent);
+    if (!this.inventoryReady(connection)) next.status_since_at = undefined;
+    return normalizeAgent(
       relayId,
-      label,
-      normalizeAgentTargetFields({ ...message, status: 'blocked' }),
-      attentionCapable,
+      connection?.relay.label || 'relay',
+      next,
+      connection?.capabilities.includes('attention_classification'),
       connection?.capabilities.includes('idle_question_probe'),
     );
+  }
+
+  private handleBlocked(relayId: string, message: Record<string, any>): void {
+    const next = this.normalizeIncomingAgent(relayId, { ...message, status: 'blocked' });
     const index = this.agentsValue.findIndex((agent) => agent.pane_id === next.pane_id);
     const before = index >= 0 ? this.agentsValue[index] : undefined;
     if (staleAgentRevision(before, next)) return;
@@ -1322,17 +1340,15 @@ class RelayStore {
   private handleAgentUpdate(relayId: string, message: Record<string, any>): void {
     if (!message.pane_id) return;
     const connection = this.connectionsValue.get(relayId);
-    const label = get(this.relayConfigs).find((relay) => relay.id === relayId)?.label || 'relay';
-    const attentionCapable = Boolean(connection?.capabilities.includes('attention_classification'));
     const paneId = clientPaneId(relayId, message.pane_id);
     const index = this.agentsValue.findIndex((agent) => agent.pane_id === paneId);
     const before = index >= 0 ? this.agentsValue[index] : undefined;
     const idleProbeCapable = connection?.capabilities.includes('idle_question_probe');
     const source = !idleProbeCapable && before && rawBlocked(message)
       && !Object.prototype.hasOwnProperty.call(message, 'attention_kind')
-      ? { ...before, ...message }
+      ? { ...before, ...message, status_since_at: message.status_since_at }
       : message;
-    const next = normalizeAgent(relayId, label, normalizeAgentTargetFields(source), attentionCapable, idleProbeCapable);
+    const next = this.normalizeIncomingAgent(relayId, source);
     if (staleAgentRevision(before, next)) return;
     const previous = this.agentsValue;
     const stabilized = stabilizeBlockedSnapshot(before, next, this.blockedSnapshotMisses, this.respondingValue);
@@ -1371,12 +1387,7 @@ class RelayStore {
     if (!agent.attention_capable || message.attention_kind !== 'question' || !message.interaction) return;
     if (this.connectionsValue.get(agent.relay_id)?.capabilities.includes('idle_question_probe')
       && (!rawBlocked(agent) || agent.screen_attention === 'waiting')) return;
-    this.agentsValue[index] = {
-      ...agent,
-      status: 'blocked',
-      attention_kind: 'question',
-      interaction: message.interaction as QuestionInteraction,
-    };
+    this.agentsValue[index] = withQuestionInteraction(agent, message.interaction as QuestionInteraction);
     this.blockedSnapshotMisses.delete(paneId);
     this.publishAgents('pane interaction');
   }
@@ -2307,14 +2318,7 @@ class RelayStore {
     if (this.connectionsValue.get(agent.relay_id)?.capabilities.includes('idle_question_probe')
       && (!rawBlocked(current) || current.screen_attention === 'waiting')) return;
     this.blockedSnapshotMisses.delete(agent.pane_id);
-    this.agentsValue = this.agentsValue.map((item) => item.pane_id === agent.pane_id
-      ? {
-          ...item,
-          status: interaction ? 'blocked' : 'working',
-          attention_kind: interaction ? 'question' : undefined,
-          interaction,
-        }
-      : item);
+    this.agentsValue = this.agentsValue.map((item) => item === current ? withQuestionInteraction(item, interaction) : item);
     this.publishAgents('pane content interaction');
   }
 

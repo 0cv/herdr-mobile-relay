@@ -142,6 +142,194 @@ func TestInventoryMetadataDoesNotAdvanceLastActiveAt(t *testing.T) {
 	}
 }
 
+func TestStatusClockTracksObservedSpells(t *testing.T) {
+	s := testState()
+	pane := &AgentState{PaneID: "p1", TerminalID: "terminal", Status: "idle"}
+	poll := func(status string) {
+		pane.Status = status
+		s.CommitInventory([]*AgentState{pane}, s.RevisionCounter())
+	}
+	check := func(status string, since int64) {
+		t.Helper()
+		a := s.Snapshot()[0]
+		if a.Status != status || a.StatusSinceAt != since {
+			t.Fatalf("displayed %q since %d, want %q since %d", a.Status, a.StatusSinceAt, status, since)
+		}
+	}
+
+	poll("working")
+	check("working", 0)
+	poll("idle")
+	complete := s.lastAttemptAt.UnixMilli()
+	check("done", complete)
+	s.AcknowledgePane("p1")
+	check("idle", 0)
+
+	poll("working")
+	started := s.lastAttemptAt.UnixMilli()
+	check("working", started)
+	pane.Name = "renamed"
+	pane.ActivitySeq++
+	poll("working")
+	check("working", started)
+	s.CommitEvent("p1", "working", started+1)
+	check("working", started)
+
+	s.CommitEvent("p1", "blocked", started+2)
+	check("blocked", started+2)
+	pane.Prompt = "Approve?"
+	poll("blocked")
+	check("blocked", started+2)
+	s.CommitEvent("p1", "succeeded", started+3)
+	check("succeeded", started+3)
+	poll("idle")
+	check("done", started+3)
+	poll("completed")
+	check("completed", started+3)
+
+	s.AcknowledgePane("p1")
+	check("idle", 0)
+	poll("completed")
+	check("idle", 0)
+	s.CommitEvent("p1", "working", started+4)
+	check("working", started+4)
+	s.CommitEvent("p1", "idle", started+5)
+	check("done", started+5)
+	s.CommitEvent("p1", "working", started+6)
+	check("working", started+6)
+}
+
+func TestStatusClockStartsWhenChatBecomesAWait(t *testing.T) {
+	for _, source := range []string{"poll", "classification"} {
+		t.Run(source, func(t *testing.T) {
+			s := testState()
+			pane := &AgentState{PaneID: "p1", TerminalID: "terminal", Status: "working"}
+			poll := func() { s.CommitInventory([]*AgentState{pane}, s.RevisionCounter()) }
+			poll()
+			pane.Status = "blocked"
+			pane.AttentionKind = question.AttentionChat
+			poll()
+			if since := s.Snapshot()[0].StatusSinceAt; since != 0 {
+				t.Fatalf("idle chat has a clock: %d", since)
+			}
+
+			setKind := func(kind question.AttentionKind) {
+				t.Helper()
+				if source == "poll" {
+					pane.AttentionKind = kind
+					poll()
+					return
+				}
+				agent, _ := s.Agent(pane.PaneID)
+				if _, _, ok := s.CommitAttentionClassification(
+					pane.PaneID, agent.BlockedEventID, agent.Generation, s.ContentRevision(pane.PaneID),
+					question.Classification{Kind: kind}, "",
+				); !ok {
+					t.Fatal("classification rejected")
+				}
+			}
+
+			before := time.Now().UnixMilli()
+			setKind(question.AttentionApproval)
+			started := s.Snapshot()[0].StatusSinceAt
+			if started < before || started > time.Now().UnixMilli() {
+				t.Fatalf("waiting clock = %d, want time of approval classification", started)
+			}
+			setKind(question.AttentionQuestion)
+			if since := s.Snapshot()[0].StatusSinceAt; since != started {
+				t.Fatalf("same displayed state restarted the clock: %d, want %d", since, started)
+			}
+			setKind(question.AttentionChat)
+			if since := s.Snapshot()[0].StatusSinceAt; since != 0 {
+				t.Fatalf("idle chat retained the waiting clock: %d", since)
+			}
+		})
+	}
+}
+
+func TestStatusClockKeepsOneStartAcrossWorkingAliases(t *testing.T) {
+	s := testState()
+	s.CommitInventory([]*AgentState{{PaneID: "p1", Status: "idle"}}, 0)
+	for i, status := range []string{"working", "busy", "working"} {
+		s.CommitEvent("p1", status, 100+int64(i))
+		a := s.Snapshot()[0]
+		if a.Status != status || a.StatusSinceAt != 100 {
+			t.Fatalf("displayed %q since %d, want %q since 100", a.Status, a.StatusSinceAt, status)
+		}
+	}
+}
+
+func TestStatusClockDoesNotCrossTargets(t *testing.T) {
+	for _, change := range []string{"terminal", "session", "generation"} {
+		t.Run(change, func(t *testing.T) {
+			s := testState()
+			pane := &AgentState{PaneID: "p1", TerminalID: "terminal", SessionID: "session", Status: "idle"}
+			s.CommitInventory([]*AgentState{pane}, 0)
+			s.CommitEvent("p1", "working", 100)
+			if change == "session" {
+				s.CommitEvent("p1", "idle", 150)
+			}
+			pane.Status = "working"
+			switch change {
+			case "terminal":
+				pane.TerminalID = "new-terminal"
+			case "session":
+				pane.SessionID = "new-session"
+			case "generation":
+				s.BumpGeneration("p1")
+			}
+			s.CommitInventory([]*AgentState{pane}, s.RevisionCounter())
+			a := s.Snapshot()[0]
+			if a.Status != "working" || a.StatusSinceAt != 0 {
+				t.Fatalf("replacement = %q since %d, want working without a clock", a.Status, a.StatusSinceAt)
+			}
+		})
+	}
+}
+
+func TestStatusClockUsesReplacementTopologySample(t *testing.T) {
+	s := testState()
+	pane := &AgentState{PaneID: "p1", TerminalID: "terminal", SessionID: "session-a", Agent: "codex", Status: "idle"}
+	s.CommitInventory([]*AgentState{pane}, 0)
+	pane.SessionID = "session-b"
+	s.CommitTopology([]*AgentState{pane}, nil, s.RevisionCounter())
+	if a := s.Snapshot()[0]; a.SessionID != "session-b" || a.Status != "idle" || a.StatusSinceAt != 0 {
+		t.Fatalf("topology replacement = %q %q since %d, want session-b idle without a clock", a.SessionID, a.Status, a.StatusSinceAt)
+	}
+
+	s.CommitEvent("p1", "working", 100)
+	if a := s.Snapshot()[0]; a.Status != "working" || a.StatusSinceAt != 100 {
+		t.Fatalf("displayed %q since %d, want working since 100", a.Status, a.StatusSinceAt)
+	}
+}
+
+func TestStatusClockUsesDisplayedResultAsReplacementBaseline(t *testing.T) {
+	s := testState()
+	pane := &AgentState{PaneID: "p1", TerminalID: "terminal", SessionID: "session-a", Agent: "codex", Status: "working"}
+	s.CommitInventory([]*AgentState{pane}, 0)
+	s.CommitEvent("p1", "idle", 100)
+	if a := s.Snapshot()[0]; a.Status != "done" || a.StatusSinceAt != 100 {
+		t.Fatalf("original completion = %q since %d, want done since 100", a.Status, a.StatusSinceAt)
+	}
+
+	pane.SessionID = "session-b"
+	pane.Status = "idle"
+	s.CommitTopology([]*AgentState{pane}, nil, s.RevisionCounter())
+	if a := s.Snapshot()[0]; a.SessionID != "session-b" || a.Status != "done" || a.StatusSinceAt != 0 {
+		t.Fatalf("replacement topology = %q %q since %d, want session-b done without a clock", a.SessionID, a.Status, a.StatusSinceAt)
+	}
+	s.CommitInventory([]*AgentState{pane}, s.RevisionCounter())
+	if a := s.Snapshot()[0]; a.Status != "done" || a.StatusSinceAt != 0 {
+		t.Fatalf("unchanged replacement poll = %q since %d, want done without a clock", a.Status, a.StatusSinceAt)
+	}
+
+	pane.Status = "working"
+	s.CommitInventory([]*AgentState{pane}, s.RevisionCounter())
+	if a := s.Snapshot()[0]; a.Status != "working" || a.StatusSinceAt != s.lastAttemptAt.UnixMilli() {
+		t.Fatalf("replacement started working = %q since %d, want working since %d", a.Status, a.StatusSinceAt, s.lastAttemptAt.UnixMilli())
+	}
+}
+
 func TestDisplayedStatusUnseenDone(t *testing.T) {
 	s := testState()
 

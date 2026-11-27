@@ -13,6 +13,7 @@ project follows [Semantic Versioning](https://semver.org/).
   OpenCode agent, the phone shows **Adds to task**. Slash commands keep the
   usual confirmation.
 - Choose and reorder your terminal keys in **Manage agent → Edit key row**, including one-tap Ctrl+C and Shift+Tab. No relay update needed.
+- See how long agents have been waiting or working and how recently a new result arrived on Home. These times need an updated relay.
 
 ### Changed
 

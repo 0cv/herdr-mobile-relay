@@ -105,9 +105,9 @@ export function createDemoConversation(epoch: number): ConversationEntry[] {
 }
 
 export function createDemoScene(epoch: number): DemoComputer[] {
-  const activity = (minutesAgo: number) => {
+  const activity = (minutesAgo: number, timed = false) => {
     const timestamp = epoch - minutesAgo * minuteMs;
-    return { updated_at: timestamp, last_active_at: timestamp };
+    return { updated_at: timestamp, last_active_at: timestamp, ...(timed ? { status_since_at: timestamp } : {}) };
   };
   const project = '/home/demo/project';
   const linked = '/home/demo/project-fix-one';
@@ -146,7 +146,7 @@ export function createDemoScene(epoch: number): DemoComputer[] {
           workspace_id: 'w4', cwd: linked,
           tab_id: 'w4:t1', tab_number: 1, tab_order: 1, tab_label: 'Patch review',
           agent: 'codex', project: 'Patch review', status: 'blocked',
-          pane_revision: 3, activity_seq: 3, ...activity(2),
+          pane_revision: 3, activity_seq: 3, ...activity(2, true),
           event_id: 'atlas-review-approval', attention_kind: 'approval',
           prompt: 'Allow the sample agent to run the test suite?', command: 'make test',
           approval_fingerprint: 'atlas-review-tests', options: ['Allow once', 'Decline'],
@@ -157,7 +157,7 @@ export function createDemoScene(epoch: number): DemoComputer[] {
           workspace_id: 'w1', cwd: project,
           tab_id: 'w1:t2', tab_number: 2, tab_order: 2, tab_label: 'Release plan',
           agent: 'claude', project: 'Release plan', status: 'blocked',
-          pane_revision: 2, activity_seq: 2, ...activity(4),
+          pane_revision: 2, activity_seq: 2, ...activity(4, true),
           event_id: 'atlas-release-question', attention_kind: 'question',
           interaction: {
             id: 'atlas-release-rollout', kind: 'single_select', question: 'How should we roll out the new search page?',
@@ -182,7 +182,7 @@ export function createDemoScene(epoch: number): DemoComputer[] {
           workspace_id: 'w5', cwd: search,
           tab_id: 'w5:t1', tab_number: 1, tab_order: 1, tab_label: 'Search polish',
           agent: 'opencode', project: 'Search polish', status: 'working',
-          pane_revision: 1, activity_seq: 1, ...activity(9),
+          pane_revision: 1, activity_seq: 1, ...activity(9, true),
         },
         {
           server_session_id: 'atlas-herdr', pane_id: 'w4:p2', terminal_id: 'atlas-fixtures-terminal',
@@ -190,7 +190,7 @@ export function createDemoScene(epoch: number): DemoComputer[] {
           workspace_id: 'w4', cwd: linked,
           tab_id: 'w4:t2', tab_number: 2, tab_order: 2, tab_label: 'Fixture checks',
           agent: 'pi', project: 'Fixture checks', status: 'done',
-          pane_revision: 1, activity_seq: 1, ...activity(32),
+          pane_revision: 1, activity_seq: 1, ...activity(32, true),
         },
       ],
     },
@@ -215,7 +215,7 @@ export function createDemoScene(epoch: number): DemoComputer[] {
           workspace_id: 'w2', cwd: docs,
           tab_id: 'w2:t1', tab_number: 1, tab_order: 1, tab_label: 'Docs preview',
           agent: 'claude', project: 'Docs preview', status: 'working', conversation_history_available: false,
-          pane_revision: 1, activity_seq: 1, ...activity(65),
+          pane_revision: 1, activity_seq: 1, ...activity(65, true),
         },
         {
           server_session_id: 'birch-herdr', pane_id: 'w6:p1', terminal_id: 'birch-examples-terminal',

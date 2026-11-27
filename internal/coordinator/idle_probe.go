@@ -212,6 +212,7 @@ func (s *State) commitProbeStateLocked(rec *paneRecord, next *AgentState, newEve
 	next.UpdatedAt = now.UnixMilli()
 	rec.agent = next
 	s.registerTransition(next.PaneID, previous.Status, next.Status, previous.AttentionKind)
+	s.updateStatusClockLocked(rec, next.UpdatedAt)
 	if !preservesChatCompletion(previous.Status, next.Status, previous.AttentionKind) {
 		s.syncAttentionCompletionLocked(next.PaneID, previous.AttentionKind, next.AttentionKind)
 	}

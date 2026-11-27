@@ -53,7 +53,7 @@ export function agentNeedsInspection(agent: Partial<Agent> | null | undefined): 
   return rawBlocked(agent) && !['approval', 'question', 'chat'].includes(kind);
 }
 
-type AgentStatusGroup = keyof typeof agentStatusMarks;
+export type AgentStatusGroup = keyof typeof agentStatusMarks;
 
 export function agentStatusGroup(agent: Partial<Agent> | null | undefined): AgentStatusGroup {
   const status = String(agent?.status || 'unknown').trim().toLowerCase().replace(/[_-]+/g, ' ');
@@ -67,6 +67,10 @@ export function agentStatusGroup(agent: Partial<Agent> | null | undefined): Agen
   if (/(done|complete|finish|success|succeeded|unread)/.test(status)) return 'done';
   if (status === 'idle' || status === 'ready') return 'ready';
   return 'other';
+}
+
+export function agentStatusSinceAt(agent: Agent, group = agentStatusGroup(agent)): number | undefined {
+  return group === agent.statusClockGroup ? agent.status_since_at : undefined;
 }
 
 export const agentStatusMarks = {
@@ -228,13 +232,16 @@ export function normalizeAgent(
   idleProbeCapable = false,
 ): Agent {
   const rawPaneId = String(agent.raw_pane_id || agent.pane_id || '');
-  return normalizeAgentAttention({
+  const next = normalizeAgentAttention({
     ...agent,
     relay_id: relayId,
     relay_label: relayLabel,
     raw_pane_id: rawPaneId,
     pane_id: clientPaneId(relayId, rawPaneId),
-  } as Agent, attentionCapable, idleProbeCapable);
+    status_since_at: agent.status_since_at,
+  }, attentionCapable, idleProbeCapable);
+  next.statusClockGroup = next.status_since_at === undefined ? undefined : agentStatusGroup(next);
+  return next;
 }
 
 export function normalizeAgentAttention(agent: Agent, capable: boolean, idleProbeCapable = false): Agent {
@@ -264,6 +271,15 @@ export function normalizeAgentAttention(agent: Agent, capable: boolean, idleProb
     next.interaction = null;
   }
   return next;
+}
+
+export function withQuestionInteraction(agent: Agent, interaction: QuestionInteraction | null): Agent {
+  return {
+    ...agent,
+    status: interaction ? 'blocked' : 'working',
+    attention_kind: interaction ? 'question' : undefined,
+    interaction,
+  };
 }
 
 function retainBlockedDetails(previous: Agent, next: Agent): Agent {

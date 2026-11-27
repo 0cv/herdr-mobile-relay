@@ -84,10 +84,10 @@ const scenes = {
       await visible(computer);
     }
     const waiting = region(agents, 'Needs input');
-    for (const [name, prompt] of [['Patch review', 'make test'], ['Release plan', rolloutQuestion]]) {
+    for (const [name, prompt, age] of [['Patch review', 'make test', '2m'], ['Release plan', rolloutQuestion, '4m']]) {
       const card = button(waiting, `Open ${name} on Atlas`);
       await expect(card).toBeEnabled();
-      await expect(card).toHaveAccessibleDescription(/^Needs input\b/);
+      await visible(text(card, `Needs input · ${age}`));
       await visible(text(card, prompt));
     }
     const workspaces = region(agents, 'Workspaces');
@@ -109,7 +109,7 @@ const scenes = {
     await visible(result.locator('.status-check'));
     await visible(idle.locator('.status-ring'));
     await visible(text(summary('Project'), '1 new result'));
-    await visible(text(result, 'New result · last active 32m ago'));
+    await visible(text(result, 'New result · 32m ago'));
     for (const choice of ['Allow once', 'Decline', 'Preview first', 'All at once', 'More…']) {
       await visible(button(waiting, choice));
     }

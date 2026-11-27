@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import AgentList from '$components/AgentList.svelte';
 import GlobalJump from '$components/GlobalJump.svelte';
 import TerminalView from '$components/TerminalView.svelte';
+import { agentStatusGroup } from '$lib/agents';
 import { relayStore } from '$lib/store';
 import type { Agent, RelayConnectionView } from '$lib/types';
 
@@ -23,6 +24,7 @@ function agent(overrides: Partial<Agent> = {}): Agent {
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -127,18 +129,45 @@ describe('adopted navigation and terminal controls', () => {
     };
     const waiting = agent({
       status: 'blocked', attention_kind: 'question', attention_capable: true,
-      interaction, prompt: question, last_active_at: Date.now() - 3 * 60_000,
+      interaction, prompt: question, statusClockGroup: 'blocked', status_since_at: Date.now() - 3 * 60_000,
     });
     const answer = vi.spyOn(relayStore, 'answerQuestion').mockResolvedValue({ phase: 'confirmed' } as never);
     const view = render(AgentList, { agents: [waiting], relays: [], responding: new Set<string>(), onopen: vi.fn() });
     const row = screen.getByRole('button', { name: 'Open mobile on Laptop' });
-    expect(row).toHaveAccessibleDescription(`Needs input · last active 3m ago ${question}`);
+    expect(row).toHaveAccessibleDescription(`Needs input · 3m ${question}`);
     expect(screen.getAllByText(question)).toHaveLength(1);
     expect(view.container.querySelector('.prompt-full')).toHaveTextContent(question);
     await userEvent.click(screen.getByRole('button', { name: 'Preview' }));
     expect(answer).toHaveBeenCalledWith(waiting, interaction, {
       selected: new Set([0]), otherSelected: false, otherText: '',
     });
+  });
+
+  it('formats the clock for the displayed state and updates it on the minute tick', async () => {
+    vi.useFakeTimers();
+    const now = Date.now();
+    const rows = [
+      ['working', now - 30_000, 'Working · <1m'],
+      ['blocked', now - 3 * 60_000, 'Needs inspection · 3m'],
+      ['succeeded', now - 2 * 60_000, 'New result · 2m ago'],
+      ['done', now, 'New result · just now'],
+      ['idle', now - 12 * 60_000, 'Idle · last active 5m ago'],
+      ['working', undefined, 'Working'],
+      ['working', NaN, 'Working'],
+      ['working', now + 120_000, 'Working'],
+    ] as const;
+    render(AgentList, {
+      agents: rows.map(([status, status_since_at], index) => agent({
+        pane_id: `relay-a::clock-${index}`, status, status_since_at, statusClockGroup: agentStatusGroup({ status }),
+        name: `clock-${index}`, last_active_at: now - 5 * 60_000,
+      })),
+      relays: [], responding: new Set<string>(), onopen: vi.fn(),
+    });
+    const row = (index: number) => screen.getByRole('button', { name: `Open clock-${index} on Laptop` });
+    rows.forEach(([, , label], index) => expect(row(index)).toHaveAccessibleDescription(label));
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(row(0)).toHaveAccessibleDescription('Working · 1m');
+    expect(row(2)).toHaveAccessibleDescription('New result · 3m ago');
   });
 
   it('sends a detected terminal menu action through the serialized key path', async () => {

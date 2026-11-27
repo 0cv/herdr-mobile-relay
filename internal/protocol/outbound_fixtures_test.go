@@ -37,6 +37,9 @@ func TestAgentsFixtureMatchesGoType(t *testing.T) {
 		if agent.UpdatedAt != 0 && agent.UpdatedAt < 1_000_000_000_000 {
 			t.Errorf("updated_at = %d, want 0 (initial snapshot) or epoch milliseconds (>1e12)", agent.UpdatedAt)
 		}
+		if agent.StatusSinceAt < 1_000_000_000_000 {
+			t.Errorf("status_since_at = %d, want epoch milliseconds", agent.StatusSinceAt)
+		}
 	}
 	serialized, err := json.Marshal(struct {
 		Type   string                   `json:"type"`
@@ -159,6 +162,9 @@ func TestAgentUpdateFixtureMatchesGoType(t *testing.T) {
 	}
 	if msg.UpdatedAt < 1_000_000_000_000 {
 		t.Errorf("updated_at = %d, want epoch milliseconds (>1e12)", msg.UpdatedAt)
+	}
+	if msg.StatusSinceAt < 1_000_000_000_000 {
+		t.Errorf("status_since_at = %d, want epoch milliseconds", msg.StatusSinceAt)
 	}
 }
 

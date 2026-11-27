@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"slices"
 
 	"github.com/0cv/herdr-mobile-relay/internal/activity"
 	"github.com/0cv/herdr-mobile-relay/internal/coordinator"
@@ -112,7 +113,9 @@ func (s *Server) publishCurrentInventory(ctx context.Context) error {
 		readyRecovery := fresh.Status["state"] == "ready" && previousStatus["state"] != "ready"
 		agentsChanged := !agentSnapshotsEqual(previousAgents, mergedAgents)
 		workspacesChanged := !workspaceSnapshotsEqual(previousWorkspaces, fresh.Workspaces)
-		sendAgents := agentsChanged || readyRecovery
+		sendAgents := agentsChanged || readyRecovery || !slices.EqualFunc(previousAgents, mergedAgents, func(a, b *coordinator.AgentState) bool {
+			return a.StatusSinceAt == b.StatusSinceAt
+		})
 		sendWorkspaces := workspacesChanged || readyRecovery
 		if fresh.Status["state"] == "ready" && (agentsChanged || readyRecovery) {
 			runAgentSideEffects = true
@@ -185,6 +188,7 @@ func agentSnapshotsEqual(left, right []*coordinator.AgentState) bool {
 	for _, agents := range [][]*coordinator.AgentState{left, right} {
 		for _, agent := range agents {
 			agent.StateRevision = 0
+			agent.StatusSinceAt = 0
 		}
 	}
 	leftData, leftErr := json.Marshal(left)
@@ -232,7 +236,7 @@ func (s *Server) commitAgent(agent *coordinator.AgentState, messageType string) 
 		return
 	}
 	err := s.hub.BroadcastBatchPrepared(func() ([]any, func(), error) {
-		current, exists := s.state.Agent(paneID)
+		current, exists := s.state.DisplayedAgent(paneID)
 		if !exists || current.TargetRef() != agent.TargetRef() || current.StateRevision > agent.StateRevision {
 			return nil, nil, nil
 		}
@@ -240,6 +244,10 @@ func (s *Server) commitAgent(agent *coordinator.AgentState, messageType string) 
 		agents := cloneAgents(s.agentView)
 		s.stateViewMu.RUnlock()
 		committed := agent.Clone()
+		if current.StateRevision == agent.StateRevision {
+			committed.Status = current.Status
+			committed.StatusSinceAt = current.StatusSinceAt
+		}
 		committed.AgentSessionID = agent.SessionID
 		s.projectAgentResource(committed)
 		found := false
@@ -257,7 +265,7 @@ func (s *Server) commitAgent(agent *coordinator.AgentState, messageType string) 
 		if !found {
 			agents = append(agents, committed)
 		}
-		return []any{agentUpdateMessage(agent, messageType)}, func() {
+		return []any{agentUpdateMessage(committed, messageType)}, func() {
 			s.stateViewMu.Lock()
 			s.agentView = agents
 			s.stateViewMu.Unlock()
@@ -281,6 +289,9 @@ func agentUpdateMessage(agent *coordinator.AgentState, messageType string) map[s
 	}
 	if agent.ScreenAttention != "" {
 		message["screen_attention"] = agent.ScreenAttention
+	}
+	if agent.StatusSinceAt > 0 {
+		message["status_since_at"] = agent.StatusSinceAt
 	}
 	if messageType == "acknowledge_pane" {
 		message["type"] = "agent_update"

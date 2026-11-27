@@ -55,7 +55,8 @@ func TestIdleProbePublishedControlsAndClear(t *testing.T) {
 			a, _ := s.state.Agent("pane-1")
 			s.broadcastBlockedAttention(a)
 			blocked := readFrame(t, e.conn)
-			if blocked["type"] != "blocked" || blocked["screen_attention"] != coordinator.ScreenWaiting {
+			if blocked["type"] != "blocked" || blocked["screen_attention"] != coordinator.ScreenWaiting ||
+				blocked["status_since_at"] != float64(now.UnixMilli()) {
 				t.Fatal(blocked)
 			}
 			for _, report := range []string{"idle", "done", "idle"} {
@@ -63,7 +64,7 @@ func TestIdleProbePublishedControlsAndClear(t *testing.T) {
 				a, _ = s.state.Agent("pane-1")
 				s.commitAgent(a, "agent_update")
 				updated := readFrame(t, e.conn)
-				if updated["screen_attention"] != coordinator.ScreenWaiting || updated["event_id"] != a.BlockedEventID || updated["status"] != "blocked" || updated["attention_kind"] != string(kind) ||
+				if updated["screen_attention"] != coordinator.ScreenWaiting || updated["status_since_at"] != float64(now.UnixMilli()) || updated["event_id"] != a.BlockedEventID || updated["status"] != "blocked" || updated["attention_kind"] != string(kind) ||
 					kind == question.AttentionQuestion && updated["interaction"] == nil || kind == question.AttentionApproval && updated["options"] == nil {
 					t.Fatalf("UDP lost committed controls: %+v", updated)
 				}
@@ -85,7 +86,7 @@ func TestIdleProbePublishedControlsAndClear(t *testing.T) {
 				lists++
 				var agents []*coordinator.AgentState
 				decodeInto(t, frame["agents"], &agents)
-				if len(agents) != 1 || agents[0].ScreenAttention != coordinator.ScreenCleared || agents[0].Status != "done" || agents[0].Interaction != nil || agents[0].Options != nil || agents[0].BlockedEventID != "" {
+				if len(agents) != 1 || agents[0].ScreenAttention != coordinator.ScreenCleared || agents[0].Status != "done" || agents[0].StatusSinceAt != now.UnixMilli() || agents[0].Interaction != nil || agents[0].Options != nil || agents[0].BlockedEventID != "" {
 					t.Fatal(frame)
 				}
 			}

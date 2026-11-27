@@ -9,6 +9,7 @@ import unavailablePage from '../../../contracts/fixtures/conversation_unavailabl
 import editFixture from '../../../contracts/fixtures/conversation_edit_diff.json';
 import piCatalogFixture from '../../../contracts/fixtures/pi_command_catalog.json';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { agentStatusSinceAt } from '$lib/agents';
 import { makeRelayId } from '$lib/config';
 import { decodeTargetRoute, encodeTargetRoute, targetRefForAgent, targetStoreKey } from '$lib/resource-id';
 import { BrowserDeviceCredentialStore } from '$lib/device-auth';
@@ -166,7 +167,7 @@ describe('relay command store', () => {
 
   it.each(['reader', 'controller'] as const)('only acknowledges a done pane as a controller (%s)', async (role) => {
     const socket = connectRelay({ capabilities: [] });
-    socket.message({ type: 'agents', agents: [{ ...exactAgentFields(), pane_id: 'w1:p1', agent: 'codex', status: 'succeeded' }] });
+    socket.message({ type: 'agents', agents: [{ ...exactAgentFields(), pane_id: 'w1:p1', agent: 'codex', status: 'succeeded', status_since_at: 100 }] });
     const row = get(relayStore.agents)[0];
     const credential = vi.spyOn(relayStore, 'deviceCredential').mockReturnValue({ role } as never);
     const acknowledgement = relayStore.acknowledgePane(row);
@@ -174,7 +175,7 @@ describe('relay command store', () => {
     if (role === 'reader') {
       await acknowledgement;
       expect(socket.messages().filter(({ type }) => type === 'acknowledge_pane')).toHaveLength(0);
-      expect(get(relayStore.agents)[0].status).toBe('succeeded');
+      expect(get(relayStore.agents)[0]).toMatchObject({ status: 'succeeded', status_since_at: 100 });
       return;
     }
 
@@ -185,7 +186,7 @@ describe('relay command store', () => {
     await acknowledgement;
     expect(get(relayStore.agents)[0].status).toBe('succeeded');
     socket.message({ type: 'agent_update', ...exactAgentFields(), pane_id: row.raw_pane_id, status: 'idle' });
-    expect(get(relayStore.agents)[0].status).toBe('idle');
+    expect(get(relayStore.agents)[0]).toMatchObject({ status: 'idle', status_since_at: undefined });
   });
 
   it('retains authoritative unknown-kind agents without profiles, sessions or workspace records', () => {
@@ -1340,6 +1341,33 @@ describe('relay command store', () => {
     expect(socket.sent.map((payload) => JSON.parse(payload)).filter((message) => message.type === 'read_pane')).toHaveLength(2);
   });
 
+  it('shows the clock only for the group displayed while an answer is pending', async () => {
+    const socket = connectRelay({ capabilities: ['attention_classification'] });
+    const target = { pane_id: 'w1:p1', agent: 'codex', ...exactAgentFields() };
+    const interaction = {
+      id: 'question', kind: 'single_select' as const, question: 'Which fruit?',
+      options: [{ index: 0, label: 'Apple' }, { index: 1, label: 'Pear' }],
+    };
+    const current = () => get(relayStore.agents)[0];
+    socket.message({ type: 'blocked', ...target, attention_kind: 'question', interaction, status_since_at: 100 });
+    const question = current();
+    const answer = relayStore.answerQuestion(question, interaction, { selected: new Set([0]), otherSelected: false, otherText: '' });
+    const command = socket.messages().findLast(message => message.type === 'answer_question')!;
+
+    socket.message({ type: 'agent_update', ...target, status: 'blocked', attention_kind: 'approval', status_since_at: 120 });
+    expect(current()).toMatchObject({ status: 'blocked', interaction });
+    expect(agentStatusSinceAt(current())).toBe(120);
+
+    socket.message({ type: 'agent_update', ...target, status: 'working', status_since_at: 200 });
+    expect(current()).toMatchObject({ status: 'blocked', interaction });
+    expect(agentStatusSinceAt(current())).toBeUndefined();
+
+    socket.message({ type: 'command_result', request_id: command.request_id, ok: true, phase: 'confirmed' });
+    await expect(answer).resolves.toMatchObject({ phase: 'confirmed' });
+    relayStore.applyQuestionInteraction(question, null);
+    expect(agentStatusSinceAt(current())).toBe(200);
+  });
+
   it.each([
     ['question', 'agent_update', 'done'],
     ['approval', 'agents', 'idle'],
@@ -2205,6 +2233,29 @@ describe('relay command store', () => {
     expect(banner?.textContent).toContain('Duplicate agent identity');
     expect(banner?.textContent).toContain('w1:p1');
     banner?.remove();
+  });
+
+  it('uses the clock only from the latest message for the displayed state', () => {
+    const socket = connectRelay({ capabilities: [] });
+    const target = { pane_id: 'w1:p1', ...exactAgentFields() };
+    const current = () => get(relayStore.agents)[0];
+
+    socket.message({ type: 'blocked', ...target, pane_revision: 3, status_since_at: 100 });
+    expect(current()).toMatchObject({ status: 'blocked', status_since_at: 100 });
+    socket.message({ type: 'agent_update', ...target, pane_revision: 4, status: 'blocked' });
+    expect(current().status_since_at).toBeUndefined();
+    socket.message({ type: 'blocked', ...target, pane_revision: 3, status_since_at: 100 });
+    expect(current().status_since_at).toBeUndefined();
+
+    socket.message({ type: 'blocked', ...target, pane_revision: 5, status_since_at: 200 });
+    const working = { ...target, pane_revision: 6, status: 'working', status_since_at: 300 };
+    socket.message({ type: 'agents', agents: [working] });
+    expect(current().status).toBe('blocked');
+    expect(agentStatusSinceAt(current())).toBeUndefined();
+    socket.message({ type: 'agents', agents: [working] });
+    expect(current()).toMatchObject({ status: 'working', status_since_at: 300 });
+    socket.message({ type: 'agents', agents: [{ ...target, pane_revision: 7, status: 'working' }] });
+    expect(current().status_since_at).toBeUndefined();
   });
 
   it('ignores blocked and agent update frames older than the pane revision', () => {

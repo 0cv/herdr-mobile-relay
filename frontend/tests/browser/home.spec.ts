@@ -580,26 +580,39 @@ test('keeps a stale result when a controller tries to open it from jump', async 
   expect((await commands(page)).filter(({ type }) => type === 'acknowledge_pane')).toHaveLength(0);
 });
 
-test('labels fresh inventory activity before the next minute tick', async ({ page }) => {
+test('shows the relay clock on Home without acknowledging a reader’s result', async ({ page }) => {
   const mounted = new Date('2026-08-12T12:00:00Z');
   await page.clock.setFixedTime(mounted);
-  await connectFedora(page, { capabilities: [] });
+  const mac = { ...fedora, id: 'mac', label: 'Mac', url: 'ws://127.0.0.1:8872' };
+  await boot(page, [fedora, mac]);
+  await expect.poll(() => socketCount(page)).toBe(2);
+  await saveDeviceCredential(page, { id: 'credential-reader', deviceId: 'device-reader', secret: 'R'.repeat(43), role: 'reader' });
+  await handshake(page, 0, { capabilities: [] });
+  await handshake(page, 1, { capabilities: [] });
   const working = { pane_id: 'w1:p1', name: 'fix-bug', agent: 'codex', status: 'working' };
   const row = page.getByRole('button', { name: 'Open fix-bug on Fedora' });
-  await server(page, 0, { type: 'agents', agents: [working] });
-  await expect(row).toHaveAccessibleDescription('Working');
+  await server(page, 0, { type: 'agents', agents: [{ ...working, status_since_at: mounted.getTime() - 12 * 60_000 }] });
+  await server(page, 1, { type: 'agents', agents: [working] });
+  await expect(row).toHaveAccessibleDescription('Working · 12m');
+  await expect(page.getByRole('button', { name: 'Open fix-bug on Mac' })).toHaveAccessibleDescription('Working');
 
   const now = mounted.getTime() + 10_000;
   await page.clock.setFixedTime(now);
   const done = { ...working, type: 'agent_update', status: 'succeeded' };
-  const summary = page.locator('.workspace-card summary');
+  const summary = page.locator('.workspace-card summary').filter({ hasText: '@Fedora' });
   const time = summary.locator('time');
-  await server(page, 0, { ...done, last_active_at: now });
-  await expect(row).toHaveAccessibleDescription('New result · last active just now');
+  await server(page, 0, { ...done, last_active_at: now, status_since_at: now });
+  await expect(row).toHaveAccessibleDescription('New result · just now');
   await expect(time).toHaveText('now');
   await expect(time).toHaveAttribute('datetime', new Date(now).toISOString());
 
-  await server(page, 0, { ...done, last_active_at: now + 10_000 });
+  await row.click();
+  await expect(page.getByRole('banner').getByText('fix-bug', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Back', exact: true }).click();
+  await expect(row).toHaveAccessibleDescription('New result · just now');
+  expect((await commands(page)).filter(({ type }) => type === 'acknowledge_pane')).toHaveLength(0);
+
+  await server(page, 0, { ...done, last_active_at: now + 10_000, status_since_at: now + 10_000 });
   await expect(row).toHaveAccessibleDescription('New result');
   await expect(time).toHaveCount(0);
 
@@ -608,6 +621,50 @@ test('labels fresh inventory activity before the next minute tick', async ({ pag
   await server(page, 0, { ...done, last_active_at: 1e16 });
   await expect(row).toHaveAccessibleDescription('New result');
   await expect(time).toHaveCount(0);
+});
+
+test('waits for fresh agent frames after inventory recovery or reconnect', async ({ page }) => {
+  const now = Date.parse('2026-08-12T12:00:00Z');
+  await page.clock.setFixedTime(now);
+  await connectFedora(page);
+  const result = {
+    pane_id: 'w1:p1', workspace_id: 'w1', name: 'fix-bug', agent: 'codex', status: 'succeeded',
+    pane_revision: 10, status_since_at: now - 120_000, last_active_at: now - 120_000,
+  };
+  const idle = {
+    pane_id: 'w1:p2', workspace_id: 'w1', name: 'review-tests', agent: 'codex', status: 'idle',
+    last_active_at: now - 300_000,
+  };
+  const resultRow = page.getByRole('button', { name: 'Open fix-bug on Fedora' });
+  const idleRow = page.getByRole('button', { name: 'Open review-tests on Fedora' });
+  await server(page, 0, { type: 'agents', agents: [result, idle] });
+  await expect(resultRow).toHaveAccessibleDescription('New result · 2m ago');
+
+  await server(page, 0, { type: 'inventory_status', state: 'error', stale: true });
+  await expect(resultRow).toBeDisabled();
+  await expect(resultRow).toHaveAccessibleDescription('New result');
+  await expect(idleRow).toHaveAccessibleDescription('Idle · last active 5m ago');
+  await server(page, 0, { type: 'agents', agents: [result, idle] });
+  await server(page, 0, { type: 'inventory_status', state: 'ready' });
+  await expect(resultRow).toBeEnabled();
+  await expect(resultRow).toHaveAccessibleDescription('New result');
+  await server(page, 0, { type: 'agent_update', ...result });
+  await expect(resultRow).toHaveAccessibleDescription('New result · 2m ago');
+
+  await closeSocket(page, 0);
+  await expect(resultRow).toHaveAccessibleDescription('New result');
+  await expect.poll(() => socketCount(page)).toBe(2);
+  await handshake(page, 1, { inventory: { state: 'ready' } });
+  await expect(resultRow).toBeEnabled();
+  await expect(resultRow).toHaveAccessibleDescription('New result');
+  await expect(idleRow).toHaveAccessibleDescription('Idle · last active 5m ago');
+
+  await server(page, 1, { type: 'agents', agents: [
+    { ...result, status: 'idle', pane_revision: 11, status_since_at: undefined },
+    { ...idle, status: 'working', status_since_at: now - 60_000 },
+  ] });
+  await expect(resultRow).toHaveAccessibleDescription('Idle · last active 2m ago');
+  await expect(idleRow).toHaveAccessibleDescription('Working · 1m');
 });
 
 test('counts new results across a closed workspace and its linked worktree', async ({ page }) => {
@@ -905,12 +962,12 @@ test('keeps static 12px marks, activity and counts legible in six themes at 320p
   await server(page, 0, { type: 'agents', agents: states.map(([name, status, attention_kind], index) => ({
     pane_id: `w1:p${index + 1}`, workspace_id: 'w1', agent: 'codex', project: 'Status sample',
     name, cwd, status, attention_kind, ...(name === 'approve' ? { command } : {}),
-    last_active_at: name === 'work' ? age : undefined,
+    status_since_at: name === 'work' ? age : undefined,
   })) });
   const row = (name: string) => page.getByRole('button', { name: `Open ${name} on Fedora`, exact: true });
   const resultCount = page.locator('.workspace-done-count');
   await expect(resultCount).toHaveText('1 new result');
-  await expect(row('work')).toHaveAccessibleDescription('Working · last active 5m ago');
+  await expect(row('work')).toHaveAccessibleDescription('Working · 5m');
   const preview = row('approve').locator('.prompt-preview');
   await expect(row('approve')).toHaveAccessibleDescription(/^Needs input printf "<a>&\|"; .*…$/);
   expect([...(await preview.textContent())!]).toHaveLength(400);
