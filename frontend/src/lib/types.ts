@@ -1,3 +1,4 @@
+import type { AgentStatusGroup } from './agents';
 import type { TransportKind } from './transports/types';
 
 export type RelayStatus = 'connecting' | 'connected' | 'disconnected';
@@ -259,6 +260,8 @@ export interface Agent {
   host?: string;
   updated_at?: number | string;
   last_active_at?: number | string;
+  status_since_at?: number;
+  statusClockGroup?: AgentStatusGroup;
   last_seen_at?: number | string;
   activity_seq?: number | string;
   pane_revision?: number;

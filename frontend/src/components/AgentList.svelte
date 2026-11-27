@@ -11,6 +11,7 @@
     agentLastActiveAt,
     agentStatusGroup,
     agentStatusMarks,
+    agentStatusSinceAt,
     approvalButtonVariant,
     approvalOptions,
     homeAgentLabel,
@@ -348,10 +349,10 @@
     return homeRelativePath(path, connections.get(relayId)?.home || '');
   }
 
-  function relativeTimestamp(timestamp: number): string {
+  function relativeTimestamp(timestamp: number | undefined): string {
     void ageTick;
     const now = Date.now();
-    if (!timestamp || timestamp > now || !Number.isFinite(new Date(timestamp).getTime())) return '';
+    if (typeof timestamp !== 'number' || !(timestamp > 0) || timestamp > now) return '';
     const seconds = Math.floor((now - timestamp) / 1_000);
     if (seconds < 60) return 'now';
     const minutes = Math.floor(seconds / 60);
@@ -363,6 +364,15 @@
     const months = Math.floor(days / 30);
     if (months < 12) return `${months}mo`;
     return `${Math.floor(months / 12)}y`;
+  }
+
+  function activityAge(agent: Agent, group: ReturnType<typeof agentStatusGroup>): string {
+    if (group === 'other') return '';
+    const idle = group === 'ready';
+    const age = relativeTimestamp(idle ? agentLastActiveAt(agent) : agentStatusSinceAt(agent, group));
+    if (!age) return '';
+    if (idle || group === 'done') return ` · ${idle ? 'last active ' : ''}${age === 'now' ? 'just now' : `${age} ago`}`;
+    return ` · ${age === 'now' ? '<1m' : age}`;
   }
 
   function newResultCount(count: number): string {
@@ -397,10 +407,10 @@
       {@const blocked = group === 'blocked'}
       {@const label = homeAgentLabel(agent)}
       {@const meta = agentMeta(agent, compact)}
-      {@const age = relativeTimestamp(agentLastActiveAt(agent))}
       {@const preview = blocked || group === 'attention' ? waitingPreview(agent, interaction) : ''}
       {@const description = `${activityId}-${encodeURIComponent(agent.pane_id)}`}
-      {@const inventoryReady = !connections.has(agent.relay_id) || connections.get(agent.relay_id)?.inventory.state === 'ready'}
+      {@const connection = connections.get(agent.relay_id)}
+      {@const inventoryReady = !connection || connection.inventory.state === 'ready'}
       <article class:blocked class:compact-agent-card={compact} class:stale={!inventoryReady} class="agent-card">
         <button
           class="agent-open"
@@ -423,7 +433,7 @@
             <span class="agent-project">{label}{#if !compact} <span class="host-badge">@{hostLabel(agent)}</span>{/if}</span>
             {#if meta}<span class="agent-meta">{meta}</span>{/if}
             <span id={description} class="agent-activity">
-              <span>{mark.label + (age ? ` · last active ${age === 'now' ? 'just now' : `${age} ago`}` : '')}</span>
+              <span>{mark.label + activityAge(agent, group)}</span>
               {#if preview}
                 <span class="prompt-preview" class:prompt-full={interaction && quickQuestion(interaction)}>{preview}</span>
               {/if}

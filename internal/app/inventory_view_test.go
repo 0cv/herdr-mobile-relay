@@ -21,6 +21,7 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/config"
 	"github.com/0cv/herdr-mobile-relay/internal/coordinator"
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
+	"github.com/0cv/herdr-mobile-relay/internal/push"
 	"github.com/0cv/herdr-mobile-relay/internal/question"
 	"github.com/0cv/herdr-mobile-relay/internal/transport"
 	"github.com/coder/websocket"
@@ -1085,6 +1086,100 @@ func TestCommittedInventorySnapshotDeepCopiesInteractionSummaries(t *testing.T) 
 	fresh := server.committedInventorySnapshot()
 	if got := fresh.agents[0].Interaction.Options[0].Summary[0].Answer; got != "No" {
 		t.Fatalf("committed interaction summary answer = %q, want No", got)
+	}
+}
+
+func TestStatusClockIncrementalCompletionAndAcknowledgement(t *testing.T) {
+	e := newFrameEnv(t, &coordinator.AgentState{PaneID: "pane-1", TerminalID: "terminal", Status: "working"})
+	s := e.server
+	const completedAt = int64(1_753_178_400_000)
+	s.state.CommitEvent("pane-1", "idle", completedAt)
+	raw, _ := s.state.Agent("pane-1")
+	s.commitAgent(raw, "agent_update")
+	frame := readFrame(t, e.conn)
+	if frame["type"] != "agent_update" || frame["status"] != "done" || frame["status_since_at"] != float64(completedAt) {
+		t.Fatal(frame)
+	}
+	if a := s.committedAgents()[0]; a.Status != "done" || a.StatusSinceAt != completedAt {
+		t.Fatalf("committed result = %+v", a)
+	}
+
+	s.state.AcknowledgePane("pane-1")
+	raw, _ = s.state.Agent("pane-1")
+	s.broadcastCommitted(coordinator.AgentUpdate{Agent: raw})
+	frame = readFrame(t, e.conn)
+	if frame["type"] != "agent_update" || frame["status"] != "idle" {
+		t.Fatal(frame)
+	}
+	if _, present := frame["status_since_at"]; present {
+		t.Fatalf("acknowledgement kept a clock: %v", frame)
+	}
+	publishInventoryForTest(t, s)
+	for _, frame := range e.settle(t) {
+		if frame["type"] == "agents" {
+			var agents []*coordinator.AgentState
+			decodeInto(t, frame["agents"], &agents)
+			if agents[0].Status != "idle" || agents[0].StatusSinceAt != 0 {
+				t.Fatal(frame)
+			}
+		}
+	}
+	if a := s.committedAgents()[0]; a.Status != "idle" || a.StatusSinceAt != 0 {
+		t.Fatalf("committed acknowledgement = %+v", a)
+	}
+}
+
+func TestStatusClockOnlyPublicationSkipsAgentSideEffects(t *testing.T) {
+	pane := &coordinator.AgentState{PaneID: "pane-1", Agent: "codex", Status: "idle"}
+	capture := &coordinator.AgentState{PaneID: "pane-2", Agent: "claude", Status: "working"}
+	e := newFrameEnv(t, pane, capture)
+	s := e.server
+	const startedAt = int64(1_753_178_400_000)
+	s.state.CommitEvent("pane-1", "working", startedAt)
+	publishInventoryForTest(t, s)
+	e.settle(t)
+
+	var err error
+	s.pushM, err = push.NewManager(t.TempDir(), s.logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.historyTasks = newLifecycleTasks(t.Context())
+	defer s.historyTasks.Stop()
+	s.stateViewMu.Lock()
+	s.agentView[0].StatusSinceAt = 0
+	s.stateViewMu.Unlock()
+
+	publishInventoryForTest(t, s)
+	frame := readFrame(t, e.conn)
+	var agents []*coordinator.AgentState
+	decodeInto(t, frame["agents"], &agents)
+	if frame["type"] != "agents" || len(agents) != 2 || agents[0].StatusSinceAt != startedAt || agents[1].StatusSinceAt != 0 {
+		t.Fatal(frame)
+	}
+	if got := s.committedAgents()[0].StatusSinceAt; got != startedAt {
+		t.Fatalf("committed clock = %d, want %d", got, startedAt)
+	}
+	s.historyCaptureMu.Lock()
+	scheduled := len(s.historyLast) > 0
+	s.historyCaptureMu.Unlock()
+	if reads := e.backend.called("ReadPane"); scheduled || s.pushReconciled || len(reads) > 0 {
+		t.Fatalf("time-only publication scheduled history=%t, reconciled push=%t, reads=%v", scheduled, s.pushReconciled, reads)
+	}
+	publishInventoryForTest(t, s)
+	if frames := e.settle(t); len(frames) != 0 {
+		t.Fatalf("unchanged time sent extra frames: %v", frames)
+	}
+
+	pane.Status = "working"
+	pane.Name = "renamed"
+	s.state.CommitInventory([]*coordinator.AgentState{pane, capture}, s.state.RevisionCounter())
+	publishInventoryForTest(t, s)
+	s.historyCaptureMu.Lock()
+	scheduled = !s.historyLast[capture.PaneID].IsZero()
+	s.historyCaptureMu.Unlock()
+	if !scheduled || !s.pushReconciled {
+		t.Fatalf("ordinary inventory change scheduled history=%t, reconciled push=%t", scheduled, s.pushReconciled)
 	}
 }
 

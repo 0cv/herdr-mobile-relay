@@ -92,7 +92,8 @@ import { appScriptPattern, appStylePattern, releaseEntryPath } from './release-r
 // on top of Home status contrast). The scanner stays lazy.
 // Raised from 176 KiB by 255 B for recent slash command suggestions.
 // Editable terminal key row and stable menu layout, with 32 B for build drift.
-const limit = 177 * 1024 + 527;
+// Raised from 177 KiB + 527 B for the relay-observed clocks on Home, with 32 B for build drift.
+const limit = 177 * 1024 + 740;
 const root = resolve(process.argv[2] || 'dist');
 const assetNames = await readdir(join(root, 'assets'));
 const appScript = assetNames.find((name) => appScriptPattern.test(name));

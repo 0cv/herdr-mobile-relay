@@ -13,5 +13,6 @@
   "host": "localhost",
   "session": "",
   "session_name": "",
-  "updated_at": 1753178400000
+  "updated_at": 1753178400000,
+  "status_since_at": 1753178390000
 }

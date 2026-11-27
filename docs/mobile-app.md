@@ -226,9 +226,12 @@ shows its state in words as well as a shape:
 | Open ring | **Idle** — the agent is not working and has no new result. |
 | Dash | **Status unknown** — the relay hasn't reported a recognised state. |
 
-The row shows the waiting question or command when available. **Last active**
-is the age of the last activity the relay reported, not the time spent working
-or waiting. The row does not show a current task or any part of a new answer.
+The row shows the waiting question or command when available. With an updated
+relay, **Needs input**, **Needs inspection**, and **Working** show how long
+the relay has seen the agent in that state. **New result** shows how long ago
+the relay saw the completion. The clock is hidden if the relay didn't see the
+state begin. **Idle** keeps **last active**, the age of the last activity the
+relay reported.
 
 **Mixed**, the default Home Workspaces layout, shows each workspace once and
 marks its most notable session: new result, then working, then idle. **By State**

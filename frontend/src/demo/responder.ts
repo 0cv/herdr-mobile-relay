@@ -124,6 +124,7 @@ export function createDemoResponder(computerId: string, epoch: number) {
     delete agent.options;
     delete agent.interaction;
     agent.status = 'working';
+    agent.status_since_at = Date.now();
     recordActivity(agent);
     append(agent, '', outcome);
   }
@@ -252,6 +253,7 @@ export function createDemoResponder(computerId: string, epoch: number) {
         case 'acknowledge_pane': {
           if (agentStatusGroup(agent) !== 'done') return [complete()];
           agent.status = 'idle';
+          delete agent.status_since_at;
           agent.pane_revision += 1;
           return [complete(), agentUpdate(agent)];
         }
@@ -297,7 +299,7 @@ export function createDemoResponder(computerId: string, epoch: number) {
             return fail('That sample rollout choice is no longer available.');
           }
           finishInteraction(agent, `Rollout choice: ${choice.label}. Demo only; nothing was deployed.`);
-          return [complete({}, 'confirmed')];
+          return [agentUpdate(agent), complete({}, 'confirmed')];
         }
         default: return fail('This action is not available in the demo.');
       }

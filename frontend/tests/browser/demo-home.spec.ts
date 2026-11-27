@@ -1019,6 +1019,9 @@ for (const { agent, other, choice, from, outcome } of [
       await waiting.getByRole('button', { name: choice, exact: true }).click();
     }
     await expect(waiting.getByRole('button', { name: `Open ${agent} on Atlas` })).toHaveCount(0);
+    if (agent === 'Release plan' && from === 'the agent list') {
+      await expect(demoAgent(page, agent)).toHaveAccessibleDescription('Working · <1m');
+    }
     await expect(sibling).toHaveText(siblingText);
     await openDemoAgent(page, agent);
     await expect(output(page)).toContainText(outcome);
@@ -1047,7 +1050,7 @@ test('shows five workspaces and activity relative to the visit', async ({ page }
   if (!await workspaces.getByRole('region', { name: 'fix/one worktree' }).isVisible()) await project.click();
   const worktree = workspaces.getByRole('region', { name: 'fix/one worktree' });
   await expect(worktree.getByText('fix/one', { exact: true })).toBeVisible();
-  await expect(demoAgent(page, 'Fixture checks')).toHaveAccessibleDescription('New result · last active 32m ago');
+  await expect(demoAgent(page, 'Fixture checks')).toHaveAccessibleDescription('New result · 32m ago');
   const history = await openSampleConversation(page);
   await expect(history.locator('time').last()).toHaveAttribute('datetime', '2031-04-06T13:52:00.000Z');
   await expectCleanDemoOrigin(page);
@@ -1065,7 +1068,7 @@ test('finds input, opens the new result and reads an exact code sample at 320 px
   const result = demoAgent(page, 'Fixture checks');
   const idle = demoAgent(page, 'Release notes');
   const project = page.locator('.workspace-card > summary').filter({ has: page.getByText('Project', { exact: true }) });
-  await expect(result).toHaveAccessibleDescription(/^New result · last active /);
+  await expect(result).toHaveAccessibleDescription('New result · 32m ago');
   await expect(idle).toHaveAccessibleDescription(/^Idle · last active /);
   await expect(result.locator('.status-check')).toBeVisible();
   await expect(idle.locator('.status-ring')).toBeVisible();
@@ -1079,7 +1082,7 @@ test('finds input, opens the new result and reads an exact code sample at 320 px
   await expect(result).toHaveAccessibleDescription(/^Idle · last active /);
   await expect(project.locator('.workspace-done-count')).toHaveCount(0);
   await page.reload();
-  await expect(result).toHaveAccessibleDescription(/^New result · last active /);
+  await expect(result).toHaveAccessibleDescription('New result · 32m ago');
   await expect(project).toHaveAccessibleName(/1 new result/);
   await page.locator('html').evaluate(element => { element.style.filter = 'grayscale(1)'; });
   const history = await openSampleConversation(page);
