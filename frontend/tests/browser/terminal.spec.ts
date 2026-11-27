@@ -793,6 +793,160 @@ test('refreshes file links on the held Terminal frame when the working directory
   expect((await commands(page)).filter(({ type }) => String(type).startsWith('workspace_'))).toEqual([]);
 });
 
+test('loads the key row editor on click and saves a keyboard edit for one exact tap after reload', async ({ page }) => {
+  const editorRequests: string[] = [];
+  page.on('request', (request) => {
+    if (request.url().includes('/KeyRowEditor-')) editorRequests.push(request.url());
+  });
+  const agent = {
+    pane_id: 'w1:p1', status: 'idle', project: 'Key row edit', agent: 'claude',
+    server_session_id: 'primary', terminal_id: 'terminal-1', generation: 1,
+  };
+  await openAgent(page, agent);
+  const keysSent = async () => (await commands(page)).filter((command) => command.type === 'send_keys');
+  const row = page.locator('.term-keys');
+  const chord = row.getByRole('button', { name: 'Ctrl+C', exact: true });
+  await expect(row.getByRole('button', { name: 'Enter', exact: true })).toBeVisible();
+  expect(editorRequests).toEqual([]);
+
+  await chooseMore(page, 'Manage agent');
+  const manage = page.getByRole('dialog', { name: 'Manage Agent' });
+  const edit = manage.getByRole('button', { name: 'Edit key row' });
+  await expect(edit).toBeVisible();
+  expect(editorRequests).toEqual([]);
+  await edit.click();
+  const picker = manage.getByRole('combobox', { name: 'Add a key' });
+  await expect(picker).toBeFocused();
+  expect(editorRequests).toHaveLength(1);
+  await picker.selectOption('ctrl-letter');
+  const letter = manage.getByRole('combobox', { name: 'Letter', exact: true });
+  await letter.selectOption('C');
+  await manage.getByRole('button', { name: 'Add', exact: true }).press('Enter');
+  await manage.getByRole('button', { name: 'Move earlier: Ctrl+C' }).press('Enter');
+  await expect(manage.getByRole('status')).toHaveText('Ctrl+C moved to position 8 of 9.');
+  await manage.getByRole('button', { name: 'Remove Esc', exact: true }).press('Enter');
+  await manage.getByRole('button', { name: 'Save', exact: true }).press('Enter');
+  await expect(edit).toBeFocused();
+  await manage.getByRole('button', { name: 'Close', exact: true }).click();
+  await expect(chord).toBeVisible();
+  expect(await keysSent()).toEqual([]);
+
+  await page.getByRole('button', { name: 'Back', exact: true }).click();
+  await page.reload();
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, { type: 'agents', agents: [agent] });
+  await page.getByRole('button', { name: 'Open Key row edit on Fedora' }).click();
+  await expect(row.getByRole('button').last()).toHaveText('Enter');
+  await expect(row.getByRole('button', { name: 'Esc', exact: true })).toHaveCount(0);
+  await chord.tap();
+  await expect.poll(keysSent).toEqual([expect.objectContaining({
+    pane_id: agent.pane_id,
+    target: { relay_id: fedora.id, pane_id: agent.pane_id, server_session_id: 'primary', terminal_id: 'terminal-1', generation: 1 },
+    keys: ['ctrl+c'], activity_label: 'Ctrl+C',
+  })]);
+});
+
+test('keeps Manage open if the key row editor cannot load', async ({ page }) => {
+  await page.route('**/KeyRowEditor-*.js', (route) => route.abort());
+  await openAgent(page, { pane_id: 'w1:p1', status: 'idle', project: 'Key row', agent: 'claude' });
+  await chooseMore(page, 'Manage agent');
+  const manage = page.getByRole('dialog', { name: 'Manage Agent' });
+  await manage.getByRole('button', { name: 'Edit key row' }).click();
+  await expect(manage.getByRole('alert')).toHaveText('Could not open the key row editor.');
+  await expect(manage.getByRole('button', { name: 'Edit key row' })).toBeEnabled();
+  await expect(manage.getByRole('combobox', { name: 'Default View' })).toBeVisible();
+});
+
+test('scrolls the Large default key row at 320px without moving Keyboard or resizing the buttons', async ({ page, browserName }) => {
+  await page.setViewportSize({ width: 500, height: 740 });
+  await page.addInitScript(() => localStorage.setItem('herdr_terminal_font_size', 'large'));
+  await openAgent(page, { pane_id: 'w1:p1', status: 'blocked', attention_kind: 'approval', project: 'Keyboard row', agent: 'claude', options: ['Allow once', 'Deny'] },
+    { capabilities: ['attention_classification', 'manual_terminal_input'] });
+  const row = page.locator('.term-keys');
+  const strip = row.locator('.key-strip');
+  const keyboard = row.getByRole('button', { name: 'Keyboard', exact: true });
+  const esc = row.getByRole('button', { name: 'Esc', exact: true });
+  const enter = row.getByRole('button', { name: 'Enter', exact: true });
+  await expect(strip.getByRole('button', { name: 'Keyboard', exact: true })).toBeInViewport({ ratio: 1 });
+  const height = (await esc.boundingBox())!.height;
+  const rowHeight = (await row.boundingBox())!.height;
+  await keyboard.focus();
+  await page.setViewportSize({ width: 320, height: 740 });
+  await expect(row).toHaveClass(/scrolling/);
+  await expect(strip.getByRole('button', { name: 'Keyboard', exact: true })).toHaveCount(0);
+  await expect(keyboard).toBeInViewport({ ratio: 1 });
+  await expect(esc).toBeInViewport({ ratio: 1 });
+  expect(await strip.evaluate((el) => el.scrollWidth > el.clientWidth)).toBe(true);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(320);
+  await expect(keyboard).toBeFocused();
+  await page.keyboard.press('Enter');
+  const input = page.getByRole('region', { name: 'Keyboard', exact: true });
+  await expect(input).toBeVisible();
+  await input.getByRole('button', { name: 'Close', exact: true }).click();
+  await expect(keyboard).toBeFocused();
+
+  if (browserName === 'chromium') {
+    const session = await page.context().newCDPSession(page);
+    const { x, y, width } = (await esc.boundingBox())!;
+    const touchY = Math.round(y + height / 2);
+    const start = Math.round(x + width / 2 + 180);
+    await session.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: start, y: touchY }] });
+    for (const distance of [36, 72, 120, 180]) {
+      await session.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: start - distance, y: touchY }] });
+    }
+    await session.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await session.detach();
+  } else {
+    await strip.evaluate((el) => { el.scrollLeft = el.scrollWidth; });
+  }
+  await expect(enter).toBeInViewport({ ratio: 0.98 });
+  await expect(keyboard).toBeInViewport({ ratio: 1 });
+  expect((await enter.boundingBox())!.height).toBe(height);
+  expect((await row.boundingBox())!.height).toBe(rowHeight);
+  expect((await commands(page)).filter((command) => command.type === 'send_keys')).toEqual([]);
+
+  await keyboard.focus();
+  await page.setViewportSize({ width: 500, height: 740 });
+  await expect(strip.getByRole('button', { name: 'Keyboard', exact: true })).toBeFocused();
+});
+
+test('keeps both key menus unclipped at opposite ends of a scrolled key row', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 740 });
+  await page.addInitScript(() => {
+    localStorage.setItem('herdr_terminal_key_row', JSON.stringify([
+      'fkeys', 'ctrl+a', 'ctrl+b', 'ctrl+c', 'ctrl+d', 'ctrl+e', 'ctrl+f', 'ctrl+g', 'ctrl+h', 'shift+tab', 'arrows',
+    ]));
+  });
+  await openAgent(page, { pane_id: 'w1:p1', status: 'idle', project: 'Key menus', agent: 'claude' }, { capabilities: ['paging_keys'] });
+  const row = page.locator('.term-keys');
+  const strip = row.locator('.key-strip');
+  const fkeys = row.getByRole('button', { name: 'Function keys' });
+  const arrows = row.getByRole('button', { name: 'Arrow keys' });
+  const functions = row.getByRole('group', { name: 'Function keys' });
+  const navigation = row.getByRole('group', { name: 'Navigation keys' });
+  await expect(row).toHaveClass(/scrolling/);
+  await fkeys.tap();
+  await expect(functions).toBeInViewport({ ratio: 1 });
+  await functions.getByRole('button', { name: 'F1', exact: true }).click({ trial: true });
+  await strip.evaluate((el) => { el.scrollLeft = el.scrollWidth; });
+  await expect(functions).toBeInViewport({ ratio: 1 });
+
+  await arrows.tap();
+  await expect(functions).toBeHidden();
+  await expect(navigation).toBeInViewport({ ratio: 1 });
+  const arrowBounds = (await arrows.boundingBox())!;
+  const menuBounds = (await navigation.boundingBox())!;
+  expect(menuBounds.x + menuBounds.width).toBeCloseTo(arrowBounds.x + arrowBounds.width, 0);
+  await navigation.getByRole('button', { name: 'Page down' }).click({ trial: true });
+  await strip.evaluate((el) => { el.scrollLeft = 0; });
+  const rowBounds = (await row.boundingBox())!;
+  await expect.poll(async () => (await navigation.boundingBox())?.x)
+    .toBeCloseTo(rowBounds.x + rowBounds.width - menuBounds.width, 0);
+  await expect(navigation).toBeInViewport({ ratio: 1 });
+  expect((await commands(page)).filter((command) => command.type === 'send_keys')).toEqual([]);
+});
+
 test('keeps the terminal key row compact on touch screens', async ({ page }) => {
   await openOmpPane(page, 'Key row');
   await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: 'ready' });

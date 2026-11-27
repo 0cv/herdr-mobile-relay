@@ -12,6 +12,7 @@ project follows [Semantic Versioning](https://semver.org/).
 - When you can send a prompt to a working Claude Code, Codex, Pi, Oh My Pi or
   OpenCode agent, the phone shows **Adds to task**. Slash commands keep the
   usual confirmation.
+- Choose and reorder your terminal keys in **Manage agent → Edit key row**, including one-tap Ctrl+C and Shift+Tab. No relay update needed.
 
 ### Changed
 
@@ -34,6 +35,7 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- The terminal key row keeps open key menus usable when the screen gets narrow and Keyboard moves to the edge.
 - With an updated relay, opening Conversation or Terminal as a reader no longer
   clears a new result for other devices. Controllers still clear it by opening it.
 

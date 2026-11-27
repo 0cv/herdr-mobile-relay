@@ -366,6 +366,39 @@ async function exerciseTerminal(page: Page) {
   await back(page);
 }
 
+test('renders the default terminal keys without Array.toSpliced', async ({ page }) => {
+  await page.addInitScript(() => { Reflect.deleteProperty(Array.prototype, 'toSpliced'); });
+  await page.goto(demoOrigin);
+  await openDemoAgent(page, 'Fixture checks');
+  const row = page.locator('.term-keys');
+  await expect(row.getByRole('button', { name: 'Esc', exact: true })).toBeVisible();
+  await expect(row.getByRole('button', { name: 'Enter', exact: true })).toBeVisible();
+});
+
+test('edits the key row and sends Ctrl+C on a sample controller', async ({ page }) => {
+  const observation = await watchDemo(page);
+  await page.goto(demoOrigin);
+  await openDemoAgent(page, 'Fixture checks');
+  await chooseMore(page, 'Manage agent');
+  const manage = page.getByRole('dialog', { name: 'Manage Agent' });
+  await manage.getByRole('button', { name: 'Edit key row' }).click();
+  await manage.getByRole('combobox', { name: 'Add a key' }).selectOption('ctrl-letter');
+  await manage.getByRole('combobox', { name: 'Letter' }).selectOption('C');
+  await manage.getByRole('button', { name: 'Add', exact: true }).click();
+  await manage.getByRole('button', { name: 'Save', exact: true }).click();
+  await manage.getByRole('button', { name: 'Close', exact: true }).click();
+
+  const chord = page.locator('.term-keys').getByRole('button', { name: 'Ctrl+C', exact: true });
+  await chord.tap();
+  await expectTerminalExchange(page, 'Keys: ctrl+c', '^C · Sample step interrupted.');
+  await page.reload();
+  await openDemoAgent(page, 'Fixture checks');
+  await expect(page.locator('.term-keys').getByRole('button', { name: 'Esc', exact: true })).toBeVisible();
+  await expect(chord).toHaveCount(0);
+  await expectCleanDemoOrigin(page);
+  expect(observation.unexpected).toEqual([]);
+});
+
 test('git status agrees with the workspace inspector on a linked worktree', async ({ page }) => {
   const observation = await watchDemo(page);
   await page.goto(demoOrigin);
@@ -838,6 +871,86 @@ async function expectWaitingKeyFeedback(page: Page) {
   await expectKeyNote(page, 'Use the waiting controls to make a choice.');
   await expect(down).toBeInViewport({ ratio: 1 });
 }
+
+test('keeps the arrow menu open through the waiting key row width limit', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const observation = await watchDemo(page);
+  await page.goto(demoOrigin);
+  await page.evaluate(() => { document.documentElement.style.fontSize = '15px'; });
+  await page.getByRole('region', { name: 'Needs input' }).getByRole('button', { name: 'More…', exact: true }).click();
+
+  const row = page.locator('.term-keys');
+  const strip = row.locator('.key-strip');
+  const arrows = row.getByRole('button', { name: 'Arrow keys', exact: true });
+  const down = row.getByRole('group', { name: 'Navigation keys' }).getByRole('button', { name: 'Down', exact: true });
+  await expect(strip.getByRole('button', { name: 'Keyboard', exact: true })).toBeVisible();
+  await arrows.click();
+  await expect(down).toBeVisible();
+  const classChanges = await row.evaluateHandle((element) => {
+    const changes: (string | null)[] = [];
+    new MutationObserver((records) => changes.push(...records.map((record) => record.oldValue)))
+      .observe(element, { attributeFilter: ['class'], attributeOldValue: true });
+    return changes;
+  });
+
+  await page.setViewportSize({ width: 320, height: 844 });
+  await expect(row).toHaveClass(/scrolling/);
+  await expect(strip.getByRole('button', { name: 'Keyboard', exact: true })).toHaveCount(0);
+  const widths = await row.evaluate((element) => {
+    const { paddingLeft, paddingRight } = getComputedStyle(element);
+    return {
+      available: element.clientWidth - parseFloat(paddingLeft) - parseFloat(paddingRight),
+      strip: element.querySelector('.key-strip')!.getBoundingClientRect().width,
+      entries: element.querySelector('.key-entries')!.getBoundingClientRect().width,
+    };
+  });
+  expect(widths.entries).toBeLessThan(widths.available);
+  expect(widths.entries).toBeGreaterThan(widths.strip);
+
+  for (let count = 0; count < 2; count++) {
+    await down.click({ timeout: 3_000 });
+    await expectKeyNote(page, 'Sample checks are unavailable while this agent is waiting for a choice.');
+    await expect(arrows).toHaveAttribute('aria-expanded', 'true');
+  }
+  await expect(row).toHaveClass(/scrolling/);
+  expect(await classChanges.jsonValue()).toEqual(['term-keys']);
+  expect(observation.unexpected).toEqual([]);
+});
+
+test('keeps the arrow menu open when Enter scrolls the Large waiting key row', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 844 });
+  const observation = await watchDemo(page);
+  await page.goto(demoOrigin);
+  const settings = await openSettings(page);
+  await settings.getByRole('group', { name: 'Interface Size' }).getByRole('button', { name: 'Large', exact: true }).click();
+  await back(page);
+  await page.getByRole('region', { name: 'Needs input' }).getByRole('button', { name: 'More…', exact: true }).click();
+
+  const column = page.locator('.terminal-view.question-only');
+  const row = column.locator('.term-keys');
+  const strip = row.locator('.key-strip');
+  const arrows = row.getByRole('button', { name: 'Arrow keys', exact: true });
+  const menu = row.getByRole('group', { name: 'Navigation keys' });
+  const down = menu.getByRole('button', { name: 'Down', exact: true });
+  const scrollLeft = () => strip.evaluate((el) => el.scrollLeft);
+  await expect(row).toHaveClass(/scrolling/);
+  await arrows.evaluate((button) => button.scrollIntoView({ block: 'nearest', inline: 'nearest' }));
+  await arrows.click();
+  await expect(down).toBeInViewport({ ratio: 1 });
+
+  const before = await scrollLeft();
+  await row.getByRole('button', { name: 'Enter', exact: true }).click();
+  await expect.poll(scrollLeft).toBeGreaterThan(before);
+  await expectKeyNote(page, 'Use the waiting controls to make a choice.');
+  await expect(arrows).toHaveAttribute('aria-expanded', 'true');
+  await expect(menu).toBeInViewport({ ratio: 1 });
+  await expect(down).toBeInViewport({ ratio: 1 });
+  const terminal = (await column.boundingBox())!;
+  const popup = (await menu.boundingBox())!;
+  expect(popup.x).toBeGreaterThanOrEqual(terminal.x);
+  expect(popup.x + popup.width).toBeLessThanOrEqual(terminal.x + terminal.width);
+  expect(observation.unexpected).toEqual([]);
+});
 
 for (const { agent, other, choice, from, outcome } of [
   { agent: 'Patch review', other: 'Release plan', choice: 'Allow once', from: 'the agent list', outcome: 'Approval: Allow once.' },

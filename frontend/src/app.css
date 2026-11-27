@@ -760,25 +760,26 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .draft-status { color: var(--muted); font-size: .7rem; margin: 0 .75rem .25rem; }
 .quick-actions { border-top: 1px solid var(--border); padding: .55rem; }
 .quick-actions .button { flex: 1; }
-.term-keys { align-items: center; border-top: 1px solid var(--border); display: flex; gap: .2rem; padding: .4rem .35rem; }
+.term-keys { align-items: center; border-top: 1px solid var(--border); display: flex; gap: .2rem; padding: .4rem .35rem; position: relative; }
+.key-strip { flex: 1; gap: inherit; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.key-strip::-webkit-scrollbar { display: none; }
+.key-entries { align-items: center; display: flex; gap: inherit; min-height: 2.15rem; min-width: max-content; }
+.term-keys:not(.scrolling) .key-strip { overflow: visible; }
+.scrolling .key-strip button:focus-visible { outline-offset: -2px; }
 .term-keys .button { flex-shrink: 0; font-size: .72rem; height: 2.15rem; padding: 0 .4rem; white-space: nowrap; }
 .key-feedback { background: color-mix(in srgb, var(--primary) 10%, var(--background)); border-top: 1px solid var(--border); color: var(--muted); font-size: .66rem; margin: 0; min-height: 1.55rem; padding: .35rem .65rem; }
 .key-feedback.error { color: var(--danger); }
 .term-keys .spacer { flex: 1; }
 @keyframes key-flash { from { background: var(--primary); color: var(--primary-foreground); } }
 .key-flash { animation: key-flash .3s ease-out; }
-.modifier-menu, .arrow-menu, .fkey-menu { position: relative; }
 .modifier-key-input { border: 0; height: 1px; left: 50%; opacity: 0; padding: 0; pointer-events: none; position: absolute; width: 1px; }
-.modifier-menu .button[aria-pressed='true'] { background: var(--primary); color: var(--primary-foreground); }
-/* Inline-level buttons here would align on the text baseline, which drops Alt
-   about a pixel below Shift and Ctrl because their glyph boxes differ. */
-.modifier-menu { align-items: center; display: flex; gap: .2rem; }
+.term-keys .button[aria-pressed='true'] { background: var(--primary); color: var(--primary-foreground); }
 .manual-input-trigger { display: flex; }
 /* An icon standing in for a button name inside a sentence, aligned with the surrounding text. */
 .inline-icon { display: inline-block; height: 1.2em; vertical-align: -.25em; width: 1.2em; }
 /* With the Keyboard button shown, the key row is about 2px wider than a 320px screen; tighter gaps keep Enter whole. */
 @media (max-width: 340px) {
-  .term-keys, .modifier-menu { gap: .1rem; }
+  .term-keys { gap: .1rem; }
 }
 /* 1.15rem keeps these buttons at the row's 2.15rem, unlike the 1.5rem
    .button-symbol, which makes its button taller than the lettered ones. */
@@ -790,10 +791,12 @@ textarea { min-height: 6.5rem; resize: vertical; }
    nudge centres it on every platform: its ink sits in the top half of the em
    box. Measured on Android and desktop, both ~3.1px high before the nudge. */
 .key-caret { display: block; font-size: 1.25rem; line-height: 1; transform: translateY(.18em); }
-.arrow-popup { background: var(--card); border: 1px solid var(--border); border-radius: .7rem; bottom: 2.8rem; display: grid; gap: .2rem; grid-template-columns: repeat(3, 2.3rem); padding: .35rem; position: absolute; right: 0; z-index: 10; }
+/* Anchor to the row so the strip cannot clip the menus, without changing tab order. */
+.arrow-popup, .fkey-popup { background: var(--card); border: 1px solid var(--border); border-radius: .7rem; bottom: 3.2rem; display: grid; gap: .2rem; left: 0; padding: .35rem; position: absolute; transform: translateX(max(0px, calc(var(--key-end) - 100%))); z-index: 10; }
+.arrow-popup { grid-template-columns: repeat(3, 2.3rem); }
 .arrow-popup button { background: var(--secondary); border: 0; border-radius: .4rem; color: var(--foreground); height: 2.3rem; }
 .arrow-popup .paging-key { font-size: .62rem; padding: 0; }
-.fkey-popup { background: var(--card); border: 1px solid var(--border); border-radius: .7rem; bottom: 2.8rem; display: grid; gap: .2rem; grid-template-columns: repeat(4, 2.6rem); padding: .35rem; position: absolute; right: 0; z-index: 10; }
+.fkey-popup { grid-template-columns: repeat(4, 2.6rem); }
 .fkey-popup button { background: var(--secondary); border: 0; border-radius: .4rem; color: var(--foreground); font-size: .72rem; height: 2.3rem; }
 .secret-prompt { border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: .4rem; padding: .55rem .75rem; }
 .secret-prompt p { font-size: .72rem; line-height: 1.4; margin: 0; }
