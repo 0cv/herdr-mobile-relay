@@ -3,6 +3,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import {
   HOME_LAYOUT_KEY,
   INTERFACE_SIZE_KEY,
+  RECENT_SLASH_COMMANDS_KEY,
   TERMINAL_HEIGHT_LEASE_KEY,
   TERMINAL_HISTORY_KEY,
   TERMINAL_REFRESH_KEY,
@@ -46,6 +47,52 @@ it.each([null, 'invalid', ''])('loads defaults for missing or invalid preference
     theme: 'nord', interfaceSize: 'compact', historyLines: 1_000, refreshInterval: 250,
     homeLayout: 'mixed', heightLease: false, wakeLock: false,
   });
+});
+
+it.each([
+  null, 'invalid', '[]', 'null', '{"codex":"/review"}', '{"codex":["/review focus"]}',
+  '{"codex":["/review","/review"]}', '{"codex":[4]}', '{"not-an-agent":["/review"]}',
+  JSON.stringify({ codex: Array.from({ length: 11 }, (_, i) => `/command-${i}`) }),
+  JSON.stringify({ codex: ['/' + 'a'.repeat(121)] }),
+])('starts with no recent commands for missing or malformed storage: %s', async (stored) => {
+  if (stored !== null) localStorage.setItem(RECENT_SLASH_COMMANDS_KEY, stored);
+  const { readRecentSlashCommands } = await import('$lib/preferences');
+  expect(readRecentSlashCommands()).toEqual({});
+});
+
+it('stores up to ten distinct commands per canonical kind, newest first', async () => {
+  const { readRecentSlashCommands, recordRecentSlashCommand } = await import('$lib/preferences');
+  for (let i = 0; i < 11; i++) recordRecentSlashCommand('Codex', `/command-${i}`);
+  recordRecentSlashCommand('OpenAI Codex', '/command-3');
+  recordRecentSlashCommand('Claude Code', '/command-3');
+  recordRecentSlashCommand('unknown', '/review');
+
+  const expected = {
+    codex: [3, 10, 9, 8, 7, 6, 5, 4, 2, 1].map((i) => `/command-${i}`),
+    claude: ['/command-3'],
+  };
+  expect(JSON.parse(localStorage.getItem(RECENT_SLASH_COMMANDS_KEY)!)).toEqual(expected);
+  expect(readRecentSlashCommands()).toEqual(expected);
+});
+
+it('merges the latest storage before a write', async () => {
+  const { readRecentSlashCommands, recordRecentSlashCommand } = await import('$lib/preferences');
+  expect(readRecentSlashCommands()).toEqual({});
+  localStorage.setItem(RECENT_SLASH_COMMANDS_KEY, JSON.stringify({ codex: ['/review'] }));
+  recordRecentSlashCommand('Claude Code', '/help');
+  expect(readRecentSlashCommands()).toEqual({ codex: ['/review'], claude: ['/help'] });
+});
+
+it('ignores inaccessible recent-command storage', async () => {
+  const getItem = localStorage.getItem.bind(localStorage);
+  vi.spyOn(localStorage, 'getItem').mockImplementation((key) => {
+    if (key === RECENT_SLASH_COMMANDS_KEY) throw new Error('unreadable');
+    return getItem(key);
+  });
+  const { readRecentSlashCommands, recordRecentSlashCommand } = await import('$lib/preferences');
+  expect(readRecentSlashCommands()).toEqual({});
+  vi.spyOn(localStorage, 'setItem').mockImplementation(() => { throw new Error('full'); });
+  expect(() => recordRecentSlashCommand('codex', '/review')).not.toThrow();
 });
 
 it('persists choices, applies appearance changes and reloads the saved values', async () => {

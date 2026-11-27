@@ -1,9 +1,12 @@
 import { isRecord } from './record';
 import { get, writable } from 'svelte/store';
+import { AGENT_KIND_ALIASES, agentKind, type AgentKind } from './agents';
+import { SLASH_COMMAND_MAX_NAME_LENGTH, SLASH_COMMAND_NAME } from './wire-normalizers';
 import {
   DEFAULT_AGENT_VIEW_KEY,
   PANE_AGENT_VIEW_OVERRIDES_KEY,
   HIDDEN_SERVERS_KEY,
+  RECENT_SLASH_COMMANDS_KEY,
   HOME_LAYOUT_KEY,
   HOME_LAYOUTS,
   INTERFACE_SIZE_KEY,
@@ -66,6 +69,25 @@ export function readPaneAgentViewOverrides(
       if (parsePaneViewPreferenceKey(key) && isAgentView(value)) overrides[key] = value;
     }
     return overrides;
+  } catch {
+    return {};
+  }
+}
+
+const RECENT_SLASH_COMMAND_LIMIT = 10;
+type RecentSlashCommands = Partial<Record<AgentKind, string[]>>;
+
+export function readRecentSlashCommands(): RecentSlashCommands {
+  try {
+    const stored: unknown = JSON.parse(localStorage.getItem(RECENT_SLASH_COMMANDS_KEY) || '{}');
+    if (!isRecord(stored)) return {};
+    for (const [kind, commands] of Object.entries(stored)) {
+      if (AGENT_KIND_ALIASES.get(kind) !== kind || !Array.isArray(commands)
+        || commands.length > RECENT_SLASH_COMMAND_LIMIT || new Set(commands).size !== commands.length
+        || commands.some((command) => typeof command !== 'string'
+          || command.length > SLASH_COMMAND_MAX_NAME_LENGTH || !SLASH_COMMAND_NAME.test(command))) return {};
+    }
+    return stored;
   } catch {
     return {};
   }
@@ -177,6 +199,18 @@ export function setPaneAgentView(
   }
   paneAgentViewOverrides.set(next);
   return 'saved';
+}
+
+export function recordRecentSlashCommand(agent: string | undefined, command: string): void {
+  const kind = agentKind(agent);
+  if (!kind) return;
+  const current = readRecentSlashCommands();
+  current[kind] = [...new Set([command, ...(current[kind] ?? [])])].slice(0, RECENT_SLASH_COMMAND_LIMIT);
+  try {
+    localStorage.setItem(RECENT_SLASH_COMMANDS_KEY, JSON.stringify(current));
+  } catch {
+    return;
+  }
 }
 
 function readHiddenServers(): string[] {

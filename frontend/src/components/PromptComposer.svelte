@@ -6,7 +6,8 @@
   import Button from '$components/ui/Button.svelte';
   import { attachmentsAvailable, slashCommandsAvailable, promptAutocorrect, promptSpellcheck } from '$lib/composer-policy';
   import { clearPromptDraft, loadPromptDraft, promptComposerScope, savePromptDraft } from '$lib/prompt-drafts';
-  import { interfaceSize } from '$lib/preferences';
+  import { agentKind } from '$lib/agents';
+  import { interfaceSize, readRecentSlashCommands, recordRecentSlashCommand } from '$lib/preferences';
   import { relayProtocolError } from '$lib/protocol';
   import { targetRefForAgent, targetRefMatchesAgent } from '$lib/resource-id';
   import { relayStore } from '$lib/store';
@@ -18,8 +19,7 @@
   import { promptDispatchRestriction } from '$lib/terminal-input';
   import { inputContextIdentity } from '$lib/input-target-state';
   import { guardReload, holdReloadsWhileSending } from '$lib/reload-guard';
-  import { busySendHint, dispatchFlag, type ComposerSubmitAdapter } from '$lib/composer';
-  import { SLASH_COMMAND_NAME } from '$lib/wire-normalizers';
+  import { busySendHint, dispatchFlag, matchSlashCommands, promptSlashCommand, type ComposerSubmitAdapter } from '$lib/composer';
   import type { AttachmentBatchController, AttachmentBatchSnapshot, AttachmentRef } from '$lib/attachments';
   import type { Agent, FrontendTargetRef, SlashCommand, SlashCommandCatalog, TerminalFrame } from '$lib/types';
 
@@ -102,21 +102,24 @@
   let activeSlashIndex = $state(0);
   let dismissedSlashQuery = $state<string | null>(null);
 
+  const promptLocked = $derived(readOnly || promptBlocked || noEchoActive || deliveryBlocked);
+  const inputLocked = $derived(promptLocked || attachmentsBlocked);
+
   const MAX_VISIBLE_SLASH_COMMANDS = 200;
   const slashQuery = $derived(composer.startsWith('/') && !/\s/.test(composer) ? composer.slice(1).toLocaleLowerCase() : null);
-  const matchingSlashCommands = $derived.by(() => {
-    if (slashQuery === null) return [];
-    if (!slashQuery) return slashCatalog.commands;
-    return slashCatalog.commands.filter((entry) => entry.command.slice(1).toLocaleLowerCase().startsWith(slashQuery));
+  const slashMenuOpen = $derived(slashCommandsAvailable && !inputLocked && slashQuery !== null && dismissedSlashQuery !== composer);
+  const slashAgentKind = $derived(agentKind(agent.agent));
+  const recentSlashCommands = $derived.by(() => {
+    const kind = slashAgentKind;
+    return slashMenuOpen && kind ? untrack(() => readRecentSlashCommands()[kind]) : undefined;
   });
+  const matchingSlashCommands = $derived(matchSlashCommands(slashCatalog.commands, slashQuery, recentSlashCommands));
   const filteredSlashCommands = $derived(matchingSlashCommands.slice(0, MAX_VISIBLE_SLASH_COMMANDS));
   const slashMatchesHidden = $derived(matchingSlashCommands.length > filteredSlashCommands.length);
   const effectiveSlashIndex = $derived(filteredSlashCommands.length
     ? Math.min(activeSlashIndex, filteredSlashCommands.length - 1)
     : -1);
 
-  const promptLocked = $derived(readOnly || promptBlocked || noEchoActive || deliveryBlocked);
-  const inputLocked = $derived(promptLocked || attachmentsBlocked);
   const targetRef = $derived(targetRefForAgent(agent));
   const canSend = $derived(!promptLocked && !sending && !sendingSecret && !uploadingAttachment && Boolean(targetRef));
   const promptText = $derived(submitAdapter?.filter ? composer : composer.replace(/[\r\n]+$/g, ''));
@@ -124,7 +127,7 @@
   const busySend = $derived.by(() => {
     if (!canSend || dispatchBlocked || submitAdapter
       || connection?.status !== 'connected' || relayProtocolError(connection) || connection.inventory.state !== 'ready'
-      || SLASH_COMMAND_NAME.test(promptText.trimStart().split(/\s/, 1)[0])) return;
+      || promptSlashCommand(promptText)) return;
     return busySendHint(agent, agentDisplayName(agent.agent || ''));
   });
   const attachmentsLocked = $derived(!attachmentsAvailable || inputLocked || piPromptTarget(agent) || sendingSecret || !targetRef);
@@ -150,7 +153,6 @@
     if (!pickerDisabled && !$securityState.locked) input.click();
     closeAttach();
   }
-  const slashMenuOpen = $derived(slashCommandsAvailable && !inputLocked && slashQuery !== null && dismissedSlashQuery !== composer);
   const secretMode = $derived(!readOnly && noEchoActive && Boolean(connection?.capabilities.includes('secret_input')));
   const secretReady = $derived(!deliveryBlocked && secretMode && secretState.secretReady);
   $effect(() => {
@@ -276,6 +278,7 @@
     const target = { ...agent };
     const identity = targetRef!;
     const sentMessage = adapter?.sentMessage || busySend?.sentMessage || 'Prompt sent.';
+    const catalogTarget = slashCatalogIdentity;
     sending = true;
     composer = '';
     clearPromptDraft(target);
@@ -283,7 +286,13 @@
     try {
       if (bridge) await relayStore.sendPiPrompt(target, text, piCapability!, frame!);
       else if (adapter) await adapter.send(target, text);
-      else await relayStore.sendToAgent(target, { type: 'submit_prompt', text });
+      else {
+        await relayStore.sendToAgent(target, { type: 'submit_prompt', text });
+        const command = promptSlashCommand(text);
+        if (command && slashCatalogTarget === catalogTarget && slashCatalog.commands.some((entry) => entry.command === command)) {
+          recordRecentSlashCommand(target.agent, command);
+        }
+      }
       if (!bridge) relayStore.showToast(sentMessage);
       if (mounted && targetRefMatchesAgent(identity, agent)) {
         uploadStatus = '';

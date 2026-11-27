@@ -90,7 +90,8 @@ import { appScriptPattern, appStylePattern, releaseEntryPath } from './release-r
 // Raised from 171 to 174 KiB by owner authorization for file path links (2,250 B gzip).
 // Raised from 174 KiB + 32 B to 176 KiB for code reading (+1.6 KiB gzip
 // on top of Home status contrast). The scanner stays lazy.
-const limit = 176 * 1024;
+// Raised from 176 KiB by 255 B for recent slash command suggestions.
+const limit = 176 * 1024 + 255;
 const root = resolve(process.argv[2] || 'dist');
 const assetNames = await readdir(join(root, 'assets'));
 const appScript = assetNames.find((name) => appScriptPattern.test(name));
