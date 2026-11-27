@@ -386,7 +386,7 @@ for (const { target, transition } of [
       await absentTerminalControls();
       await page.getByLabel('Prompt', { exact: true }).fill('draft while delivery is uncertain');
       await expect(button(page, 'Send prompt')).toBeDisabled();
-      await expect(button(page, 'Attach files')).toBeDisabled();
+      await expect(button(page, 'Attach')).toBeDisabled();
       await page.getByLabel('Prompt', { exact: true }).press('Control+Enter');
       if (transition === 'metadata') {
         await button(page, 'Terminal view').click();

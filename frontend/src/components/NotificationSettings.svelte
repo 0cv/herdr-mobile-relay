@@ -151,7 +151,7 @@
 
   {#if deliveryEnabled}
     {#if scopes.length > 0 && selectedScope && selectedPolicy}
-      <label class="field-label scope-label" for="notification-scope">Relay and device</label>
+      <label class="field-label scope-label" for="notification-scope" data-settings-context>Relay and device</label>
       <select id="notification-scope" value={effectiveSelectedKey} onchange={chooseScope} disabled={busy || saving}>
         {#each scopes as scope (pushPolicyScopeKey(scope.relay_id, scope.device_id))}
           <option value={pushPolicyScopeKey(scope.relay_id, scope.device_id)}>

@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { chooseMore } from '../support/journey-chrome';
 import { APP_METADATA, emulateStandalone, saveDeviceCredential } from '../support/journey-device';
 import { boot, closeSocket, commands, composerTarget, connectFedora, fedora, handshake, lastCommand, openAgent, openSharedComposer, reply, replyToPaneRead, server, setAutoCommands, setConversationFixture, socketCount } from '../support/journey-relay';
 
@@ -12,7 +13,7 @@ test('discovers slash commands per terminal and fills them before sending', asyn
     ],
   });
 
-  await page.getByRole('button', { name: 'Search all agents' }).click();
+  await chooseMore(page, 'Search all agents');
   const jump = page.getByRole('dialog', { name: 'Jump to agent' });
   await jump.getByRole('searchbox', { name: 'Search agents and workspaces' }).fill('Codex app');
   await jump.getByRole('button', { name: /Codex app/ }).click();
@@ -62,7 +63,7 @@ test('discovers slash commands per terminal and fills them before sending', asyn
   });
 
   await page.getByRole('button', { name: 'Back' }).click();
-  await page.getByRole('button', { name: 'Search all agents' }).click();
+  await chooseMore(page, 'Search all agents');
   await jump.getByRole('searchbox', { name: 'Search agents and workspaces' }).fill('Claude app');
   await jump.getByRole('button', { name: /Claude app/ }).click();
   const claudeComposer = page.getByRole('combobox', { name: 'Prompt' });
@@ -131,14 +132,14 @@ test('scales and expands the prompt composer for multiline text', async ({ page 
     return textarea.scrollHeight > textarea.clientHeight && getComputedStyle(textarea).overflowY === 'auto';
   })).toBe(true);
 
-  await page.getByRole('button', { name: 'Settings' }).click();
+  await chooseMore(page, /^Settings\b/);
   const sizes = page.getByRole('group', { name: 'Interface Size' });
   await sizes.getByRole('button', { name: 'Regular' }).click();
   await page.getByRole('button', { name: 'Back' }).click();
   await composer.fill('One line');
   const regularHeight = (await composer.boundingBox())!.height;
 
-  await page.getByRole('button', { name: 'Settings' }).click();
+  await chooseMore(page, /^Settings\b/);
   await sizes.getByRole('button', { name: 'Large' }).click();
   await page.getByRole('button', { name: 'Back' }).click();
   await composer.fill('One line');
@@ -372,7 +373,7 @@ for (const mode of ['Conversation', 'Full history']) {
     const prompt = await openSharedComposer(page, mode, true);
     await expect(prompt).toBeDisabled();
     await server(page, 0, { ...composerTarget, type: 'agent_update', status: 'working' });
-    for (const name of ['Attach photos', 'Attach files', 'Send prompt']) await expect(page.getByRole('button', { name, exact: true })).toBeDisabled();
+    for (const name of ['Attach', 'Send prompt']) await expect(page.getByRole('button', { name, exact: true })).toBeDisabled();
     await prompt.evaluate(element => { (element as HTMLTextAreaElement).value = '/plan'; element.dispatchEvent(new Event('input', { bubbles: true })); });
     await prompt.dispatchEvent('keydown', { key: 'Enter', ctrlKey: true });
     await page.locator('input[type=file][accept="image/*"]').setInputFiles({ name: 'reader.png', mimeType: 'image/png', buffer: Buffer.from('png') });
@@ -436,9 +437,9 @@ test('followup combined notices and Pi bridge stay fenced across paging, modes a
   await expect(page.getByText('Older generic notice', { exact: true })).toBeVisible();
   const updates = await lastCommand(page, 'get_conversation_updates');
   await reply(page, updates, { kind: 'batch', subscription_id: 'subscription', source_revision: 'followup:1', sequence: 1, state: 'live', capabilities: base.capabilities, remove: [], entries: [{ ...notice, id: 'pi:live', text: 'Live generic notice' }, { ...unrelated, id: 'pi:unrelated-live-user' }] });
-  await page.getByRole('button', { name: 'Full history', exact: true }).click();
+  await chooseMore(page, 'Full history');
   await expect(page.getByText('Live generic notice', { exact: true })).toBeVisible();
-  await page.getByRole('button', { name: 'Conversation', exact: true }).click();
+  await chooseMore(page, 'Conversation');
   await expect(page.getByText('Live generic notice', { exact: true })).toBeVisible();
   await expect(page.getByText('Sent to Pi — not confirmed', { exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Send prompt', exact: true })).toBeDisabled();
@@ -570,10 +571,10 @@ test('followup blocked Pi without a bridge points to Settings without fallback i
   await setConversationFixture(page, { entries: [{ id: 'setting-notice', role: 'assistant', kind: 'notice', text: 'Synthetic extension question', timestamp: '' }], total: 1 });
   await server(page, 0, { type: 'agents', agents: [{ ...composerTarget, agent_session_id: 'setting-pi', status: 'blocked', attention_kind: 'unknown', project: 'Setting Pi', agent: 'pi', conversation_history_available: true }] });
   await page.getByRole('button', { name: 'Open Setting Pi on Fedora', exact: true }).click();
-  await expect(page.getByText('For live Pi replies, enable Settings → Pi Integration, then /reload Pi.', { exact: true })).toBeVisible();
+  await expect(page.getByText('For live Pi replies, find Pi Integration in Settings and enable it, then /reload Pi.', { exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Keyboard', exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Send prompt', exact: true })).toBeDisabled();
   await page.getByRole('button', { name: 'Terminal view', exact: true }).click();
-  await expect(page.getByText('For live Pi replies, enable Settings → Pi Integration, then /reload Pi.', { exact: true })).toBeVisible();
+  await expect(page.getByText('For live Pi replies, find Pi Integration in Settings and enable it, then /reload Pi.', { exact: true })).toBeVisible();
   expect((await commands(page)).filter(command => ['submit_prompt', 'send_pi_prompt_unconfirmed', 'send_keys', 'send_terminal_text'].includes(String(command.type)))).toHaveLength(0);
 });

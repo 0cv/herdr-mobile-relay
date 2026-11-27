@@ -24,8 +24,8 @@ Claude Code, Cursor, Qoder and Oh My Pi deliver updates after native records are
 written; OpenCode and Hermes still refresh recorded history periodically.
 
 Restart the relay after upgrading; the verified updater does this as part of
-activation. Enable Pi's optional integration with **Settings → Pi Integration**
-on its computer (controller access required). It defaults to off. Startup
+activation. Search Settings for **Pi Integration** and enable it for its computer
+(controller access required). It defaults to off. Startup
 refreshes only existing marker-owned installations in the relay's known Pi
 profiles; it never adopts an unowned directory. The setting reports per-profile
 results and also recognizes manual CLI installations.
@@ -62,7 +62,7 @@ a failed or exhausted automatic reload is shown as an actionable phone-load
 failure rather than retried indefinitely.
 
 If the app cannot load the new bundle, leave the pending update item in place
-and use **Load Update** once more from the existing app. If the bounded recovery
+and use **Load Update** once more under Updates in Settings. If the bounded recovery
 is exhausted, inspect the displayed version/build identity and deployment
 status; do not clear browser data or reinstall, because those actions discard
 the credentials and preferences the recovery is designed to preserve.

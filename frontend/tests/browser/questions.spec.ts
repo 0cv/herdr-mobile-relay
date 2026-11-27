@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { moreTrigger } from '../support/journey-chrome';
 import { boot, commands, connectFedora, fedora, handshake, lastCommand, openAgent, reply, server, setAutoCommands, setConversationFixture, setNextInteraction, socketCount } from '../support/journey-relay';
 
 test('handles approvals, chained questions, and notification routing', async ({ page }) => {
@@ -219,6 +220,10 @@ test('shows a live plan question immediately without reopening the agent', async
     content_fingerprint: 'plan-question-content',
   });
   await expect(page.getByRole('log', { name: 'Agent terminal output' })).toContainText('Question 1/3');
+  await moreTrigger(page).press('Enter');
+  const more = page.getByRole('dialog', { name: 'More', exact: true });
+  const find = more.getByRole('button', { name: 'Find in terminal', exact: true });
+  await expect(find).toBeFocused();
   await server(page, 0, {
     type: 'pane_delta',
     pane_id: 'w1:p1',
@@ -230,6 +235,9 @@ test('shows a live plan question immediately without reopening the agent', async
     interaction,
   });
 
+  await expect(find).toBeDisabled();
+  await expect(more.getByRole('button', { name: 'Search all agents' })).toBeFocused();
+  await more.getByRole('button', { name: 'Close', exact: true }).click();
   await expect(page.getByRole('group', { name: interaction.question })).toBeVisible();
   await expect(page.getByRole('log', { name: 'Agent terminal output' })).toBeHidden();
   await expect(page.getByRole('radio', { name: 'Separate package' })).toBeVisible();
@@ -570,7 +578,7 @@ test('keeps the third single choice checked across live pane transitions', async
   await expect(page.getByRole('log', { name: 'Agent terminal output' })).toBeHidden();
   await expect(page.getByRole('button', { name: 'Refresh terminal' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: /Terminal width:/ })).toHaveCount(0);
-  await expect(page.getByRole('button', { name: 'Attach files' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Attach' })).toBeDisabled();
   await expect(page.getByRole('button', { name: 'Arrow keys' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Tab', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Enter', exact: true })).toBeVisible();

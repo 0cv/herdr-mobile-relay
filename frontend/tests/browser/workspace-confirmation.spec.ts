@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { chooseMore } from '../support/journey-chrome';
 import { installMockRelay } from '../support/mock-relay-socket';
 
 test('workspace confirmations focus Cancel, including force escalation', async ({ page }) => {
@@ -15,7 +16,7 @@ test('workspace confirmations focus Cancel, including force escalation', async (
     queueMicrotask(() => socket.server({ type: 'command_result', request_id: command.request_id, action: command.type, ok: false, phase: 'failed', error: 'Refused', data: { force_available: true, code: 'workspace_group_close_required' } }));
   });
   await page.goto('/');
-  await page.getByRole('button', { name: 'Manage workspaces' }).click();
+  await chooseMore(page, 'Manage workspaces');
   const dialog = page.locator('#workspace-destructive-dialog');
   const cancel = dialog.getByRole('button', { name: 'Cancel', exact: true });
   for (const name of ['Close', 'Remove Worktree']) {

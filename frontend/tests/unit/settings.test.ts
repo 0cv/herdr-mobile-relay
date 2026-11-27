@@ -132,11 +132,22 @@ describe('settings relay status', () => {
     try {
       render(SettingsView);
       expect(screen.getByText(/Waiting for the Home Screen app/)).toBeInTheDocument();
+      const search = screen.getByRole('searchbox', { name: 'Search settings' });
+      await user.type(search, 'Pair this browser instead');
       await user.click(screen.getByRole('button', { name: 'Pair this browser instead' }));
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Confirm' }).closest('.settings-filtered')).toBeNull());
       expect(pair).not.toHaveBeenCalled();
       expect(screen.getByText(/This browser becomes its own device/)).toHaveAttribute('role', 'alert');
       expect(screen.getByText(/This browser becomes its own device/)).toHaveTextContent(/Safari may clear this site's storage/);
       expect(screen.getByRole('button', { name: 'Cancel' })).toHaveFocus();
+      await user.clear(search);
+      await user.type(search, 'unrelated setting');
+      expect(await screen.findByText('No settings match.')).toHaveAttribute('role', 'status');
+      for (const name of ['Confirm', 'Cancel']) {
+        expect(screen.getByRole('button', { name }).closest('.settings-filtered')).toBeNull();
+      }
+      await user.clear(search);
+      await user.type(search, 'Pair this browser instead');
       await user.click(screen.getByRole('button', { name: 'Cancel' }));
       expect(pair).not.toHaveBeenCalled();
       expect(screen.getByRole('button', { name: 'Pair this browser instead' })).toHaveFocus();
@@ -417,7 +428,7 @@ describe('settings relay status', () => {
     expect(dialog).toHaveTextContent('preserves the configuration used by an existing stable service');
     expect(dialog).toHaveTextContent('Prefer to keep using a source checkout?');
     expect(screen.queryByText(/assets \d+/i)).not.toBeInTheDocument();
-    expect(screen.getAllByRole('heading', { level: 3 }).at(-1)).toHaveTextContent('About');
+    expect(screen.getAllByRole('heading', { level: 3 }).at(-1)).toHaveTextContent('Updates');
   });
   it('requires confirmation before removing a relay', async () => {
     const user = userEvent.setup();
@@ -564,6 +575,35 @@ describe('settings relay status', () => {
     // Leave the shared preferences at their defaults for subsequent tests.
     await user.click(height);
     await user.click(resize);
+  });
+
+  it('keeps the selected relay and device visible when filtering notification controls', async () => {
+    const user = userEvent.setup();
+    localStorage.setItem(PUSH_ENABLED_KEY, 'true');
+    relayStore.addRelay({ label: 'Mac', url: 'ws://127.0.0.1:8872', token: '' });
+    const [, mac] = get(relayStore.relayConfigs);
+    const credential = vi.spyOn(relayStore, 'deviceCredential').mockImplementation(id => ({
+      role: 'controller', deviceId: `device-${id}`,
+    }) as never);
+    const send = vi.spyOn(relayStore, 'sendCommand').mockResolvedValue({ type: 'command_result', request_id: 'policy', ok: true });
+    try {
+      render(SettingsView);
+      const scope = await screen.findByLabelText('Relay and device');
+      const option = within(scope).getByRole('option', { name: /^Mac —/ });
+      await user.selectOptions(scope, option);
+      const search = screen.getByRole('searchbox', { name: 'Search settings' });
+      await user.type(search, option.textContent!.trim());
+      await waitFor(() => expect(screen.getByText('No settings match.')).toBeVisible());
+      await user.clear(search);
+      await user.type(search, 'Questions');
+      expect(scope.closest('.settings-filtered')).toBeNull();
+      expect(scope).toHaveValue((option as HTMLOptionElement).value);
+      expect(screen.getByRole('switch', { name: 'Approval needed' })).toHaveClass('settings-filtered');
+      await user.click(screen.getByRole('switch', { name: 'Questions' }));
+      expect(send).toHaveBeenCalledWith(mac.id, expect.objectContaining({
+        type: 'push_policy_set', policy: expect.objectContaining({ categories: expect.objectContaining({ question: false }) }),
+      }));
+    } finally { credential.mockRestore(); send.mockRestore(); }
   });
 
   it('keeps notification controls out of the way until push delivery is enabled', async () => {

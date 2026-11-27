@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { chooseMore, openMore } from '../support/journey-chrome';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { APP_METADATA, APP_RELEASE, emulateStandalone, webRoot } from '../support/journey-device';
@@ -326,7 +327,12 @@ test('confirms and tracks one relay update through its verified reconnect', asyn
     },
   });
 
-  await page.getByRole('button', { name: 'Settings, relay update available' }).click();
+  await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', project: 'Update fixture', agent: 'codex', status: 'working' }] });
+  await page.getByRole('button', { name: 'Open Update fixture on Fedora' }).click();
+  const more = await openMore(page);
+  const settings = more.getByRole('button', { name: 'Settings, relay update available', exact: true });
+  await expect(settings).toHaveText('Settings, relay update available');
+  await settings.click();
   await expect(page.getByText('Update v0.8.0 available')).toBeVisible();
   await expect(page.getByText(`Phone app version ${APP_RELEASE}`)).toBeVisible();
   await page.getByRole('button', { name: 'Update Relays' }).click();
@@ -780,7 +786,7 @@ test('opens Terminal when the conversation view cannot load without a deploy', a
   expect(deploy.versionRequests).toBe(checksBefore + 1);
 
   // The error belongs to that opening: opening the agent again from Search falls back to Terminal.
-  await page.getByRole('button', { name: 'Search all agents' }).click();
+  await chooseMore(page, 'Search all agents');
   const jump = page.getByRole('dialog', { name: 'Jump to agent' });
   await jump.getByRole('searchbox', { name: 'Search agents and workspaces' }).fill('Deployed app');
   await jump.getByRole('button', { name: /Deployed app/ }).click();
@@ -919,7 +925,8 @@ test('keeps an unconfirmed terminal send fenced instead of reloading when a depl
   expect(await page.evaluate(() => (window as any).__beforeReload)).toBe(true);
 
   // Loading the update stays an explicit choice that names what it forgets.
-  await page.getByRole('button', { name: /^Settings, phone app update available/ }).click();
+  await expect(page.getByRole('button', { name: /^More.*Settings, phone app update available/ })).toBeVisible();
+  await chooseMore(page, /^Settings, phone app update available/);
   await page.getByRole('button', { name: 'Load Update', exact: true }).first().click();
   const dialog = page.getByRole('dialog', { name: 'Load Update' });
   await expect(dialog.getByRole('alert')).toHaveText('A send to a terminal is not confirmed yet, and loading the app update forgets it. Check the terminal before sending again.');
@@ -949,7 +956,7 @@ test('explains why a finished deploy did not reload over an unsaved draft', asyn
   const prompt = page.getByLabel('Prompt', { exact: true });
   await prompt.fill('draft this phone has not saved');
   await expect(page.getByText(/^Not saved on this phone/)).toBeVisible();
-  await expect(page.getByRole('button', { name: /^Settings, phone app update available/ })).toBeVisible();
+  await expect(page.getByRole('button', { name: /^More.*Settings, phone app update available/ })).toBeVisible();
   await markCurrentDocument(page);
   await server(page, 0, { type: 'app_deploy_status', app_deploy: { ...appDeploy, state: 'succeeded', target_version: APP_RELEASE } });
   await expect(page.getByText(/^A newer app version is ready but was not loaded automatically\. A draft is not saved on this phone/)).toBeVisible();

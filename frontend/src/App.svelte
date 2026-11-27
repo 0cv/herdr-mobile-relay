@@ -1,8 +1,7 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { get } from 'svelte/store';
   import ActivityDetail from '$components/ActivityDetail.svelte';
-  import ActivityView from '$components/ActivityView.svelte';
   import AgentList from '$components/AgentList.svelte';
   import AgentRail from '$components/AgentRail.svelte';
   import GlobalJump from '$components/GlobalJump.svelte';
@@ -14,6 +13,7 @@
   import UpdateProgressDialog from '$components/UpdateProgressDialog.svelte';
   import WorkspaceInspector from '$components/WorkspaceInspector.svelte';
   import WorkspaceManager from '$components/WorkspaceManager.svelte';
+  import AppDialog from '$components/ui/AppDialog.svelte';
   import Button from '$components/ui/Button.svelte';
   import Toast from '$components/ui/Toast.svelte';
   import { agentOpeningRoute } from '$lib/agent-navigation';
@@ -25,6 +25,7 @@
     agentStatusGroup,
     agentStatusMarks,
     displayName,
+    homeAgentLabel,
     hostLabel,
   } from '$lib/agents';
   import { APP_ASSET_VERSION, APP_BUILD_ID } from '$lib/config';
@@ -53,7 +54,7 @@
   } from '$lib/updates';
   import { createRelayUpdateObserver, settingsUpdateLabel } from '$lib/update-reload';
   import { createViewedPaneReporter } from '$lib/viewed-pane';
-  import type { Agent, ConversationPage, NotificationTarget } from '$lib/types';
+  import type { Agent, ConversationPage, FrontendTargetRef, NotificationTarget } from '$lib/types';
   import type { ViewState } from '$lib/router';
   import type { WorkspaceFileTarget } from '$lib/workspace-inspection';
   import type { LoadSyntax } from '$lib/code-reading';
@@ -69,8 +70,12 @@
   const responding = relayStore.responding;
 
   let manageOpen = $state(false);
-  // Bound so the header's Find control can open the terminal's own find bar.
-  let terminalView = $state<{ openFind: () => void } | null>(null);
+  let terminalView = $state<TerminalView>();
+  let historyView = $state<ReturnType<NonNullable<typeof conversationHistoryComponent>>>();
+  let moreOpen = $state(false);
+  let moreTrigger = $state<HTMLButtonElement>();
+  let headerHeading = $state<HTMLHeadingElement>();
+  let blockedChoice = $state.raw<{ agent: Agent; target: FrontendTargetRef }>();
   let jumpOpen = $state(false);
   let workspaceOpen = $state(false);
   let workspaceFileTarget = $state.raw<WorkspaceFileTarget | null>(null);
@@ -140,6 +145,18 @@
     (connection) => connection.status === 'connected' && connection.inventory.state === 'starting',
   ).length);
   const settingsLabel = $derived(settingsUpdateLabel($connections, $appUpdateStatus.state));
+  const home = $derived($currentView.view === 'agents');
+  const agentPage = $derived($currentView.view === 'terminal' || $currentView.view === 'history');
+  const launchOffered = $derived([...$connections].some(([id, connection]) =>
+    connection.status === 'connected' && !readOnlyRelayIds.has(id) && connection.capabilities.includes('agent_launch'),
+  ));
+  const updateNotice = $derived(settingsLabel !== 'Settings');
+  const canFind = $derived(terminalView?.canFind() ?? false);
+  const nextBlocked = $derived($currentView.view === 'terminal' && activeAgent ? terminalView?.nextBlocked() : undefined);
+  const settingsInMore = $derived(!home && $currentView.view !== 'settings');
+  const moreLabel = $derived(`More${nextBlocked ? ': Next blocked' : ''}${settingsInMore && updateNotice ? `; ${settingsLabel}` : ''}`);
+  const historyModes = ['conversation', 'activity'] as const;
+  const historyTools = $derived($currentView.view === 'history' ? historyView?.getTools() : undefined);
   const headerTitle = $derived.by(() => {
     if ($currentView.view === 'settings') return 'Settings';
     if ($currentView.view === 'push' || $currentView.view === 'push_unavailable') return 'Notification';
@@ -151,7 +168,10 @@
     if ($currentView.view === 'terminal') return 'Terminal';
     return '🐑 herdr';
   });
-  const headerMeta = $derived(activeAgent ? terminalSecondaryLabel(activeAgent) : '');
+  const headerMeta = $derived(activeAgent
+    ? [historyTools && (historyTools.mode === 'activity' ? 'Full history' : 'Conversation'), terminalSecondaryLabel(activeAgent)].filter(Boolean).join(' · ')
+    : '');
+  const activeTarget = $derived(activeAgent && JSON.stringify(targetRefForAgent(activeAgent)));
   const headerIndicator = $derived.by(() => {
     if (activeAgent) {
       return activeConnection?.status === 'connected' && activeConnection.inventory.state === 'ready'
@@ -168,6 +188,17 @@
     if (!$securityState.locked) return;
     workspaceOpen = false;
     stopSpeech();
+  });
+
+  $effect(() => {
+    void $currentView;
+    void activeTarget;
+    void $securityState.locked;
+    moreOpen = false;
+  });
+
+  $effect.pre(() => {
+    if (blockedChoice && !checkedBlocked(blockedChoice.target)) blockedChoice = undefined;
   });
 
   $effect(() => {
@@ -312,9 +343,63 @@
     };
   }
 
-  function toggle(view: 'settings' | 'launch' | 'activity' | 'workspaces') {
-    if ($currentView.view === view) closeCurrentView();
-    else navigate({ view });
+  function checkedBlocked(target: FrontendTargetRef) {
+    if (!$securityState.locked && activeAgent && $currentView.view === 'terminal') return terminalView?.checkedBlocked(target);
+  }
+
+  function openMore() {
+    blockedChoice = nextBlocked;
+    moreOpen = true;
+  }
+
+  function keepMoreFocus(actions: HTMLElement) {
+    let focused = actions.querySelector(':focus');
+    const syncFocus = () => {
+      const active = document.activeElement;
+      if (moreOpen && focused && (active === focused || active === document.body)
+        && (!actions.contains(focused) || focused.matches(':disabled'))) {
+        actions.querySelector<HTMLButtonElement>('#more-search-agents')?.focus();
+      }
+      focused = actions.querySelector(':focus');
+    };
+
+    const listeners = new AbortController();
+    actions.addEventListener('focusin', syncFocus, { signal: listeners.signal });
+    actions.addEventListener('focusout', () => queueMicrotask(syncFocus), { signal: listeners.signal });
+    const observer = new MutationObserver(syncFocus);
+    observer.observe(actions, { subtree: true, childList: true, attributeFilter: ['disabled'] });
+    return () => {
+      observer.disconnect();
+      listeners.abort();
+    };
+  }
+
+  function focusMore() {
+    moreTrigger?.focus();
+  }
+
+  async function leaveMore(action = focusMore) {
+    moreOpen = false;
+    await tick();
+    action();
+  }
+
+  function openNext(target: FrontendTargetRef) {
+    void leaveMore(async () => {
+      const agent = checkedBlocked(target);
+      if (!agent) return focusMore();
+      replaceView({ view: 'terminal', paneId: agent.pane_id, target });
+      await tick();
+      headerHeading?.focus();
+    });
+  }
+
+  function openPage(view: 'settings' | 'launch' | 'activity' | 'workspaces') {
+    void leaveMore(async () => {
+      navigate({ view });
+      await tick();
+      headerHeading?.focus();
+    });
   }
 
   function terminalSecondaryLabel(agent: Agent): string {
@@ -362,29 +447,12 @@
     {/if}
     <StatusMark {...headerIndicator} />
     <div class="header-title">
-      <h1>{headerTitle}</h1>
+      <h1 tabindex="-1" bind:this={headerHeading}>{headerTitle}</h1>
       {#if headerMeta}<span>{headerMeta}</span>{/if}
     </div>
     {#if $currentView.view === 'agents'}<span class="agent-count">{connected}/{$relays.length} relays{#if $agents.length} · {$agents.length}{/if}</span>{/if}
     <nav aria-label="Application">
-      <Button class="global-jump-button" variant="ghost" size="icon" aria-label="Search all agents" title="Search all agents" onclick={() => { jumpOpen = true; }}>
-        <svg class="header-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" focusable="false">
-          <circle cx="11" cy="11" r="6"></circle><path d="m16 16 4 4"></path>
-        </svg>
-      </Button>
       {#if $currentView.view === 'terminal'}
-        <Button
-          variant="ghost"
-          size="icon"
-          aria-label="Find in terminal"
-          title="Find in terminal"
-          disabled={!activeAgent}
-          onclick={() => terminalView?.openFind()}
-        >
-          <svg class="header-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" focusable="false">
-            <circle cx="11" cy="11" r="6"></circle><path d="m16 16 4 4"></path>
-          </svg>
-        </Button>
         <Button
           variant="ghost"
           size="icon"
@@ -398,19 +466,6 @@
             <path d="M4 5.5v15M8 7h8M8 11h6"></path>
           </svg>
         </Button>
-        <Button
-          variant="ghost"
-          size="icon"
-          aria-label="Inspect workspace"
-          disabled={!workspaceInspectionAvailable}
-          title={workspaceInspectionAvailable ? 'Inspect workspace files and Git changes' : 'Workspace inspection is unavailable'}
-          onclick={() => openWorkspace()}
-        >
-          <svg class="header-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
-            <path d="M3 5.5h7l2 2h9v11H3z"></path>
-          </svg>
-        </Button>
-        <Button variant="ghost" size="icon" aria-label="Manage agent" disabled={!activeAgent} onclick={() => { manageOpen = true; }}>•••</Button>
       {:else if $currentView.view === 'history'}
         <Button
           variant="ghost"
@@ -425,6 +480,8 @@
             <path d="m7 9 3 3-3 3M12 15h5"></path>
           </svg>
         </Button>
+      {/if}
+      {#if agentPage}
         <Button
           variant="ghost"
           size="icon"
@@ -437,32 +494,21 @@
             <path d="M3 5.5h7l2 2h9v11H3z"></path>
           </svg>
         </Button>
-        <Button variant="ghost" size="icon" aria-label="Manage agent" disabled={!activeAgent} onclick={() => { manageOpen = true; }}>•••</Button>
-      {:else}
-        <Button variant="ghost" size="icon" aria-label="Manage workspaces" title="Manage workspaces" onclick={() => toggle('workspaces')}>
-          <svg class="header-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
-            <path d="M3 5.5h7l2 2h9v11H3z"></path>
-            <path d="M8 13h8M12 9v8"></path>
-          </svg>
-        </Button>
-        {#if [...$connections.values()].some((connection) => connection.capabilities.includes('agent_launch'))}
-          <Button variant="ghost" size="icon" aria-label="Start agent" onclick={() => toggle('launch')}>＋</Button>
+      {:else if home}
+        {#if launchOffered}
+          <Button variant="ghost" size="icon" aria-label="Start agent" onclick={() => openPage('launch')}>＋</Button>
         {/if}
-        <Button variant="ghost" size="icon" aria-label="Activity history" onclick={() => toggle('activity')}>
-          <svg class="header-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
-            <circle cx="12" cy="12" r="9"></circle>
-            <path d="M12 7v5l3 2"></path>
-          </svg>
-        </Button>
+        <span class="nav-button-shell">
+          <Button variant="ghost" size="icon" aria-label={settingsLabel} onclick={() => openPage('settings')}>⚙</Button>
+          {#if updateNotice}<span class="nav-update-badge" aria-hidden="true"></span>{/if}
+        </span>
       {/if}
       <span class="nav-button-shell">
-        <Button
-          variant="ghost"
-          size="icon"
-          aria-label={settingsLabel}
-          onclick={() => toggle('settings')}
-        >⚙</Button>
-        {#if settingsLabel !== 'Settings'}<span class="nav-update-badge" aria-hidden="true"></span>{/if}
+        <button class="button button-ghost more-trigger" type="button" bind:this={moreTrigger}
+          aria-haspopup="dialog" aria-expanded={moreOpen} aria-label={moreLabel} onclick={openMore}>
+          More{#if nextBlocked}<small>Next blocked</small>{/if}
+        </button>
+        {#if settingsInMore && updateNotice}<span class="nav-update-badge" aria-hidden="true"></span>{/if}
       </span>
     </nav>
   </header>
@@ -485,7 +531,13 @@
       <main class="page"><p role="alert">{error instanceof AppReloadHeld ? error.message : 'The launch form could not be loaded. Reload the app to try again.'}</p></main>
     {/await}
   {:else if $currentView.view === 'activity'}
-    <ActivityView />
+    {#await importOrReload(() => import('$components/ActivityView.svelte'), () => get(currentView).view === 'activity')}
+      <main class="page"><p role="status">Loading activity…</p></main>
+    {:then { default: ActivityView }}
+      <ActivityView />
+    {:catch error}
+      <main class="page"><p role="alert">{error instanceof AppReloadHeld ? error.message : 'Activity could not be loaded. Reload the app to try again.'}</p></main>
+    {/await}
   {:else if $currentView.view === 'activity_detail'}
     <ActivityDetail key={$currentView.key} />
   {:else if $currentView.view === 'history' && activeAgent}
@@ -494,6 +546,8 @@
       {#if conversationHistoryComponent}
         {@const HistoryComponent = conversationHistoryComponent}
         <HistoryComponent
+          bind:this={historyView}
+          onSearchClose={focusMore}
           agent={activeAgent}
           readOnly={activeReadOnly}
           frame={$frames.get(activeAgent.pane_id)}
@@ -553,6 +607,38 @@
   {/if}
 </div>
 
+<AppDialog id="app-more" title="More" bind:open={moreOpen} onDismiss={focusMore}>
+  <div class="chrome-actions" {@attach keepMoreFocus}>
+    {#if blockedChoice}
+      {@const { agent, target } = blockedChoice}
+      <Button variant="secondary" onclick={() => openNext(target)}>Next blocked: {homeAgentLabel(agent)} on {hostLabel(agent)}</Button>
+    {/if}
+    {#if $currentView.view === 'terminal'}
+      <Button variant="secondary" disabled={!canFind} onclick={() => leaveMore(() => terminalView?.openFind())}>Find in terminal</Button>
+    {:else if historyTools}
+      <div class="conversation-mode" role="group" aria-label="Conversation display">
+        {#each historyModes as mode (mode)}
+          <Button variant="secondary" aria-pressed={historyTools.mode === mode} onclick={() => leaveMore(() => { historyView?.setMode(mode); focusMore(); })}>
+            {mode === 'activity' ? 'Full history' : 'Conversation'}
+          </Button>
+        {/each}
+      </div>
+      {#if historyTools.canSearch}
+        <Button variant="secondary" onclick={() => leaveMore(() => historyView?.openSearch())}>Search loaded conversation</Button>
+      {/if}
+    {/if}
+    <Button id="more-search-agents" variant="secondary" onclick={() => leaveMore(() => { focusMore(); jumpOpen = true; })}>Search all agents</Button>
+    {#if agentPage}
+      <Button variant="secondary" disabled={!activeAgent} onclick={() => leaveMore(() => { focusMore(); manageOpen = true; })}>Manage agent</Button>
+    {:else}
+      {#if $currentView.view !== 'workspaces'}<Button variant="secondary" onclick={() => openPage('workspaces')}>Manage workspaces</Button>{/if}
+      {#if !home && $currentView.view !== 'launch' && launchOffered}<Button variant="secondary" onclick={() => openPage('launch')}>Start agent</Button>{/if}
+      {#if $currentView.view !== 'activity'}<Button variant="secondary" onclick={() => openPage('activity')}>Activity history</Button>{/if}
+    {/if}
+    {#if settingsInMore}<Button variant="secondary" onclick={() => openPage('settings')}>{settingsLabel}</Button>{/if}
+    <Button variant="ghost" onclick={() => leaveMore()}>Close</Button>
+  </div>
+</AppDialog>
 <UpdateProgressDialog {readOnlyRelayIds} />
 <ManageDialog bind:open={manageOpen} agent={activeAgent} readOnly={activeReadOnly} />
 <GlobalJump bind:open={jumpOpen} agents={$agents} onselect={openAgent} />

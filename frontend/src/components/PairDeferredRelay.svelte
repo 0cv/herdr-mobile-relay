@@ -19,7 +19,7 @@
   }
 </script>
 
-<div bind:this={panel}>
+<div bind:this={panel} data-settings-pinned={confirming || undefined}>
   {#if confirming}
     <p class="warning" role="alert">
       This browser becomes its own device, listed and revocable separately. The link's

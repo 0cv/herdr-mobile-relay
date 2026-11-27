@@ -5,7 +5,19 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Search Settings by label without leaving the page. Clear the search to see
+  all settings again.
+
 ### Changed
+
+- Agent pages keep Back, the Terminal/Conversation switch and workspace
+  inspection in the header, and Home keeps Start agent and Settings. Other
+  actions move to **More**. When another agent needs input,
+  More says **Next blocked** instead of taking a row below Terminal, which
+  leaves more room for output. Conversation's display mode and search are in
+  More, and photos and files share one **Attach** button.
 
 - Home names each pane and shows its activity instead of repeating its path.
   Status words, distinct shapes, and workspace counts make new results easy to

@@ -121,13 +121,16 @@ data and scripted replies. No setup required.
   Hermes, Qoder, OpenCode, Oh My Pi, and Pi.
 - Send prompts, terminal keys, and slash commands, including discovered Cursor
   commands and skills; attach screenshots, photos, and documents in cancellable
-  batches. Optionally discover live Pi extension commands, skills, and templates
-  by enabling **Settings → Pi Integration** for that computer, then reloading Pi
+  batches under **Attach**. Optionally discover live Pi extension commands,
+  skills, and templates by finding **Pi Integration** in Settings for that
+  computer, then reloading Pi
   ([CLI alternative](docs/slash-command-discovery.md#pi-runtime-commands)).
 - Read and search native conversations for agents with a native history reader,
   including Hermes, OpenCode, Antigravity CLI, Grok, Oh My OpenCode plans and native Kimi Code journals.
   Kimi imports and human-engine-only histories use the Terminal fallback. Inspect workspace files, images, and Git diffs read-only.
 - Manage workspaces and Git worktrees; start, rename, clear, and stop agents.
+  Find workspace management, agent actions and search under **More**.
+  **Search settings** filters the Settings page by label.
 - Have the relay read responses aloud, even with the screen off.
 - Pair every phone as its own named device — controller or read-only reader —
   each with its own notification rules, and revoke any of them.

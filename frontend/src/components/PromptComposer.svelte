@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount, tick, untrack } from 'svelte';
+  import AppDialog from '$components/ui/AppDialog.svelte';
   import AttachmentProgress from '$components/AttachmentProgress.svelte';
   import Button from '$components/ui/Button.svelte';
   import { attachmentsAvailable, slashCommandsAvailable, promptAutocorrect, promptSpellcheck } from '$lib/composer-policy';
@@ -79,6 +80,8 @@
     return () => { cancelled = true; clearInterval(timer); };
   });
 
+  let attachOpen = $state(false);
+  let attachTrigger = $state<HTMLButtonElement>();
   let uploadStatus = $state('');
   let uploadError = $state(false);
   let uploadingAttachment = $state(false);
@@ -112,6 +115,27 @@
   const inputLocked = $derived(readOnly || promptBlocked || attachmentsBlocked || noEchoActive || deliveryBlocked);
   const attachmentsLocked = $derived(!attachmentsAvailable || inputLocked || piPromptTarget(agent) || sendingSecret || !targetRefForAgent(agent));
   const pickerDisabled = $derived(attachmentsLocked || uploadingAttachment || sending);
+
+  $effect(() => {
+    void slashCatalogIdentity;
+    void pickerDisabled;
+    void $securityState.locked;
+    attachOpen = false;
+  });
+
+  function focusAttach() {
+    attachTrigger?.focus();
+  }
+
+  function closeAttach() {
+    attachOpen = false;
+    void tick().then(focusAttach);
+  }
+
+  function pickFile(input: HTMLInputElement) {
+    if (!pickerDisabled && !$securityState.locked) input.click();
+    closeAttach();
+  }
   const slashMenuOpen = $derived(slashCommandsAvailable && !inputLocked && slashQuery !== null && dismissedSlashQuery !== composer);
   const secretMode = $derived(!readOnly && noEchoActive && Boolean(connection?.capabilities.includes('secret_input')));
   const secretReady = $derived(!deliveryBlocked && secretMode && secretState.secretReady);
@@ -606,22 +630,21 @@
     {/if}
     <form class="term-input" aria-label="Send a prompt" aria-busy={sending || uploadingAttachment} onsubmit={(event) => { event.preventDefault(); void sendPrompt(); }}>
       {#if attachmentsAvailable}
-        <div class="attach-stack">
-          <Button variant="ghost" size="icon" disabled={pickerDisabled} aria-label="Attach photos" onclick={() => imageInput.click()}>
-            <svg class="button-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
-              <rect x="3" y="4" width="18" height="16" rx="2"></rect>
-              <circle cx="8.5" cy="9" r="1.5"></circle>
-              <path d="m4 17 4.5-4.5 3.5 3.5 2.5-2.5L20 19"></path>
-            </svg>
-          </Button>
-          <Button variant="ghost" size="icon" disabled={pickerDisabled} aria-label="Attach files" onclick={() => fileInput.click()}>
-            <svg class="button-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
-              <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"></path>
-            </svg>
-          </Button>
-          <input bind:this={imageInput} type="file" accept="image/*" multiple hidden onchange={selectFiles} />
-          <input bind:this={fileInput} type="file" accept="image/png,image/jpeg,image/gif,image/webp,text/plain,text/markdown,text/csv,application/json,application/pdf,.docx,.xlsx,.pptx,.odt,.ods,.odp" multiple hidden onchange={selectFiles} />
-        </div>
+        <button type="button" class="button button-ghost button-icon attach-trigger" bind:this={attachTrigger} disabled={pickerDisabled}
+          aria-label="Attach" aria-haspopup="dialog" aria-expanded={attachOpen} onclick={() => { attachOpen = true; }}>
+          <svg class="header-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+            <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"></path>
+          </svg>
+        </button>
+        <input bind:this={imageInput} type="file" accept="image/*" multiple hidden onchange={selectFiles} />
+        <input bind:this={fileInput} type="file" accept="image/png,image/jpeg,image/gif,image/webp,text/plain,text/markdown,text/csv,application/json,application/pdf,.docx,.xlsx,.pptx,.odt,.ods,.odp" multiple hidden onchange={selectFiles} />
+        <AppDialog id="composer-attach" title="Attach" bind:open={attachOpen} onDismiss={focusAttach}>
+          <div class="chrome-actions">
+            <Button variant="secondary" disabled={pickerDisabled} onclick={() => pickFile(imageInput)}>Attach photos</Button>
+            <Button variant="secondary" disabled={pickerDisabled} onclick={() => pickFile(fileInput)}>Attach files</Button>
+            <Button variant="ghost" onclick={closeAttach}>Close</Button>
+          </div>
+        </AppDialog>
       {/if}
       <div class="composer-field">
         <textarea
@@ -660,7 +683,7 @@
       </div>
     {:else if bridgeReady && !piDelivery.pending}<p class="hint">Pi bridge: unconfirmed send, no terminal keys.</p>
     {:else if dispatchBlocked && !blockExplained && !readOnly && !deliveryBlocked}
-      <p class="hint" role="status">{piPromptTarget(agent) && !piCapability ? 'For live Pi replies, enable Settings → Pi Integration, then /reload Pi.' : dispatchBlocked}</p>
+      <p class="hint" role="status">{piPromptTarget(agent) && !piCapability ? 'For live Pi replies, find Pi Integration in Settings and enable it, then /reload Pi.' : dispatchBlocked}</p>
     {/if}
     {#if uploadStatus}<p class:error={uploadError} class="upload-status" role="status">{uploadStatus}</p>{/if}
     {#if draftPersistenceWarning && (composer || draftPersistenceError)}<p class="draft-status" class:error={draftPersistenceError} role="status">{draftPersistenceWarning}</p>{/if}

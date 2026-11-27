@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { chooseMore } from '../support/journey-chrome';
 import { boot, commands, commandsForSocket, connectFedora, fedora, handshake, reply, server, setAutoCommands, socketCount } from '../support/journey-relay';
 
 test('hides backend-dependent launch and tab controls', async ({ page }) => {
@@ -9,7 +10,7 @@ test('hides backend-dependent launch and tab controls', async ({ page }) => {
   });
   await expect(page.getByRole('button', { name: 'Start agent', exact: true })).toHaveCount(0);
   await page.getByRole('button', { name: 'Open relay on Fedora', exact: true }).click();
-  await page.getByRole('button', { name: 'Manage agent' }).click();
+  await chooseMore(page, 'Manage agent');
   const dialog = page.getByRole('dialog', { name: 'Manage Agent' });
   await expect(dialog.getByRole('button', { name: 'Rename Tab' })).toHaveCount(0);
   await expect(dialog.getByRole('button', { name: /Clear|Restart/ })).toHaveCount(0);
@@ -192,7 +193,7 @@ test('launches and manages agent lifecycle commands', async ({ page }) => {
   await expect(page.getByRole('main', { name: 'Terminal for relay' })).toBeVisible();
   await expect.poll(() => page.evaluate(() => location.hash))
     .toBe('#pane=r3.WzMsImZlZG9yYSIsInByaW1hcnkiLCJ3MTpwMiIsInRlcm1pbmFsLXcxOnAyIiwxLCIiXQ');
-  await page.getByRole('button', { name: 'Manage agent' }).click();
+  await chooseMore(page, 'Manage agent');
   const manageDialog = page.getByRole('dialog', { name: 'Manage Agent' });
   await expect(manageDialog).toBeVisible();
   await expect(manageDialog.getByLabel('New tab name')).toHaveCount(0);
@@ -224,7 +225,7 @@ test('launches and manages agent lifecycle commands', async ({ page }) => {
   await page.keyboard.press('Escape');
   await expect(manageDialog).toBeHidden();
 
-  await page.getByRole('button', { name: 'Manage agent' }).click();
+  await chooseMore(page, 'Manage agent');
   await renameTabAction.click();
   await manageDialog.getByLabel('New tab name').fill('123');
   await server(page, 0, { type: 'agent_update', pane_id: 'w1:p2', status: 'working', updated_at: 2 });
@@ -233,7 +234,7 @@ test('launches and manages agent lifecycle commands', async ({ page }) => {
   await expect.poll(async () => (await commands(page)).some((command) =>
     command.type === 'agent_rename' && command.name === '123')).toBe(true);
 
-  await page.getByRole('button', { name: 'Manage agent' }).click();
+  await chooseMore(page, 'Manage agent');
   const renameSessionAction = manageDialog.getByRole('button', { name: 'Rename Session' });
   await renameSessionAction.click();
   await expect(manageDialog.getByLabel('New session name')).toBeFocused();
@@ -243,7 +244,7 @@ test('launches and manages agent lifecycle commands', async ({ page }) => {
     command.type === 'submit_prompt' && command.text === '/rename Current Session Review')).toBe(true);
   await expect(manageDialog).toBeHidden();
 
-  await page.getByRole('button', { name: 'Manage agent' }).click();
+  await chooseMore(page, 'Manage agent');
   await renameSessionAction.click();
   await expect(manageDialog.getByLabel('New session name')).toHaveValue('Current Session Review');
   await manageDialog.getByLabel('New session name').fill('cancelled-session');
@@ -264,7 +265,7 @@ test('launches and manages agent lifecycle commands', async ({ page }) => {
   await server(page, 0, {
     type: 'agent_update', pane_id: 'w1:p2', status: 'working', agent: 'opencode', updated_at: 4,
   });
-  await page.getByRole('button', { name: 'Manage agent' }).click();
+  await chooseMore(page, 'Manage agent');
   await expect(manageDialog.getByRole('button', { name: 'Rename Tab' })).toBeVisible();
   await expect(manageDialog.getByRole('button', { name: 'Rename Session' })).toHaveCount(0);
   await page.keyboard.press('Escape');
@@ -272,7 +273,7 @@ test('launches and manages agent lifecycle commands', async ({ page }) => {
     type: 'agent_update', pane_id: 'w1:p2', status: 'working', agent: 'codex', updated_at: 5,
   });
 
-  await page.getByRole('button', { name: 'Manage agent' }).click();
+  await chooseMore(page, 'Manage agent');
   await page.getByRole('button', { name: 'Clear Agent' }).click();
   await server(page, 0, { type: 'agent_update', pane_id: 'w1:p2', status: 'working', updated_at: 3 });
   await expect(page.getByRole('button', { name: 'Confirm Clear' })).toBeVisible();
@@ -287,7 +288,7 @@ test('launches and manages agent lifecycle commands', async ({ page }) => {
   })).toEqual([3, 'fedora', 'primary', 'w1:p3', 'terminal-w1:p3', 1, '']);
   await expect(page.getByRole('main', { name: 'Terminal for relay' })).toBeVisible();
 
-  await page.getByRole('button', { name: 'Manage agent' }).click();
+  await chooseMore(page, 'Manage agent');
   await page.getByRole('button', { name: 'Stop Agent' }).click();
   await server(page, 0, { type: 'agent_update', pane_id: 'w1:p3', status: 'working', updated_at: 4 });
   await expect(page.getByRole('button', { name: 'Confirm Stop' })).toBeVisible();
@@ -341,7 +342,7 @@ test('directory picker in Workspace stays open across navigation and label focus
   await connectFedora(page, { capabilities: ['directory_browser', 'workspace_management'] });
   await server(page, 0, { type: 'workspaces', workspaces: [] });
   await server(page, 0, { type: 'agents', agents: [] });
-  await page.getByRole('button', { name: 'Manage workspaces' }).click();
+  await chooseMore(page, 'Manage workspaces');
   await expect.poll(async () => (await commands(page)).filter(command => command.type === 'list_directories').length).toBe(1);
   const initial = (await commands(page)).find(command => command.type === 'list_directories')!;
   await reply(page, initial, {

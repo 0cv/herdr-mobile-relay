@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { chooseMore, openMore } from '../support/journey-chrome';
 import { saveDeviceCredential } from '../support/journey-device';
 import { commands, connectFedora, handshake, reply, server, setAutoCommands, setConversationFixture, socketCount } from '../support/journey-relay';
 
@@ -24,15 +25,17 @@ test(`default agent view: fresh ${provider} openings use clean Conversation`, as
   ], total: 3 });
   await page.getByRole('button', { name: 'Open Default conversation on Fedora' }).click();
   await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Conversation', exact: true })).toHaveAttribute('aria-pressed', 'true');
-  await expect(page.getByRole('button', { name: 'Full history', exact: true })).toHaveAttribute('aria-pressed', 'false');
+  const more = await openMore(page);
+  await expect(more.getByRole('button', { name: 'Conversation', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await expect(more.getByRole('button', { name: 'Full history', exact: true })).toHaveAttribute('aria-pressed', 'false');
+  await more.getByRole('button', { name: 'Close', exact: true }).click();
   await expect(page.locator('summary').filter({ hasText: 'Default tool' })).toHaveCount(0);
   await expect(page.getByText('Show the final answer', { exact: true })).toBeVisible();
   await expect(page.locator('.conversation-markdown code')).toHaveText('const visibleAnswer = true;\n');
   expect((await commands(page)).filter(command => command.type === 'get_conversation_history')).toHaveLength(1);
-  await page.getByRole('button', { name: 'Full history', exact: true }).click();
+  await chooseMore(page, 'Full history');
   await expect(page.locator('summary').filter({ hasText: 'Default tool' })).toBeVisible();
-  await page.getByRole('button', { name: 'Conversation', exact: true }).click();
+  await chooseMore(page, 'Conversation');
   await expect(page.locator('summary').filter({ hasText: 'Default tool' })).toHaveCount(0);
   expect((await commands(page)).filter(command => command.type === 'get_conversation_history')).toHaveLength(1);
   await expect(page.getByLabel('Prompt', { exact: true })).toBeEnabled();
@@ -97,7 +100,7 @@ for (const attention of ['idle', 'question', 'approval', 'pending']) {
     await expect(page.getByText('Delivery is uncertain. In Terminal, tap Keyboard to check before sending.', { exact: true })).toBeVisible();
     await page.getByLabel('Prompt', { exact: true }).fill('editable draft after uncertainty');
     await expect(button('Send prompt')).toBeDisabled();
-    await expect(button('Attach files')).toBeDisabled();
+    await expect(button('Attach')).toBeDisabled();
     await page.getByLabel('Prompt', { exact: true }).press('Control+Enter');
     for (const name of ['Keyboard', 'Enter', 'Tab', 'Ctrl', 'Send text', 'I checked the terminal']) await expect(button(name)).toHaveCount(0);
     await expect(page.getByText('Current terminal context', { exact: true })).toHaveCount(0);
@@ -159,7 +162,7 @@ test('default agent view: Conversation opens directly and persists across reload
   });
   await page.getByRole('button', { name: 'Settings' }).click();
   const settingsViews = page.getByRole('group', { name: 'Default View' });
-  await settingsViews.getByRole('button', { name: 'Conversation' }).click();
+  await settingsViews.getByRole('button', { name: 'Conversation', exact: true }).click();
   expect(await page.evaluate(() => localStorage.getItem('herdr_default_agent_view'))).toBe('conversation');
   await page.getByRole('button', { name: 'Back' }).click();
   await setConversationFixture(page, {
@@ -242,7 +245,7 @@ test('pane view override: both directions, inheritance, and explicit equal value
   await setConversationFixture(page, { entries: [{ id: 'turn-1', timestamp: '2026-09-02T12:00:00Z', role: 'assistant', text: 'override answer' }], total: 1 });
 
   await page.getByRole('button', { name: 'Open Override A on Fedora' }).click();
-  await page.getByRole('button', { name: 'Manage agent' }).click();
+  await chooseMore(page, 'Manage agent');
   const manage = page.getByRole('dialog', { name: 'Manage Agent' });
   const viewSelect = manage.getByRole('combobox', { name: 'Default View' });
   await viewSelect.selectOption('terminal');
@@ -258,7 +261,7 @@ test('pane view override: both directions, inheritance, and explicit equal value
   await page.getByRole('button', { name: 'Back' }).click();
   await page.getByRole('button', { name: 'Open Override A on Fedora' }).click();
   await expect(page.getByRole('main', { name: 'Terminal for Override A' })).toBeVisible();
-  await page.getByRole('button', { name: 'Manage agent' }).click();
+  await chooseMore(page, 'Manage agent');
   await page.getByRole('dialog', { name: 'Manage Agent' }).getByRole('combobox', { name: 'Default View' }).selectOption('conversation');
   await page.getByRole('dialog', { name: 'Manage Agent' }).getByRole('button', { name: 'Close' }).click();
   await page.getByRole('button', { name: 'Back' }).click();
@@ -268,7 +271,7 @@ test('pane view override: both directions, inheritance, and explicit equal value
   await page.getByRole('button', { name: 'Back' }).click();
   await page.getByRole('button', { name: 'Open Override A on Fedora' }).click();
   await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
-  await page.getByRole('button', { name: 'Manage agent' }).click();
+  await chooseMore(page, 'Manage agent');
   await page.getByRole('dialog', { name: 'Manage Agent' }).getByRole('combobox', { name: 'Default View' }).selectOption('terminal');
   await page.getByRole('dialog', { name: 'Manage Agent' }).getByRole('button', { name: 'Close' }).click();
   await page.getByRole('button', { name: 'Back' }).click();
@@ -351,7 +354,7 @@ test('default agent view: stale automatic responses cannot redirect Settings', a
   await page.getByRole('button', { name: 'Open Stale opening on Fedora' }).click();
   await expect.poll(async () => (await commands(page)).find((command) => command.type === 'get_conversation_history')).toBeTruthy();
   const historyRequest = (await commands(page)).find((command) => command.type === 'get_conversation_history');
-  await page.getByRole('button', { name: 'Settings' }).click();
+  await chooseMore(page, /^Settings\b/);
   await expect(page.getByRole('heading', { name: 'Settings', exact: true }).last()).toBeVisible();
   await server(page, 0, {
     type: 'command_result',
@@ -451,7 +454,7 @@ test('pane view override: readers can change it while mutation actions stay disa
   });
   await page.getByRole('button', { name: 'Open Reader preference on Fedora' }).click();
   await expect(page.getByRole('main', { name: 'Terminal for Reader preference' })).toBeVisible();
-  await page.getByRole('button', { name: 'Manage agent' }).click();
+  await chooseMore(page, 'Manage agent');
   const dialog = page.getByRole('dialog', { name: 'Manage Agent' });
   await expect(dialog.getByRole('combobox', { name: 'Default View' })).toBeEnabled();
   await expect(dialog.getByRole('button', { name: 'Rename Tab' })).toBeDisabled();
@@ -463,6 +466,6 @@ test('pane view override: readers can change it while mutation actions stay disa
   await dialog.getByRole('button', { name: 'Close' }).click();
   await page.getByRole('button', { name: 'Conversation history' }).click();
   await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
-  await page.getByRole('button', { name: 'Manage agent' }).click();
+  await chooseMore(page, 'Manage agent');
   await expect(page.getByRole('dialog', { name: 'Manage Agent' }).getByRole('combobox', { name: 'Default View' })).toHaveValue('conversation');
 });

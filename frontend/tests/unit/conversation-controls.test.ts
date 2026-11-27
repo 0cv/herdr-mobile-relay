@@ -60,7 +60,7 @@ for (const status of ['working', 'blocked', 'idle']) it(`Conversation keeps ${st
   expect(screen.getByLabelText('Prompt')).toHaveValue('editable reply');
   if (status === 'blocked') {
     expect(button('Send prompt')).toBeDisabled();
-    expect(button('Attach files')).toBeDisabled();
+    expect(button('Attach')).toBeDisabled();
     await fireEvent.keyDown(screen.getByLabelText('Prompt'), { key: 'Enter', ctrlKey: true });
     expect(relayStore.sendToAgent).not.toHaveBeenCalled();
   } else {
@@ -75,7 +75,8 @@ it('keeps genuine assistant and tool code blocks, not raw terminal output', asyn
   await view.rerender({ frame: frame() });
   expect(await screen.findByText('const answer = 42;')).toBeVisible();
   expect(document.querySelector('.conversation-tools details')).toBeNull();
-  await fireEvent.click(button('Full history'));
+  view.component.setMode('activity');
+  await waitFor(() => expect(view.component.getTools().mode).toBe('activity'));
   document.querySelector('.conversation-tools details')!.setAttribute('open', '');
   expect(screen.getByText(/export const kept = true;/)).toBeVisible();
   uncluttered();
@@ -166,7 +167,7 @@ async function expectConversationFenced(attention: Attention) {
   await fireEvent.input(screen.getByLabelText('Prompt'), { target: { value: 'normal draft while fenced' } });
   expect(screen.getByLabelText('Prompt')).toBeEnabled();
   expect(button('Send prompt')).toBeDisabled();
-  expect(button('Attach files')).toBeDisabled();
+  expect(button('Attach')).toBeDisabled();
   await fireEvent.keyDown(screen.getByLabelText('Prompt'), { key: 'Enter', ctrlKey: true });
   if (attention === 'question') {
     expect(await screen.findByRole('radio', { name: 'North' })).toBeEnabled();

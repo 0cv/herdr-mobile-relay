@@ -247,7 +247,7 @@
       <p class:error role={error ? 'alert' : 'status'} aria-live="polite">{status}</p>
     {/if}
     {#if invitationLink}
-      <div class="invitation-link">
+      <div class="invitation-link" data-settings-pinned>
         <label class="field-label" for={`device-invitation-${relayId}`}>One-use invitation link</label>
         <input id={`device-invitation-${relayId}`} readonly value={invitationLink} />
         {#if invitationQr}

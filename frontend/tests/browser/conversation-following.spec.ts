@@ -1,4 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
+import { waitForLoadedConversation } from '../support/pi-live-browser.mjs';
+import { chooseMore, openConversationSearch } from '../support/journey-chrome';
 import { scrollConversationToBottom, showOlderConversationEntry } from '../support/journey-conversation';
 import { distanceFromBottom, saveDeviceCredential } from '../support/journey-device';
 import { boot, closeSocket, commands, composerTarget, connectFedora, fedora, handshake, server, setConversationFixture, socketCount } from '../support/journey-relay';
@@ -39,6 +41,37 @@ async function openFollowingConversation(page: Page, mode: 'conversation' | 'act
   };
   return { list, entry, deliver, latestInView };
 }
+
+async function openPiSnapshot(page: Page, provisional = [] as Record<string, unknown>[]) {
+  await connectFedora(page, { capabilities: ['conversation_history', 'conversation_activity'] });
+  await setConversationFixture(page, {
+    entries: [], total: 0, provisional, capabilities: { source: 'pi_events', active_branch: true },
+  });
+  await server(page, 0, { type: 'agents', agents: [
+    { ...composerTarget, status: 'working', agent: 'pi', project: 'Native live', conversation_history_available: true },
+  ] });
+  await page.getByRole('button', { name: 'Open Native live on Fedora' }).click();
+}
+
+test('qualifies a loaded empty Pi conversation before sending a prompt', async ({ page }) => {
+  await openPiSnapshot(page);
+  await waitForLoadedConversation(page, 'Native live');
+  await expect(page.getByText('No conversation messages have been recorded yet.')).toBeVisible();
+  await expect(page.getByText('Live events · provisional text', { exact: true })).toHaveCount(0);
+});
+
+test('searches a provisional-only Pi snapshot in Full history', async ({ page }) => {
+  await openPiSnapshot(page, [{ id: 'live:reply', role: 'assistant', text: 'Provisional reply', timestamp: '' }]);
+  await chooseMore(page, 'Full history');
+  const partial = page.getByText('Provisional reply', { exact: true });
+  await expect(partial).toBeVisible();
+  const search = await openConversationSearch(page);
+  await search.fill('missing');
+  await expect(partial).toBeHidden();
+  await expect(page.getByText('No loaded turns match “missing”.', { exact: true })).toBeVisible();
+  await search.fill('provisional');
+  await expect(partial).toBeVisible();
+});
 
 for (const interaction of ['untouched', 'touch', 'return-to-end'] as const) {
   test(`conversation follow-the-end streams growing partials after ${interaction}`, async ({ page }) => {
@@ -123,8 +156,8 @@ test('conversation follow-the-end leaves selection and restored reading position
   await list.dispatchEvent('pointerdown', { pointerType: 'touch' });
   await list.evaluate(element => { element.scrollTop -= 160; element.dispatchEvent(new Event('scroll')); });
   await list.dispatchEvent('pointerup', { pointerType: 'touch' });
-  await page.getByRole('button', { name: 'Conversation', exact: true }).click();
-  await page.getByRole('button', { name: 'Full history', exact: true }).click();
+  await chooseMore(page, 'Conversation');
+  await chooseMore(page, 'Full history');
   await list.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   const restored = await list.evaluate(element => element.scrollTop);
   await deliver([entry('live:selection', 'Output after view switch\n\n' + 'more output '.repeat(120))]);
@@ -193,9 +226,9 @@ test('live conversation deltas preserve local reading, selection, tool expansion
   await setConversationFixture(page, { entries: [...entries.slice(0, 99), toolEntry], total: 100, sourceRevision: 'live-source:1', capabilities, sequence: 0 });
   await page.getByRole('button', { name: 'Open Live reading on Fedora' }).click();
   await page.getByRole('button', { name: 'Conversation history' }).click();
-  await page.getByRole('button', { name: 'Full history' }).click();
+  await chooseMore(page, 'Full history');
   await expect(page.locator('.conversation-page > .conversation-source-status')).toHaveCount(0);
-  await expect(page.locator('.conversation-toolbar .conversation-branch-trust')).toHaveCount(0);
+  await expect(page.locator('.conversation-branch-trust')).toHaveCount(0);
   await expect(page.locator('[data-conversation-entry-id="pi:99"] > small')).toHaveCount(0);
   const list = page.locator('.conversation-list');
   const tool = list.locator('details').filter({ hasText: 'Fixture tool' });
@@ -236,7 +269,7 @@ test('live conversation deltas preserve local reading, selection, tool expansion
   await expect(progress.locator('summary')).toContainText('running');
   await progress.locator('summary').click();
   await expect(progress.getByText('progress one', { exact: true })).toBeVisible();
-  const liveSearch = page.getByRole('searchbox', { name: 'Search loaded conversation' });
+  const liveSearch = await openConversationSearch(page);
   for (const query of ['Progress tool', 'live-argument', 'progress one']) {
     await liveSearch.fill(query);
     await expect(progress).toBeVisible();
@@ -279,7 +312,7 @@ test('loaded windows retain tool expansion and table offsets without leaking sta
   await setConversationFixture(page, { entries: content.slice(40), total: 240, sourceRevision: 'state:1', hasMore: true, nextCursor: 'older-state', pages: { 'older-state': { entries: content.slice(0, 40) } } });
   await page.getByRole('button', { name: 'Open Window A on Fedora' }).click();
   await page.getByRole('button', { name: 'Conversation history' }).click();
-  await page.getByRole('button', { name: 'Full history' }).click();
+  await chooseMore(page, 'Full history');
   const list = page.locator('.conversation-list');
   await list.evaluate(element => { element.scrollTop = 0; element.dispatchEvent(new Event('scroll')); });
   await showOlderConversationEntry(page, 'pi:0');
@@ -318,11 +351,11 @@ for (const source of ['recorded_history', 'pi_events']) {
     await setConversationFixture(page, { entries: entries.slice(40), total: 240, sourceRevision: 'follow:1', capabilities, sequence: 0, hasMore: true, nextCursor: 'older-follow', pages: { 'older-follow': { entries: entries.slice(0, 40) } } });
     await page.getByRole('button', { name: 'Open Follow window on Fedora' }).click();
     await page.getByRole('button', { name: 'Conversation history' }).click();
-    await page.getByRole('button', { name: 'Full history', exact: true }).click();
+    await chooseMore(page, 'Full history');
     const list = page.locator('.conversation-list');
     await expect(list.getByText('Seed message 239', { exact: true })).toBeAttached();
     await expect(page.locator('.conversation-page > .conversation-source-status')).toHaveCount(0);
-    const branchTrust = page.locator('.conversation-toolbar .conversation-branch-trust');
+    const branchTrust = page.locator('.conversation-branch-trust');
     if (source === 'recorded_history') {
       await expect(branchTrust).toBeVisible();
       await expect(branchTrust).toContainText('Branch unverified');
@@ -408,11 +441,11 @@ for (const source of ['recorded_history', 'pi_events']) {
     const assertConversationLocked = async () => {
       await expect(composer).toBeDisabled();
       await expect(composer).toHaveAttribute('placeholder', 'Reader access is read only');
-      for (const name of ['Attach photos', 'Attach files', 'Send prompt']) await expect(page.getByRole('button', { name, exact: true })).toBeDisabled();
+      for (const name of ['Attach', 'Send prompt']) await expect(page.getByRole('button', { name, exact: true })).toBeDisabled();
     };
     let after = 0;
     for (const mode of ['Conversation', 'Full history']) {
-      await page.getByRole('button', { name: mode, exact: true }).click();
+      await chooseMore(page, mode);
       await assertConversationLocked();
       await expect(page.getByText('Readable seed', { exact: true })).toBeVisible();
       await expect.poll(async () => (await commands(page)).filter(command => command.type === 'get_conversation_updates' && command.after === after).length).toBeGreaterThan(0);
@@ -425,14 +458,14 @@ for (const source of ['recorded_history', 'pi_events']) {
         await expect(page.locator('[data-conversation-entry-id="live:reader"] > small')).toHaveText('Live · not saved yet');
       }
       await expect(page.locator('.conversation-page > .conversation-source-status')).toHaveCount(0);
-      if (source === 'recorded_history') await expect(page.locator('.conversation-toolbar .conversation-branch-trust')).toContainText('Branch unverified');
-      else await expect(page.locator('.conversation-toolbar .conversation-branch-trust')).toHaveCount(0);
+      if (source === 'recorded_history') await expect(page.locator('.conversation-branch-trust')).toContainText('Branch unverified');
+      else await expect(page.locator('.conversation-branch-trust')).toHaveCount(0);
       await assertConversationLocked();
     }
     await page.getByRole('button', { name: 'Terminal view', exact: true }).click();
     await expect(page.getByRole('status').filter({ hasText: 'Reader access is read only' })).toBeVisible();
     await expect(page.getByRole('combobox', { name: 'Prompt', exact: true })).toBeDisabled();
-    for (const name of ['Attach photos', 'Attach files', 'Enter', 'Tab', 'Ctrl', 'Shift', 'Arrow keys', 'Function keys']) await expect(page.getByRole('button', { name, exact: true })).toBeDisabled();
+    for (const name of ['Attach', 'Enter', 'Tab', 'Ctrl', 'Shift', 'Arrow keys', 'Function keys']) await expect(page.getByRole('button', { name, exact: true })).toBeDisabled();
     expect(await page.locator('.terminal-find button:enabled, .terminal-find select:enabled').count()).toBe(0);
     await page.getByRole('log').dispatchEvent('wheel', { deltaY: -200 });
     await page.setViewportSize({ width: 390, height: 740 });
@@ -452,7 +485,7 @@ for (const source of ['recorded_history', 'pi_events']) {
     await setConversationFixture(page, { entries, total: 120, sourceRevision: 'scroll:1', capabilities, sequence: 0 });
     await page.getByRole('button', { name: 'Open Scroll intent on Fedora' }).click();
     await page.getByRole('button', { name: 'Conversation history' }).click();
-    await page.getByRole('button', { name: 'Full history', exact: true }).click();
+    await chooseMore(page, 'Full history');
     const list = page.locator('.conversation-list');
 
     await expect(list.locator('article')).toHaveCount(24);
@@ -481,7 +514,7 @@ for (const source of ['recorded_history', 'pi_events']) {
     await setConversationFixture(page, { entries: entries.slice(80), total: 280, sourceRevision: 'scroll:1', capabilities, sequence: 0, hasMore: true, nextCursor: 'scroll-older', pages: { 'scroll-older': { entries: entries.slice(0, 80) } } });
     await page.getByRole('button', { name: 'Open Scroll window on Fedora' }).click();
     await page.getByRole('button', { name: 'Conversation history' }).click();
-    await page.getByRole('button', { name: 'Full history', exact: true }).click();
+    await chooseMore(page, 'Full history');
     const list = page.locator('.conversation-list');
 
     await expect.poll(() => distanceFromBottom(list)).toBeLessThan(2);

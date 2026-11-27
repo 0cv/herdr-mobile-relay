@@ -1,6 +1,41 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { expect, test } from '@playwright/test';
+import { chooseMore, moreTrigger, openMore } from '../support/journey-chrome';
 import { distanceFromBottom, saveDeviceCredential, setPageVisibility } from '../support/journey-device';
-import { commands, connectFedora, handshake, lastCommand, openAgent, openOmpPane, replyToPaneRead, server, setAutoCommands } from '../support/journey-relay';
+import { boot, commands, connectFedora, fedora, handshake, lastCommand, openAgent, openOmpPane, replyToPaneRead, server, setAutoCommands, socketCount } from '../support/journey-relay';
+
+
+for (const [width, height] of [[390, 844], [320, 740]]) {
+  for (const blocked of [true, false]) {
+    test(`measures Compact Terminal at ${width}×${height} with ${blocked ? 'a' : 'no'} blocked pane`, async ({ page, browser }) => {
+      await page.setViewportSize({ width, height });
+      await page.addInitScript(() => localStorage.setItem('herdr_terminal_font_size', 'compact'));
+      await connectFedora(page);
+      await server(page, 0, { type: 'agents', agents: [
+        { pane_id: 'w1:p1', status: 'working', project: 'Layout', agent: 'codex' },
+        ...(blocked ? [{ pane_id: 'w1:p2', status: 'blocked', attention_kind: 'approval', project: 'Waiting', agent: 'claude' }] : []),
+      ] });
+      await page.getByRole('button', { name: 'Open Layout on Fedora' }).click();
+      await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'plain', content: 'Sample output' });
+      const log = page.getByRole('log');
+      await expect(log).toContainText('Sample output');
+      await expect(page.getByRole('combobox', { name: 'Prompt' })).toHaveValue('');
+      await expect(page.locator('html')).toHaveAttribute('data-interface-size', 'compact');
+      expect(await page.evaluate(() => matchMedia('(pointer: coarse)').matches)).toBe(true);
+      await expect(page.locator('.app-header')).toHaveCSS('padding-top', '0px');
+      await expect(page.locator('.terminal-bottom')).toHaveCSS('padding-bottom', '0px');
+      const { build: build_id } = JSON.parse(readFileSync(resolve(process.env.HERDR_WEB_ROOT || 'dist', 'release.json'), 'utf8'));
+      await expect(page.getByRole('banner')).toHaveAttribute('data-app-build', build_id);
+      const measureOnly = process.env.HERDR_MEASURE_TERMINAL_ONLY === '1';
+      if (!measureOnly) await expect(page.getByRole('button', { name: /^More: Next blocked/ })).toHaveCount(Number(blocked));
+      const size = (await log.boundingBox())!.height;
+      const baseline = (blocked ? 654.1875 : 707.75) - (844 - height);
+      console.log(JSON.stringify({ browser: browser.browserType().name(), version: browser.version(), width, height, blocked, size, gain: size - baseline }));
+      if (!measureOnly) expect(size - baseline).toBeGreaterThanOrEqual(blocked ? 48 : 0);
+    });
+  }
+}
 
 test('keeps Cursor filtering text-only across status updates and restores prompts after selecting', async ({ page }) => {
   await openAgent(page, { pane_id: 'w1:p1', status: 'blocked', attention_kind: 'unknown', project: 'Cursor picker', agent: 'cursor' });
@@ -19,7 +54,7 @@ test('keeps Cursor filtering text-only across status updates and restores prompt
   });
   await expect(input).toBeEnabled();
   await expect(input).toHaveValue('grok');
-  await expect(page.getByRole('button', { name: 'Attach files' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Attach' })).toBeDisabled();
   await page.getByRole('button', { name: 'Send filter text' }).click();
   await expect.poll(mutations).toEqual([
     expect.objectContaining({ type: 'send_filter_text', text: 'grok' }),
@@ -47,7 +82,7 @@ test('keeps Cursor filtering text-only across status updates and restores prompt
   });
   const prompt = page.getByPlaceholder('Type a reply…');
   await expect(prompt).toBeEnabled();
-  await expect(page.getByRole('button', { name: 'Attach files' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Attach' })).toBeEnabled();
   await prompt.fill('Continue');
   await page.getByRole('button', { name: 'Send prompt', exact: true }).click();
   await expect.poll(mutations).toEqual([
@@ -85,7 +120,7 @@ test('centers plan keys and enables text only for the terminal editor', async ({
   const planInput = page.getByRole('combobox', { name: 'Prompt', exact: true });
   await expect(planInput).toBeEnabled();
   await expect(page.getByRole('button', { name: 'Send prompt', exact: true })).toBeDisabled();
-  await expect(page.getByRole('button', { name: 'Attach files' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Attach' })).toBeDisabled();
   const directions = await page.locator('.generic-menu-actions > div > button').evaluateAll((elements) =>
     elements.slice(0, 4).map((element) => ({
       key: element.querySelector('kbd')?.textContent,
@@ -263,11 +298,127 @@ test('resets drafts and terminal output when moving to another agent', async ({ 
   await expect(page.getByRole('log')).toContainText('private output from agent A');
   await page.getByRole('combobox', { name: 'Prompt' }).fill('draft intended only for A');
 
-  await page.getByRole('button', { name: 'Next blocked' }).click();
+  const before = (await commands(page)).length;
+  const more = moreTrigger(page);
+  await expect(more).toContainText('Next blocked');
+  await more.press('Enter');
+  const next = page.getByRole('button', { name: 'Next blocked: Blocked B on Fedora' });
+  await expect(next).toBeFocused();
+  for (const shortcut of ['Control+f', 'Meta+f']) {
+    await page.keyboard.press(shortcut);
+    await expect(page.getByPlaceholder('Find in terminal', { exact: true })).toHaveCount(0);
+    await expect(next).toBeFocused();
+  }
+  await next.press('Enter');
 
+  await expect(page.getByRole('banner').getByRole('heading', { name: 'Blocked B' })).toBeFocused();
   await expect(page.getByRole('main', { name: 'Terminal for Blocked B' })).toBeVisible();
+  expect((await commands(page)).slice(before).filter(({ type }) =>
+    ['acknowledge_pane', 'respond', 'answer_question', 'send_input', 'send_keys', 'submit_prompt'].includes(String(type)))).toEqual([]);
   await expect(page.getByRole('combobox', { name: 'Prompt' })).toHaveValue('');
   await expect(page.getByRole('log')).not.toContainText('private output from agent A');
+});
+
+test('binds the reader’s Next blocked action to the named generation', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await saveDeviceCredential(page, { id: 'credential-reader', deviceId: 'device-reader', secret: 'R'.repeat(43), role: 'reader' });
+  await handshake(page, 0);
+  const current = { pane_id: 'w1:p1', status: 'working', project: 'Current', agent: 'codex' };
+  const waiting = { pane_id: 'w1:p2', status: 'blocked', attention_kind: 'approval', agent: 'claude', options: ['Approve once', 'Deny'] };
+  const incomplete = { ...waiting, pane_id: 'w1:p3', project: 'Incomplete', terminal_id: '', updated_at: 3 };
+  const complete = { ...waiting, project: 'Complete', updated_at: 2 };
+  const inventory = (...others: Record<string, unknown>[]) => server(page, 0, { type: 'agents', agents: [current, ...others] });
+  await inventory(incomplete);
+  await page.getByRole('button', { name: 'Open Current on Fedora' }).click();
+  const more = await openMore(page);
+  await expect(more.getByRole('button', { name: /^Next blocked/ })).toHaveCount(0);
+  await more.getByRole('button', { name: 'Close', exact: true }).click();
+
+  await inventory(incomplete, complete);
+  await expect(moreTrigger(page)).toContainText('Next blocked');
+  await moreTrigger(page).press('Enter');
+  const original = more.getByRole('button', { name: 'Next blocked: Complete on Fedora' });
+  await expect(original).toBeFocused();
+  const currentUrl = page.url();
+  const replacement = { ...complete, project: 'Replacement', generation: 2, updated_at: 4 };
+  await inventory(incomplete, replacement);
+  await expect(original).toHaveCount(0);
+  await expect(more.getByRole('button', { name: /^Next blocked/ })).toHaveCount(0);
+  await expect(more.getByRole('button', { name: 'Search all agents' })).toBeFocused();
+  await expect(page).toHaveURL(currentUrl);
+  await page.keyboard.press('Escape');
+
+  await moreTrigger(page).press('Enter');
+  const replaced = more.getByRole('button', { name: 'Next blocked: Replacement on Fedora' });
+  await expect(replaced).toBeFocused();
+  for (let snapshot = 0; snapshot < 2; snapshot++) {
+    await inventory(incomplete, { ...replacement, status: 'working' });
+  }
+  await expect(replaced).toHaveCount(0);
+  await expect(more.getByRole('button', { name: 'Search all agents' })).toBeFocused();
+  await expect(page).toHaveURL(currentUrl);
+  await page.keyboard.press('Escape');
+
+  await inventory(incomplete, replacement);
+  await chooseMore(page, 'Next blocked: Replacement on Fedora');
+  await expect(page.getByRole('main', { name: 'Terminal for Replacement' })).toBeVisible();
+  await expect(page.getByRole('combobox', { name: 'Prompt' })).toBeDisabled();
+  expect((await commands(page)).filter(({ type }) => ['acknowledge_pane', 'respond', 'answer_question'].includes(String(type)))).toEqual([]);
+  await page.getByRole('button', { name: 'Back', exact: true }).click();
+  await expect(page.getByRole('main', { name: 'Agents' })).toBeVisible();
+});
+
+test('withdraws Next blocked when another relay’s inventory becomes stale', async ({ page }) => {
+  const mac = { id: 'mac', label: 'Mac', url: 'ws://127.0.0.1:8872', token: '' };
+  await boot(page, [fedora, mac]);
+  await expect.poll(() => socketCount(page)).toBe(2);
+  await handshake(page, 0);
+  await handshake(page, 1);
+  await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Current', agent: 'codex' }] });
+  await server(page, 1, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'blocked', attention_kind: 'approval', project: 'Waiting', agent: 'claude' }] });
+  await page.getByRole('button', { name: 'Open Current on Fedora' }).click();
+
+  await expect(moreTrigger(page)).toContainText('Next blocked');
+  const more = await openMore(page);
+  const jump = more.getByRole('button', { name: 'Next blocked: Waiting on Mac' });
+  await expect(jump).toBeFocused();
+  const url = page.url();
+
+  await server(page, 1, { type: 'inventory_status', state: 'error', stale: true });
+  await expect(jump).toHaveCount(0);
+  await expect(more.getByRole('button', { name: 'Search all agents', exact: true })).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(moreTrigger(page)).not.toContainText('Next blocked');
+  await expect(page).toHaveURL(url);
+  await expect(page.getByRole('main', { name: 'Terminal for Current' })).toBeVisible();
+
+  await server(page, 1, { type: 'inventory_status', state: 'ready', stale: false });
+  await expect(moreTrigger(page)).toContainText('Next blocked');
+});
+
+test('hides Next blocked during manual terminal input without removing the wide agent rail', async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 740 });
+  await connectFedora(page, { capabilities: ['attention_classification', 'manual_terminal_input'] });
+  await server(page, 0, { type: 'agents', agents: [
+    { pane_id: 'w1:p1', status: 'blocked', attention_kind: 'approval', project: 'Manual', agent: 'codex', options: ['Allow once', 'Deny'] },
+    { pane_id: 'w1:p2', status: 'blocked', attention_kind: 'approval', project: 'Waiting', agent: 'claude', options: ['Approve once', 'Deny'] },
+  ] });
+  await page.getByRole('button', { name: 'Open Manual on Fedora' }).click();
+  const banner = page.getByRole('banner');
+  await expect(banner.getByRole('button')).toHaveCount(4);
+  await expect(banner.getByRole('button', { name: 'Conversation history' })).toBeDisabled();
+  await expect(banner.getByRole('button', { name: 'Inspect workspace' })).toBeDisabled();
+  await expect(moreTrigger(page)).toContainText('Next blocked');
+  const rail = page.getByRole('complementary', { name: 'Agent navigation' });
+  await rail.getByRole('button', { name: 'Search all agents' }).click();
+  await expect(page.getByRole('searchbox', { name: 'Search agents and workspaces' })).toBeFocused();
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: 'Keyboard', exact: true }).click();
+  await expect(page.getByRole('textbox', { name: 'Terminal text' })).toBeVisible();
+  await expect(moreTrigger(page)).not.toContainText('Next blocked');
+  const more = await openMore(page);
+  await expect(more.getByRole('button', { name: /^Next blocked/ })).toHaveCount(0);
 });
 
 test('keeps Claude desktop prompt and status in the shared terminal output', async ({ page }) => {
@@ -403,7 +554,7 @@ test('wraps wide terminal output for a paired reader credential', async ({ page 
   await expect(dialog.getByRole('button', { name: 'Show file list' })).toBeVisible();
   await dialog.getByRole('button', { name: 'Close workspace inspector' }).click();
   await expect(readOnlyFeedback).toBeVisible();
-  for (const name of ['Send prompt', 'Attach files']) await expect(reader.getByRole('button', { name, exact: true })).toBeDisabled();
+  for (const name of ['Send prompt', 'Attach']) await expect(reader.getByRole('button', { name, exact: true })).toBeDisabled();
   await expect(reader.getByRole('combobox', { name: 'Prompt' })).toBeDisabled();
   const keyPad = reader.locator('.term-keys');
   await expect(keyPad.getByRole('button', { name: 'Enter', exact: true })).toBeDisabled();
@@ -539,7 +690,7 @@ test('finds and highlights matches across virtualized terminal output', async ({
     content: lines.join('\n'),
   });
 
-  await page.getByRole('button', { name: 'Find in terminal', exact: true }).click();
+  await chooseMore(page, 'Find in terminal');
   await expect(page.getByText('Type to find', { exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Previous match' }).locator('svg.find-action-symbol')).toHaveCount(1);
   await expect(page.getByRole('button', { name: 'Next match' }).locator('svg.find-action-symbol')).toHaveCount(1);
@@ -579,7 +730,7 @@ for (const availability of ['available', 'no-capability', 'no-directory'] as con
     if (availability === 'no-directory') return;
     if (availability === 'no-capability') await handshake(page, 0, { capabilities: ['workspace_inspection'] });
     await expect(path).toBeVisible();
-    await page.getByRole('button', { name: 'Find in terminal', exact: true }).click();
+    await chooseMore(page, 'Find in terminal');
     await page.getByRole('searchbox', { name: 'Find in terminal output' }).fill('main');
     await expect(terminal.locator('[data-file-path="src/main.ts"] mark.terminal-find-match.active')).toHaveText('main');
   });
@@ -699,7 +850,7 @@ test('fits and sends paging keys in the arrow menu at 320px', async ({ page }) =
 test('refreshes agents on return home and preserves shared terminal behavior', async ({ page }) => {
   await openAgent(page, { pane_id: 'w1:p1', status: 'working', project: 'Terminal app', agent: 'opencode', server_session_id: 'session-1', terminal_id: 'terminal-1', generation: 1 });
   await expect(page.getByRole('img', { name: 'Working' })).toBeVisible();
-  const attachFiles = page.getByRole('button', { name: 'Attach files' });
+  const attachFiles = page.getByRole('button', { name: 'Attach' });
   const arrowKeys = page.getByRole('button', { name: 'Arrow keys' });
   const enterKey = page.getByRole('button', { name: 'Enter' });
   const tabKey = page.getByRole('button', { name: 'Tab', exact: true });

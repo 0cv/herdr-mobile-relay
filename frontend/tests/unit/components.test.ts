@@ -594,8 +594,7 @@ describe('accessible Svelte interactions', () => {
     await view.rerender({ agent: updatedAgent });
     expect(screen.getByPlaceholderText('Type filter text…')).toBeEnabled();
     expect(input).toHaveValue('grok');
-    expect(screen.getByRole('button', { name: 'Attach files' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Attach photos' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Attach' })).toBeDisabled();
     await user.click(screen.getByRole('button', { name: 'Send filter text' }));
     expect(send).toHaveBeenCalledExactlyOnceWith(updatedAgent, {
       type: 'send_filter_text', text: 'grok', activity_label: 'Sent filter text',
@@ -618,8 +617,7 @@ describe('accessible Svelte interactions', () => {
       },
     });
     expect(screen.getByPlaceholderText('Type a reply…')).toBeEnabled();
-    expect(screen.getByRole('button', { name: 'Attach files' })).toBeEnabled();
-    expect(screen.getByRole('button', { name: 'Attach photos' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Attach' })).toBeEnabled();
     await user.type(input, '/mo');
     expect(screen.getByRole('listbox', { name: 'Slash commands' })).toBeVisible();
     await user.clear(input);
@@ -679,7 +677,7 @@ describe('accessible Svelte interactions', () => {
     try {
       const input = screen.getByPlaceholderText('Type a reply…');
       expect(input).toBeEnabled();
-      expect(screen.getByRole('button', { name: 'Attach files' })).toBeEnabled();
+      expect(screen.getByRole('button', { name: 'Attach' })).toBeEnabled();
       await user.type(input, '/mo');
       expect(screen.getByRole('listbox', { name: 'Slash commands' })).toBeVisible();
       await user.clear(input);
@@ -721,7 +719,7 @@ describe('accessible Svelte interactions', () => {
         clipboardData: { items: [{ kind: 'file', type: image.type, getAsFile: () => image }] },
       });
       await user.type(input, 'grok');
-      expect(screen.getByRole('button', { name: 'Attach photos' })).toBeDisabled();
+      expect(screen.getByRole('button', { name: 'Attach' })).toBeDisabled();
       await pasteImage();
       for (const fileInput of view.container.querySelectorAll('input[type="file"]')) {
         await fireEvent.change(fileInput, { target: { files: [image] } });
@@ -733,7 +731,7 @@ describe('accessible Svelte interactions', () => {
       expect(input).toHaveValue('grok fast');
 
       await view.rerender({ agent: { ...agent, status: 'done' }, frame: ready });
-      expect(screen.getByRole('button', { name: 'Attach photos' })).toBeEnabled();
+      expect(screen.getByRole('button', { name: 'Attach' })).toBeEnabled();
       await pasteImage();
       await waitFor(() => expect(screen.getByRole('button', { name: 'Restart interrupted files' })).toBeEnabled());
       expect(createUpload).toHaveBeenCalledOnce();
@@ -798,7 +796,7 @@ describe('accessible Svelte interactions', () => {
     expect(screen.getByLabelText('Prompt')).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Send prompt' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Keyboard' })).toBeVisible();
-    expect(screen.getByRole('button', { name: 'Attach files' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Attach' })).toBeDisabled();
     choiceView.unmount();
 
     const unknownView = render(TerminalView, {
@@ -813,7 +811,7 @@ describe('accessible Svelte interactions', () => {
     });
     const terminalInput = screen.getByLabelText('Prompt');
     expect(terminalInput).toBeEnabled();
-    expect(screen.getByRole('button', { name: 'Attach files' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Attach' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Enter' })).toBeEnabled();
     expect(screen.queryByText('must not render')).not.toBeInTheDocument();
     await user.type(terminalInput, 'custom weekend');

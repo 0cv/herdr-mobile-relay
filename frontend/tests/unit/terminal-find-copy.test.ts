@@ -142,9 +142,10 @@ describe('find', () => {
     view.unmount();
   });
 
-  it('ignores the shortcut during question mode', async () => {
+  it('ignores the shortcut and direct Find action during question mode', async () => {
     const view = mountView({ content: FIND_CONTENT, target: questionAgent });
     expect(await pressFind({ ctrlKey: true })).toBe(true);
+    view.component.openFind();
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(findInput()).not.toBeInTheDocument();
     view.unmount();

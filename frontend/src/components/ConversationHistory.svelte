@@ -30,6 +30,7 @@
   import { CommandError } from '$lib/command-error';
   import { fileLinkContext } from '$lib/file-links';
   import { relayStore } from '$lib/store';
+  import { securityState } from '$lib/security';
   import { stripAnsi } from '$lib/terminal';
   import { terminalTextInputMode } from '$lib/terminal-menu';
   import type { Agent, ConversationCapabilities, ConversationEntry, ConversationPage, TerminalFrame } from '$lib/types';
@@ -40,8 +41,9 @@
     frame,
     responding = new Set<string>(),
     onInitialPage,
+    onSearchClose,
     loadSyntax,
-  }: { agent: Agent; readOnly?: boolean; frame?: TerminalFrame; responding?: Set<string>; onInitialPage?: (page: ConversationPage) => void; loadSyntax?: LoadSyntax } = $props();
+  }: { agent: Agent; readOnly?: boolean; frame?: TerminalFrame; responding?: Set<string>; onInitialPage?: (page: ConversationPage) => void; onSearchClose?: () => void; loadSyntax?: LoadSyntax } = $props();
 
   const connections = relayStore.connections;
   const fileLinks = $derived(fileLinkContext(agent, $connections.get(agent.relay_id)));
@@ -92,6 +94,8 @@
   const mountedEntryLimit = HISTORY_WIRE_PAGE_SIZE;
   let sourceChangedNotice = $state('');
   let query = $state('');
+  let searchOpen = $state(false);
+  let searchField = $state<HTMLInputElement>();
   let mode = $state<'conversation' | 'activity'>('conversation');
   const showDiffs = $derived(mode === 'activity' && $connections.get(agent.relay_id)?.capabilities.includes('conversation_edit_diffs') === true);
   let listElement = $state<HTMLElement>(null!);
@@ -150,6 +154,7 @@
     const needle = query.trim().toLocaleLowerCase();
     return needle ? liveEntries.filter(entry => matchesSearch(entry, needle)) : liveEntries;
   });
+  const canSearch = $derived(modeEntries.length > 0 || (mode === 'activity' && liveEntries.length > 0));
   const filteredEntries = $derived([...matchingRecordedEntries, ...matchingLiveEntries]);
   const renderStart = $derived.by(() => {
     if (filteredEntries.length <= mountedEntryLimit) return 0;
@@ -584,7 +589,39 @@
     }
   }
 
-  function setMode(next: 'conversation' | 'activity') {
+  export function getTools() {
+    return { mode, canSearch };
+  }
+
+  export async function openSearch() {
+    searchOpen = true;
+    await tick();
+    searchField?.focus();
+  }
+
+  function clearSearch() {
+    searchOpen = false;
+    query = '';
+  }
+
+  $effect(() => {
+    void paneStateIdentity;
+    void $securityState.locked;
+    clearSearch();
+  });
+
+  function closeSearch() {
+    clearSearch();
+    onSearchClose?.();
+  }
+
+  function dismissSearch(event: KeyboardEvent) {
+    if (!searchOpen || event.key !== 'Escape' || event.defaultPrevented || document.querySelector('dialog[open]')) return;
+    event.preventDefault();
+    closeSearch();
+  }
+
+  export function setMode(next: 'conversation' | 'activity') {
     windowAdvancePending = true;
     renderAnchor = null;
     mode = next;
@@ -606,25 +643,17 @@
 
 </script>
 
+<svelte:window onkeydown={dismissSearch} />
+
 <main class="conversation-page" aria-labelledby="conversation-title">
-  <header class="conversation-toolbar">
-    <div>
-      <h2 id="conversation-title">Conversation</h2>
-      {#if branchUnverified}<small class="hint conversation-branch-trust">Branch unverified<span class="sr-only">: saved history may not reflect the current branch.</span></small>{/if}
+  <h2 class="sr-only" id="conversation-title">Conversation</h2>
+  {#if branchUnverified}<small class="hint conversation-branch-trust">Branch unverified<span class="sr-only">: saved history may not reflect the current branch.</span></small>{/if}
+  {#if searchOpen}
+    <div class="conversation-search">
+      <input bind:this={searchField} type="search" bind:value={query} autocomplete="off" spellcheck="false" aria-label="Search loaded conversation" placeholder="Search loaded conversation" />
+      <Button variant="secondary" size="sm" onclick={closeSearch} aria-label="Close conversation search">Close</Button>
     </div>
-    <div class="conversation-toolbar-actions">
-      <div class="conversation-mode" role="group" aria-label="Conversation display">
-        <button class:active={mode === 'conversation'} type="button" aria-pressed={mode === 'conversation'} title="Show user prompts, agent questions and the latest agent answer from each exchange" onclick={() => setMode('conversation')}>Conversation</button>
-        <button class:active={mode === 'activity'} type="button" aria-pressed={mode === 'activity'} title="Show every recorded agent message and tool call" onclick={() => setMode('activity')}>Full history</button>
-      </div>
-      {#if entries.length}
-        <label class="conversation-search">
-          <span class="sr-only">Search loaded conversation</span>
-          <input type="search" bind:value={query} placeholder="Search" />
-        </label>
-      {/if}
-    </div>
-  </header>
+  {/if}
   {#if liveStatusText}<p class="conversation-source-status" role="status">{liveStatusText}</p>{/if}
   {#if readOnly}
     <p class="conversation-warning" role="status">Reader access is read only. Use a controller device to reply.</p>
@@ -686,7 +715,7 @@
     {#if emptyHistoryText}
       <div class="empty-state" role="status">{emptyHistoryText}</div>
     {/if}
-    {#if query.trim() && !visibleEntries.length && entries.length}
+    {#if query.trim() && !visibleEntries.length && canSearch}
       <div class="empty-state" role="status">No loaded turns match “{query.trim()}”.</div>
     {/if}
     <section

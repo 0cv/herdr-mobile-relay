@@ -63,7 +63,7 @@ it.each([
   await vi.advanceTimersByTimeAsync(0);
   expect(screen.getByText('Recorded answer')).toBeVisible();
   expect(document.querySelector('.conversation-page > .conversation-source-status')).toBeNull();
-  const trust = document.querySelector('.conversation-toolbar .conversation-branch-trust');
+  const trust = document.querySelector('.conversation-branch-trust');
   if (source === 'recorded_history' && capabilities.active_branch !== true) {
     expect(trust).toBeVisible();
     expect(trust).toHaveTextContent('Branch unverified');

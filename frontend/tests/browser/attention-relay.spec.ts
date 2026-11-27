@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { chooseMore, openMore } from '../support/journey-chrome';
 import { readFile, writeFile } from 'node:fs/promises';
 import { control, readerResultPane, withReader } from './attention-relay-fixture';
 
@@ -303,8 +304,9 @@ test('reader Conversation and Terminal leave a new result for other devices', as
     await expect(reader.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
     await expect(reader.getByText('history question')).toBeVisible();
     await expect(reader.getByText('history answer')).toBeVisible();
-    await reader.getByRole('button', { name: 'Full history' }).click();
-    await expect(reader.getByRole('button', { name: 'Full history' })).toHaveAttribute('aria-pressed', 'true');
+    await chooseMore(reader, 'Full history');
+    await expect((await openMore(reader)).getByRole('button', { name: 'Full history' })).toHaveAttribute('aria-pressed', 'true');
+    await reader.locator('#app-more').getByRole('button', { name: 'Close', exact: true }).click();
     await expect.poll(() => paneReads('recent_unwrapped', 30)).toBeGreaterThan(before);
     await expectFreshResult();
 

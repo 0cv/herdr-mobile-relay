@@ -1,10 +1,92 @@
 import { expect, test, type Locator, type Page } from '@playwright/test';
+import { chooseMore, moreTrigger, openMore } from '../support/journey-chrome';
 import { saveDeviceCredential } from '../support/journey-device';
 import { createProjectInventory } from '../../src/demo/scene';
-import { boot, commands, connectFedora, fedora, handshake, server, socketCount } from '../support/journey-relay';
+import { boot, closeSocket, commands, connectFedora, fedora, handshake, server, socketCount } from '../support/journey-relay';
 
 const themes = ['dark', 'light', 'nord', 'solarized', 'rose', 'latte'];
-const useTheme = (page: Page, theme: string) => page.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
+const useTheme = (page: Page, theme: string) => page.evaluate((value) => {
+  document.documentElement.dataset.theme = value;
+  void document.body.offsetWidth;
+  for (const animation of document.getAnimations()) {
+    if (animation instanceof CSSTransition) animation.finish();
+  }
+}, theme);
+
+test('keeps Home chrome named and reachable at 320px in every theme', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 740 });
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.addInitScript(() => localStorage.setItem('herdr_terminal_font_size', 'compact'));
+  await connectFedora(page);
+  const header = page.getByRole('banner');
+  const more = moreTrigger(page);
+  const dialog = page.getByRole('dialog', { name: 'More', exact: true });
+  await expect(header.getByRole('button')).toHaveCount(3);
+  await expect(header.getByRole('button', { name: 'Start agent' })).toBeVisible();
+  await expect(header.getByRole('button', { name: 'Settings' })).toBeVisible();
+  await expect(header.getByText('1/1 relays')).toBeVisible();
+  for (const button of await header.getByRole('button').all()) {
+    const box = (await button.boundingBox())!;
+    expect(Math.min(box.width, box.height)).toBeGreaterThanOrEqual(44);
+  }
+  for (const theme of themes) {
+    await useTheme(page, theme);
+    await expectTextContrast(more, `${theme}: More trigger`);
+    await more.press('Enter');
+    await expect(dialog.getByRole('button')).toHaveText(['Search all agents', 'Manage workspaces', 'Activity history', 'Close']);
+    await expectTextContrast(dialog.getByRole('heading'), `${theme}: More title`);
+    await page.keyboard.press('Tab');
+    const focused = dialog.getByRole('button', { name: 'Manage workspaces' });
+    await expect(focused).toBeFocused();
+    await expect(focused).toHaveCSS('outline-style', 'solid');
+    const { contrast } = await surfaceContrast(focused, true, 'outlineColor');
+    expect.soft(contrast, `${theme}: More focus outline against dialog`).toBeGreaterThanOrEqual(3);
+    for (const button of await dialog.getByRole('button').all()) {
+      await expectTextContrast(button, `${theme}: ${await button.textContent()}`);
+      const box = (await button.boundingBox())!;
+      expect(Math.min(box.width, box.height)).toBeGreaterThanOrEqual(44);
+    }
+    await page.keyboard.press('Escape');
+    await expect(more).toBeFocused();
+    expect(await more.evaluate(button => getComputedStyle(button).outlineStyle)).toBe('solid');
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(320);
+  }
+  await handshake(page, 0, { capabilities: ['self_update'] });
+  await expect(header.getByRole('button')).toHaveCount(2);
+  await chooseMore(page, 'Activity history');
+  await expect(header.getByRole('heading', { name: 'Activity' })).toBeFocused();
+  await expect(header.getByRole('button')).toHaveCount(2);
+  await page.goBack();
+  await expect(header.getByRole('button', { name: 'Settings' })).toBeVisible();
+  await page.goForward();
+  await expect(header.getByRole('heading', { name: 'Activity' })).toBeVisible();
+});
+
+test('hands keyboard focus to Settings and Start Agent from Home', async ({ page }) => {
+  await connectFedora(page);
+  const header = page.getByRole('banner');
+  for (const [button, heading] of [['Settings', 'Settings'], ['Start agent', 'Start Agent']]) {
+    await header.getByRole('button', { name: button, exact: true }).press('Enter');
+    await expect(header.getByRole('heading', { name: heading, exact: true })).toBeFocused();
+    await header.getByRole('button', { name: 'Back', exact: true }).press('Enter');
+  }
+});
+
+test('keeps More focused when the launch relay disconnects', async ({ page }) => {
+  await connectFedora(page);
+  await chooseMore(page, 'Activity history');
+  await moreTrigger(page).press('Enter');
+  const more = page.getByRole('dialog', { name: 'More', exact: true });
+  const start = more.getByRole('button', { name: 'Start agent', exact: true });
+  await start.focus();
+  await expect(start).toBeFocused();
+
+  await closeSocket(page, 0);
+  await expect(start).toHaveCount(0);
+  await expect(more.getByRole('button', { name: 'Search all agents', exact: true })).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(moreTrigger(page)).toBeFocused();
+});
 
 test('manages workspace modals, grouped worktrees, and drag ordering', async ({ page }) => {
   await page.clock.install();
@@ -39,7 +121,7 @@ test('manages workspace modals, grouped worktrees, and drag ordering', async ({ 
   await expect(page.locator('.workspace-card').filter({ hasText: 'Shell Only' }).locator('summary .path-row'))
     .toHaveText('~/shell-only');
 
-  await page.getByRole('button', { name: 'Manage workspaces' }).click();
+  await chooseMore(page, 'Manage workspaces');
   await expect(page.locator('#workspace-manager-title')).toBeVisible();
   await expect.poll(async () => (await commands(page)).some((command) => command.type === 'list_directories')).toBe(true);
   const workspaceDirectory = (await commands(page)).find((command) => command.type === 'list_directories')!;
@@ -109,7 +191,7 @@ test('manages workspace modals, grouped worktrees, and drag ordering', async ({ 
 
   await page.getByRole('button', { name: 'Back' }).click();
   await expect(page.locator('.workspace-worktree-card')).toContainText('fix/one');
-  await page.getByRole('button', { name: 'Manage workspaces' }).click();
+  await chooseMore(page, 'Manage workspaces');
   await expect(page.locator('#workspace-manager-title')).toBeVisible();
 
   const projectSlot = page.locator('.workspace-management-slot').first();
@@ -291,7 +373,7 @@ test('keeps activity cards inside the page and confirms permanent deletion', asy
     ],
   });
 
-  await page.getByRole('button', { name: 'Activity history' }).click();
+  await chooseMore(page, 'Activity history');
   const activity = page.getByRole('button', { name: /codex completed/ });
   await expect(page.getByRole('heading', { name: 'Last 24 hours' })).toBeVisible();
   await expect(page.locator('.activity-summary-metrics > div').filter({ hasText: 'Completed' })).toContainText('1');
@@ -345,7 +427,7 @@ test('sizes captured activity text with terminal typography', async ({ page }) =
     }],
   });
 
-  await page.getByRole('button', { name: 'Activity history' }).click();
+  await chooseMore(page, 'Activity history');
   await page.getByRole('button', { name: /omp completed/ }).click();
   const extract = page.getByRole('region', { name: 'Captured response' }).locator('pre');
   await expect(extract).toContainText('Response line 16');
@@ -489,7 +571,7 @@ test('keeps a stale result when a controller tries to open it from jump', async 
   const row = page.getByRole('button', { name: 'Open fix-bug on Fedora' });
   await expect(row).toBeDisabled();
 
-  await page.getByRole('button', { name: 'Search all agents' }).click();
+  await chooseMore(page, 'Search all agents');
   await page.getByRole('dialog', { name: 'Jump to agent' }).getByRole('button', { name: /New result.*fix-bug/ }).click();
   await expect(page.getByRole('main', { name: 'Agent inventory unavailable' })).toBeVisible();
   await page.getByRole('button', { name: 'Back to agents' }).click();
@@ -614,7 +696,7 @@ test('a reader finds the exact pane path in jump and sends no acknowledgement fr
   await server(page, 0, { type: 'workspaces', workspaces: [project] });
   await server(page, 0, { type: 'agents', agents: [fix] });
   await expect(page.locator('.workspace-card summary .path-row')).toHaveText('/work/project');
-  await page.getByRole('button', { name: 'Search all agents' }).click();
+  await chooseMore(page, 'Search all agents');
   const jump = page.getByRole('dialog', { name: 'Jump to agent' });
   const search = jump.getByRole('searchbox');
   await search.fill('fix-bug');
@@ -637,7 +719,7 @@ test('a reader finds the exact pane path in jump and sends no acknowledgement fr
     id: 'result', kind: 'finished', status: 'completed', summary: 'Fixture checks completed',
     pane_id: fix.pane_id, timestamp: Date.now(),
   }] });
-  await page.getByRole('button', { name: 'Activity history' }).click();
+  await chooseMore(page, 'Activity history');
   await page.getByRole('button', { name: /Fixture checks completed/ }).click();
   await page.getByRole('button', { name: /Go to thread/ }).click();
   await expect(page.getByRole('main', { name: 'Terminal for project' })).toBeVisible();
@@ -663,8 +745,10 @@ async function markGeometry(mark: Locator) {
   });
 }
 
-async function surfaceContrast(target: Locator, includeAncestors = false) {
-  return target.evaluate((element, includeAncestors) => {
+async function surfaceContrast(
+  target: Locator, includeAncestors = false, paint: 'color' | '::placeholder' | 'outlineColor' | 'borderTopColor' | 'backgroundColor' = 'color',
+) {
+  return target.evaluate((element, { includeAncestors, paint }) => {
     const canvas = document.createElement('canvas');
     const context = canvas.getContext('2d')!;
     const fill = (color: string) => {
@@ -679,26 +763,119 @@ async function surfaceContrast(target: Locator, includeAncestors = false) {
     };
     const backgrounds = [];
     let undimmed = true;
-    for (let surface: Element | null = element; surface; surface = includeAncestors ? surface.parentElement : null) {
+    const indicator = paint !== 'color' && paint !== '::placeholder';
+    for (let surface = indicator ? element.parentElement : element; surface; surface = includeAncestors ? surface.parentElement : null) {
       const style = getComputedStyle(surface);
       backgrounds.push(style.backgroundColor);
       undimmed &&= style.opacity === '1';
     }
     backgrounds.reverse().forEach(fill);
     const backing = luminance();
-    fill(getComputedStyle(element).color);
+    const pseudo = paint === '::placeholder' ? paint : null;
+    const inkStyle = getComputedStyle(element, pseudo);
+    if (pseudo) context.globalAlpha = Number(inkStyle.opacity);
+    fill(inkStyle[indicator ? paint : 'color']);
     const ink = luminance();
     const [dark, light] = [ink.light, backing.light].sort((a, b) => a - b);
     return { contrast: (light + .05) / (dark + .05), opaque: backing.a === 255, undimmed };
-  }, includeAncestors);
+  }, { includeAncestors, paint });
 }
 
-async function expectTextContrast(text: Locator, label: string) {
+async function expectTextContrast(text: Locator, label: string, pseudo?: '::placeholder') {
   await expect(text).toBeVisible();
-  const { contrast, opaque, undimmed } = await surfaceContrast(text, true);
+  const { contrast, opaque, undimmed } = await surfaceContrast(text, true, pseudo);
   expect({ opaque, undimmed }, `${label} is undimmed on an opaque backing`).toEqual({ opaque: true, undimmed: true });
   expect.soft(contrast, `${label} text contrast`).toBeGreaterThanOrEqual(4.5);
 }
+
+test('keeps the new Terminal, Conversation and Settings labels legible in six themes', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.addInitScript(() => {
+    localStorage.setItem('herdr_default_agent_view', 'terminal');
+    localStorage.setItem('herdr-conversation-view', 'conversation');
+  });
+  await connectFedora(page, { capabilities: ['agent_launch', 'attention_classification', 'conversation_history'] });
+  await server(page, 0, { type: 'agents', agents: [
+    { pane_id: 'w1:p1', project: 'Reading', agent: 'codex', status: 'working', conversation_history_available: true },
+    { pane_id: 'w1:p2', project: 'Waiting', agent: 'codex', status: 'blocked', attention_kind: 'approval' },
+  ] });
+  await page.getByRole('button', { name: 'Open Reading on Fedora' }).click();
+  await expect(moreTrigger(page)).toContainText('Next blocked');
+
+  const badge = page.getByRole('banner').locator('.nav-update-badge');
+  await expect(badge).toBeVisible();
+  const more = await openMore(page);
+  await expect(more.getByRole('button', { name: 'Next blocked: Waiting on Fedora' })).toBeVisible();
+  for (const theme of themes) {
+    await useTheme(page, theme);
+    const { contrast } = await surfaceContrast(badge, true, 'backgroundColor');
+    expect.soft(contrast, `${theme}: update badge against header`).toBeGreaterThanOrEqual(3);
+    for (const button of await more.getByRole('button').all()) {
+      await expectTextContrast(button, `${theme}: ${await button.textContent()}`);
+    }
+  }
+  await page.keyboard.press('Escape');
+
+  await page.getByRole('button', { name: 'Attach', exact: true }).press('Enter');
+  const attach = page.getByRole('dialog', { name: 'Attach', exact: true });
+  for (const theme of themes) {
+    await useTheme(page, theme);
+    await expectTextContrast(attach.getByRole('heading'), `${theme}: Attach title`);
+    for (const name of ['Attach photos', 'Attach files', 'Close']) {
+      await expectTextContrast(attach.getByRole('button', { name, exact: true }), `${theme}: ${name}`);
+    }
+  }
+  await page.keyboard.press('Escape');
+
+  const header = page.getByRole('banner');
+  await header.getByRole('button', { name: 'Conversation history' }).click();
+  await expect(page.getByText('latest retained question')).toBeVisible();
+  for (const mode of ['Conversation', 'Full history']) {
+    await chooseMore(page, mode);
+    const subtitle = header.getByText(new RegExp(`^${mode} ·`));
+    for (const theme of themes) {
+      await useTheme(page, theme);
+      await expectTextContrast(subtitle, `${theme}: ${mode} subtitle`);
+    }
+  }
+  await openMore(page);
+  const searchAction = more.getByRole('button', { name: 'Search loaded conversation', exact: true });
+  await expect(searchAction).toBeVisible();
+  const selectedMode = more.getByRole('button', { name: 'Full history', exact: true, pressed: true });
+  for (const theme of themes) {
+    await useTheme(page, theme);
+    const { contrast } = await surfaceContrast(selectedMode, true, 'borderTopColor');
+    expect.soft(contrast, `${theme}: selected mode border against dialog`).toBeGreaterThanOrEqual(3);
+    for (const button of await more.getByRole('button').all()) {
+      await expectTextContrast(button, `${theme}: ${await button.textContent()}`);
+    }
+  }
+  await searchAction.click();
+  const search = page.getByRole('searchbox', { name: 'Search loaded conversation' });
+  await expect(search).toHaveAttribute('placeholder', 'Search loaded conversation');
+  const close = page.getByRole('button', { name: 'Close conversation search' });
+  for (const theme of themes) {
+    await useTheme(page, theme);
+    await expectTextContrast(search, `${theme}: conversation search placeholder`, '::placeholder');
+    await expectTextContrast(close, `${theme}: Close conversation search`);
+  }
+  await close.click();
+
+  await chooseMore(page, /^Settings,/);
+  const settingsSearch = page.getByRole('searchbox', { name: 'Search settings' });
+  const searchLabel = page.getByText('Search settings', { exact: true });
+  const notice = page.getByText(/Update notice/);
+  for (const theme of themes) {
+    await useTheme(page, theme);
+    await expectTextContrast(searchLabel, `${theme}: Search settings`);
+    await expectTextContrast(notice, `${theme}: Update notice`);
+  }
+  await settingsSearch.fill('no matching setting');
+  for (const theme of themes) {
+    await useTheme(page, theme);
+    await expectTextContrast(page.getByText('No settings match.', { exact: true }), `${theme}: No settings match`);
+  }
+});
 
 test('keeps a truncated terminal hyperlink out of Home and its accessible description', async ({ page }) => {
   await connectFedora(page, { capabilities: ['attention_classification'] });
@@ -777,7 +954,7 @@ test('keeps static 12px marks, activity and counts legible in six themes at 320p
   expect(geometries[0][4]).toMatchObject({ border: '2px', corner: '50%' });
   expect(geometries[0][5]).toMatchObject({ top: '5px', clip: 'none' });
 
-  await page.getByRole('button', { name: 'Search all agents' }).click();
+  await chooseMore(page, 'Search all agents');
   const jump = page.getByRole('dialog', { name: 'Jump to agent' });
   await expect(jump.getByRole('button', { name: /New result.*result/ }).locator('.status-check')).toBeVisible();
   await expect(jump.getByRole('button', { name: /Idle.*idle/ }).locator('.status-ring')).toBeVisible();
@@ -790,6 +967,7 @@ test('keeps static 12px marks, activity and counts legible in six themes at 320p
     await page.setViewportSize({ width: index % 2 ? 1024 : 900, height: 820 });
     await useTheme(page, theme);
     await expect(rail).toBeVisible();
+    await expectTextContrast(moreTrigger(page).getByText('Next blocked', { exact: true }), `${theme}: Next blocked`);
     const active = rail.getByRole('button', { name: /Working.*work/ });
     await expect(active).toHaveAttribute('aria-current', 'page');
     const selectedMark = active.locator('.status-chevron');
@@ -830,7 +1008,7 @@ test('uses a workspace agent rail in a tablet terminal', async ({ page }) => {
     ],
   });
 
-  await page.getByRole('button', { name: 'Search all agents' }).click();
+  await chooseMore(page, 'Search all agents');
   const jump = page.getByRole('dialog', { name: 'Jump to agent' });
   await jump.getByRole('searchbox', { name: 'Search agents and workspaces' }).fill('Mobile workspace');
   await jump.getByRole('button', { name: /Mobile workspace/ }).click();
